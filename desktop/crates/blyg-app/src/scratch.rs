@@ -324,7 +324,7 @@ mod tests {
         let id = open_scratch(&view, &fake, "Kettle whistles in B flat", cx);
         let before = fake.items().len();
 
-        cx.simulate_keystrokes("cmd-d");
+        cx.simulate_keystrokes(&crate::keymap::keys("cmd-d"));
         cx.run_until_parked();
         let it = fake.item(&id).expect("same id");
         assert_eq!(it.status, Status::Draft);
@@ -337,7 +337,7 @@ mod tests {
         });
 
         // Again: nothing to do, and no demotion.
-        cx.simulate_keystrokes("cmd-d");
+        cx.simulate_keystrokes(&crate::keymap::keys("cmd-d"));
         cx.run_until_parked();
         assert_eq!(toast(&view, cx), "Already a draft");
         assert_eq!(fake.item(&id).unwrap().status, Status::Draft);
@@ -349,7 +349,7 @@ mod tests {
         // Too long for a fragment: promotion makes it a thread, so no shake.
         let long = format!("Tide tables. {}", "Low water at noon. ".repeat(60));
         let id = open_scratch(&view, &fake, &long, cx);
-        cx.simulate_keystrokes("cmd-enter");
+        cx.simulate_keystrokes(&crate::keymap::keys("cmd-enter"));
         cx.run_until_parked();
         view.read_with(cx, |v, _| {
             assert!(matches!(v.sheet, Some(Sheet::Publish { .. })));
@@ -443,7 +443,7 @@ mod tests {
         let (view, fake, cx) = setup(cx, CONNECTED);
         let id = open_scratch(&view, &fake, "Low tide mudflats at noon", cx);
         paste(&view, cx);
-        cx.simulate_keystrokes("cmd-d");
+        cx.simulate_keystrokes(&crate::keymap::keys("cmd-d"));
         settle(cx);
 
         assert_eq!(fake.upload_count(), 1);
@@ -468,7 +468,7 @@ mod tests {
         let before = editor_text(&view, cx);
         fake.set_fail_uploads(true);
 
-        cx.simulate_keystrokes("cmd-d");
+        cx.simulate_keystrokes(&crate::keymap::keys("cmd-d"));
         settle(cx);
         let it = fake.item(&id).unwrap();
         assert_eq!(it.status, Status::Scratch, "no half-promoted state");
@@ -482,7 +482,7 @@ mod tests {
         assert!(t.contains("still a scratch note"), "{t}");
 
         // ⌘⏎ the same: it stays scratch and says why.
-        cx.simulate_keystrokes("cmd-enter");
+        cx.simulate_keystrokes(&crate::keymap::keys("cmd-enter"));
         cx.run_until_parked();
         cx.simulate_keystrokes("enter");
         settle(cx);
@@ -514,7 +514,7 @@ mod tests {
                 window.focus(&gpui_kit::Focusable::focus_handle(&v.editor, cx), cx);
             });
             cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(clip.to_string()));
-            cx.simulate_keystrokes("cmd-v");
+            cx.simulate_keystrokes(&crate::keymap::keys("cmd-v"));
             cx.run_until_parked();
         };
         paste_over(10..21, "https://example.org/tides", cx);

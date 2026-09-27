@@ -566,6 +566,21 @@ pub fn respell_for_windows(key: &str) -> String {
     s
 }
 
+/// Tests write keystrokes in macOS terms, like the table. On Windows they
+/// are respelled exactly as the bindings are (`respell_for_windows`).
+#[cfg(test)]
+pub fn keys(keystrokes: &str) -> String {
+    if cfg!(target_os = "windows") {
+        keystrokes
+            .split(' ')
+            .map(respell_for_windows)
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        keystrokes.to_string()
+    }
+}
+
 /// Register every binding. Call after `gpui_kit::init`, so that ours are
 /// added later and win ties at the same depth.
 pub fn bind_keys(cx: &mut App) {

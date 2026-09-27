@@ -152,7 +152,7 @@ fn cmd_t_toggles_kind_and_over_limit_publish_shakes(cx: &mut TestAppContext) {
     let long = "x".repeat(1000);
     cx.simulate_input(&long);
     cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-enter");
+    cx.simulate_keystrokes(&crate::keymap::keys("cmd-enter"));
     cx.run_until_parked();
     view.read_with(cx, |v, _| {
         assert!(
@@ -162,13 +162,13 @@ fn cmd_t_toggles_kind_and_over_limit_publish_shakes(cx: &mut TestAppContext) {
         assert_eq!(v.shake_gen, 1);
         assert!(v.toast.as_ref().is_some_and(|t| t.text.contains("⌘T")));
     });
-    cx.simulate_keystrokes("cmd-t");
+    cx.simulate_keystrokes(&crate::keymap::keys("cmd-t"));
     cx.run_until_parked();
     assert_eq!(
         fake.item(&LocalId("01J9QK3".into())).unwrap().kind,
         Kind::Thread
     );
-    cx.simulate_keystrokes("cmd-enter");
+    cx.simulate_keystrokes(&crate::keymap::keys("cmd-enter"));
     cx.run_until_parked();
     assert!(view.read_with(cx, |v, _| matches!(
         v.sheet,
@@ -184,7 +184,7 @@ fn publish_sheet_enter_publishes_with_note(cx: &mut TestAppContext) {
     let (view, fake, cx) = setup(cx);
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-enter");
+    cx.simulate_keystrokes(&crate::keymap::keys("cmd-enter"));
     cx.run_until_parked();
     assert!(view.read_with(cx, |v, _| matches!(v.sheet, Some(Sheet::Publish { .. }))));
     cx.simulate_input("first version");
@@ -214,7 +214,7 @@ fn publish_sheet_enter_publishes_with_note(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn publish_sheet_escape_cancels(cx: &mut TestAppContext) {
     let (view, fake, cx) = setup(cx);
-    cx.simulate_keystrokes("enter cmd-enter");
+    cx.simulate_keystrokes(&crate::keymap::keys("enter cmd-enter"));
     cx.run_until_parked();
     assert!(view.read_with(cx, |v, _| v.sheet.is_some()));
     cx.simulate_keystrokes("escape");
@@ -248,11 +248,11 @@ fn conflict_sheet_keys_resolve(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn preview_toggles(cx: &mut TestAppContext) {
     let (view, _, cx) = setup(cx);
-    cx.simulate_keystrokes("cmd-e");
+    cx.simulate_keystrokes(&crate::keymap::keys("cmd-e"));
     cx.run_until_parked();
     assert!(view.read_with(cx, |v, _| v.studio.view.preview_visible()
         && v.studio.stats().is_some()));
-    cx.simulate_keystrokes("cmd-e");
+    cx.simulate_keystrokes(&crate::keymap::keys("cmd-e"));
     cx.run_until_parked();
     assert!(view.read_with(cx, |v, _| !v.studio.view.preview_visible()));
 }
@@ -264,7 +264,7 @@ fn pasting_an_image_uploads_and_replaces_placeholder(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let png = gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, vec![0x89, b'P', b'N', b'G']);
     cx.write_to_clipboard(gpui_kit::ClipboardItem::new_image(&png));
-    cx.simulate_keystrokes("cmd-v");
+    cx.simulate_keystrokes(&crate::keymap::keys("cmd-v"));
     cx.run_until_parked();
     let id = LocalId("01J9QK3".into());
     for _ in 0..100 {
@@ -363,7 +363,7 @@ fn settings_write_back_only_changed_keys(cx: &mut TestAppContext) {
         Arc::new(MemoryTokenStore::default()),
     );
     assert_eq!(view.read_with(cx, |v, _| v.prefs.font_size), 17.0);
-    cx.simulate_keystrokes("cmd-=");
+    cx.simulate_keystrokes(&crate::keymap::keys("cmd-="));
     cx.run_until_parked();
     view.update_in(cx, |v, window, cx| {
         v.prefs.layout = crate::prefs::LayoutPref::Stacked;
@@ -396,7 +396,7 @@ fn reload_applies_the_file_live(cx: &mut TestAppContext) {
         crate::prefs::LayoutPref::Side,
         "nothing changes until a reload"
     );
-    cx.simulate_keystrokes("cmd-shift-,");
+    cx.simulate_keystrokes(&crate::keymap::keys("cmd-shift-,"));
     cx.run_until_parked();
     view.read_with(cx, |v, _| {
         assert_eq!(v.prefs.layout, crate::prefs::LayoutPref::Stacked);
@@ -437,7 +437,7 @@ fn config_problems_show_until_dismissed(cx: &mut TestAppContext) {
 fn resolves_to(key: &str, cx: &mut VisualTestContext) -> Option<String> {
     cx.update(|window, cx| {
         let stack = window.context_stack();
-        let ks = gpui_kit::Keystroke::parse(key).unwrap();
+        let ks = gpui_kit::Keystroke::parse(&crate::keymap::keys(key)).unwrap();
         let km = cx.key_bindings();
         let km = km.borrow();
         km.bindings_for_input(&[ks], &stack)
@@ -465,13 +465,13 @@ fn cmd_enter_in_the_editor_publishes(cx: &mut TestAppContext) {
         Some("blygger::Publish")
     );
     let before = editor_text(&view, cx);
-    cx.simulate_keystrokes("cmd-enter");
+    cx.simulate_keystrokes(&crate::keymap::keys("cmd-enter"));
     cx.run_until_parked();
     assert!(view.read_with(cx, |v, _| matches!(v.sheet, Some(Sheet::Publish { .. }))));
     assert_eq!(editor_text(&view, cx), before, "no newline was typed");
     // ⌘⏎ in the note field publishes, like ⏎.
     cx.simulate_input("from the editor");
-    cx.simulate_keystrokes("cmd-enter");
+    cx.simulate_keystrokes(&crate::keymap::keys("cmd-enter"));
     for _ in 0..50 {
         cx.run_until_parked();
         if fake.item(&LocalId("01J9QK3".into())).unwrap().status == Status::Public {
@@ -503,7 +503,7 @@ fn cmd_e_twice_returns_to_the_editor(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("enter");
     cx.simulate_input(" More.");
     cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-e");
+    cx.simulate_keystrokes(&crate::keymap::keys("cmd-e"));
     cx.run_until_parked();
     // The preview opens beside the editor, which keeps the keyboard.
     assert!(view.read_with(cx, |v, _| v.studio.view.preview_visible()));
@@ -512,7 +512,7 @@ fn cmd_e_twice_returns_to_the_editor(cx: &mut TestAppContext) {
         resolves_to("cmd-e", cx).as_deref(),
         Some("blygger::TogglePreview")
     );
-    cx.simulate_keystrokes("cmd-e");
+    cx.simulate_keystrokes(&crate::keymap::keys("cmd-e"));
     cx.run_until_parked();
     view.read_with(cx, |v, _| {
         assert!(!v.studio.view.preview_visible());
