@@ -22,18 +22,22 @@ The setup took one long evening with Claude as a collaborator. We started from t
 
 Deployment was the usual comedy of errors, each one instructive. The first build failed because the configuration still held the placeholder text where my Cloudflare account number belonged. The second got the code uploaded and the database connected, then stopped because my domain did not yet live on Cloudflare. So for now this blyg runs at a temporary workers.dev address while the domain moves over, which feels right for a project whose motto might as well be "building in public, including the scaffolding."
 
-## The ambition: one place to read and write
+## The part I am most excited about: conversation
 
-The part I am most excited about is the reading. A blyg is meant to be both a publication and a reader, since you subscribe to other blygs, sort what arrives into private collections called hoppers, and respond by writing rather than by liking. The best version of that experience I have found is Blygger Desktop, a native app by Aneesh Sathe, which he describes as
+What draws me to this medium is not the publishing. It is the promise that reading and writing can become one continuous conversation again. Most of the web has pulled those two acts apart. We read in one place, react with a like or a quick reply in another, and do our real writing somewhere else entirely, if we do it at all. A blyg stitches them back together. You subscribe to other people's blygs and feeds, sort what arrives into private hoppers, and when something moves you, you answer by writing. A quote carries the other person's words into your own post with their provenance intact, and a stub tells them you have responded. Nobody counts followers, and there are no likes to chase. There is only the slower, older pleasure of people thinking out loud in each other's company.
+
+Ivan Illich called tools like that convivial, meaning tools that widen what people can do together rather than doing it for them, and that word has stuck with me all evening. I spend my working life thinking about shared infrastructure, the pipes and canals and institutions that let a region live together, and this feels like the same instinct applied to ideas. A good conversation is a commons. It only works when everyone brings something and leaves something behind.
+
+The best version of that experience I have found so far is Blygger Desktop, a native app by Aneesh Sathe, which he describes as
 
 > A native macOS studio for Blygger blogs ("blygs"), built to be as fast as Notational Velocity.
 
-It holds your reading list and your drafts in one window, so the distance between reading something good and writing back to it is a keystroke. I spend most of my days on Windows, though, and so the ambition I am setting down here is to help bring that same read-and-write experience to Windows by building on Aneesh's work rather than beside it. His app is written in Rust with a mostly platform-neutral core, so the port looks like careful plumbing more than reinvention, and the right way to do it is as a contribution back to his project.
+It keeps your reading list and your drafts in one window, so the distance between reading something good and writing back to it is a single keystroke. That short distance is the whole point. I spend most of my days on Windows, though, so one ambition I am setting down here is to help bring that same read-and-write experience to Windows by building on Aneesh's work rather than beside it. His app is written in Rust with a mostly platform-neutral core, so the port looks like careful plumbing more than reinvention, and the right way to do it is as a contribution back to his project, which is itself a small act of the conviviality I am describing.
 
 TODO: once subscribed to Aneesh's blyg in the studio, replace this line with ![[his-post-id]] on its own line, so his own words about Blygger Desktop are transcluded here.
 
 ## What comes next
 
-The next steps are to move the domain, export the Paragraph archive, bring in the book, and start quoting old passages into fragments so that new threads can argue with them. After that comes the Windows work. I will log each of these here as they happen, and I expect some of them to go as smoothly as the first deploy did, which is to say educationally.
+The next steps are to move the domain, export the Paragraph archive, bring in the book, and start quoting old passages into fragments so that new threads can argue with them. Then comes the reading side in earnest: subscribing to the blygs and feeds I want to be in conversation with, publishing a blogroll so others can find them too, and starting on the Windows work. I will log each of these here as they happen, and I expect some of them to go as smoothly as the first deploy did, which is to say educationally.
 
-If you run a blyg, I would love to read it. And if you are reading this in a plain RSS reader, welcome. That works too, which is exactly the point.
+If you run a blyg, I would love to read it, and I would love even more to write back. If you are reading this in a plain RSS reader, welcome. That works too, which is exactly the point, and I hope you will consider starting a blyg of your own so that the conversation can run in both directions.
