@@ -1,0 +1,131 @@
+name: Desktop app
+
+# Builds Blygger Desktop (desktop/) for Windows, and checks that the macOS
+# build it came from still passes unchanged. Every run leaves a Windows zip
+# as a workflow artifact. Pushing a tag like `desktop-v0.3.0-win1` also
+# publishes that zip, with SHA256SUMS, as a GitHub release.
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["desktop-v*"]
+    paths:
+      - "desktop/**"
+      - ".github/workflows/desktop.yml"
+  pull_request:
+    paths:
+      - "desktop/**"
+      - ".github/workflows/desktop.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+defaults:
+  run:
+    working-directory: desktop
+
+jobs:
+  windows:
+    name: Windows · fmt · clippy · test · build
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      # desktop/rust-toolchain.toml pins the channel; rustup installs it.
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop -> target
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Build (release)
+        run: cargo build --release -p blyg-app --locked
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          $name = "Blygger-$version-windows-x64"
+          New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
+          Copy-Item target/release/blygger.exe "dist/$name/"
+          Copy-Item LICENSE, WINDOWS.md, packaging/THIRD_PARTY.md "dist/$name/"
+          Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip" -Force
+          $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File -Encoding ascii dist/SHA256SUMS
+          Get-Content dist/SHA256SUMS
+          "ZIP_NAME=$name" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: |
+            desktop/dist/${{ env.ZIP_NAME }}.zip
+            desktop/dist/SHA256SUMS
+          if-no-files-found: error
+
+  macos:
+    name: macOS · clippy · test (unchanged by the port)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop -> target
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+  release:
+    name: Publish the Windows release
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -la dist
+          gh release create "$TAG" dist/*.zip dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Blygger Desktop for Windows ($TAG)" \
+            --notes "Unsigned Windows build of Blygger Desktop (Aneesh Sathe's app, ported to Windows). Unzip and run blygger.exe; see WINDOWS.md inside for SmartScreen, setup, and what differs from macOS. Verify the zip against SHA256SUMS."
