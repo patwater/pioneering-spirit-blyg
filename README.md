@@ -141,7 +141,7 @@ Paragraph readers who subscribed by email will not follow the move automatically
 
 `desktop/` is Blygger Desktop, ported to Windows from Aneesh Sathe's macOS app. It reads the blygs and RSS feeds you subscribe to, lets you quote, stub, and follow what you read, and writes and publishes to your own blyg, all in one window and offline-first. Every Windows change is gated to Windows, so the macOS build is unchanged, and `desktop/WINDOWS.md` lists each one so the port can be offered back upstream.
 
-**Getting it.** Each push that changes `desktop/` runs the *Desktop app* workflow, which builds and tests on Windows and macOS and leaves a `Blygger-<version>-windows-x64` zip on the run's summary page under **Artifacts**. Pushing a tag such as `desktop-v0.3.0-win1` also publishes that zip as a GitHub release. The build is unsigned, so SmartScreen asks once; `desktop/WINDOWS.md` explains it.
+**Getting it.** Each push that changes `desktop/` runs the *Desktop app* workflow, which builds and tests on Windows and macOS and leaves a `Blygger-<version>-windows-x64` zip on the run's summary page under **Artifacts**. To publish a release, open **Releases → Draft a new release** on GitHub, create a tag such as `desktop-v0.3.0-win1` on `main`, and publish it; the workflow builds and tests both platforms and attaches the zip and `SHA256SUMS` to that release a half hour or so later. The build is unsigned, so SmartScreen asks once; `desktop/WINDOWS.md` explains it.
 
 **Connecting it.** Set the `BLYG_OWNER_TOKEN` secret (step 3), then enter your blyg's address and that token in the app's **Connect your blyg** screen.
 
