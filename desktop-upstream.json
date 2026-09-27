@@ -1,0 +1,7 @@
+{
+  "repo": "https://github.com/aneeshsathe/blygger-desktop.git",
+  "commit": "6151e4dbccc7d72c20d2511860088c1b29c82acf",
+  "date": "2026-09-25",
+  "license": "MIT (desktop/LICENSE); docs CC-BY (desktop/LICENSE-docs)",
+  "note": "desktop/ started as a verbatim copy of this commit. Unlike worker/, it carries local changes for Windows, all gated with cfg(target_os = \"windows\") so the macOS build is unchanged. `git diff <import commit> -- desktop` shows the whole port."
+}
