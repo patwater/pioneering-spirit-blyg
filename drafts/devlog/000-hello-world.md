@@ -34,8 +34,6 @@ The best version of that experience I have found so far is Blygger Desktop, a na
 
 It keeps your reading list and your drafts in one window, so the distance between reading something good and writing back to it is a single keystroke. That short distance is the whole point. I spend most of my days on Windows, though, so one ambition I am setting down here is to help bring that same read-and-write experience to Windows by building on Aneesh's work rather than beside it. His app is written in Rust with a mostly platform-neutral core, so the port looks like careful plumbing more than reinvention, and the right way to do it is as a contribution back to his project, which is itself a small act of the conviviality I am describing.
 
-TODO: once subscribed to Aneesh's blyg in the studio, replace this line with ![[his-post-id]] on its own line, so his own words about Blygger Desktop are transcluded here.
-
 ## What comes next
 
 The next steps are to move the domain, export the Paragraph archive, bring in the book, and start quoting old passages into fragments so that new threads can argue with them. Then comes the reading side in earnest: subscribing to the blygs and feeds I want to be in conversation with, publishing a blogroll so others can find them too, and starting on the Windows work. I will log each of these here as they happen, and I expect some of them to go as smoothly as the first deploy did, which is to say educationally.
