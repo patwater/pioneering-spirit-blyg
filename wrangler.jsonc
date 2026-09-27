@@ -24,9 +24,14 @@
   // automatically once the zone is on Cloudflare. Redirect www to the apex
   // with a Cloudflare redirect rule rather than serving it here, so the blyg
   // keeps a single origin identity.
-  "routes": [
-    { "pattern": "pioneeringspirit.xyz", "custom_domain": true }
-  ],
+  //
+  // Disabled until pioneeringspirit.xyz is added to this Cloudflare account
+  // as a zone; until then the blyg is served at the workers.dev address.
+  // Uncomment during the cutover (README step 4).
+  // "routes": [
+  //   { "pattern": "pioneeringspirit.xyz", "custom_domain": true }
+  // ],
+  "workers_dev": true,
 
   // Poll subscriptions and retry outbound webmentions every 15 minutes.
   "triggers": {

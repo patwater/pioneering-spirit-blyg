@@ -65,12 +65,12 @@ Do these in order, ideally in one sitting, since the site is briefly unavailable
 
 1. **Export everything from Paragraph first.** Run the *Export Paragraph archive* action from the Actions tab (or `npm run export-paragraph` locally) and commit `corpus/paragraph/`. Separately, export your **email subscriber list** from Paragraph's dashboard, because a blyg has no newsletter of its own (see "Email subscribers" below).
 2. **Detach the domain from Paragraph.** Remove the custom domain in Paragraph's settings, and delete the DNS records Paragraph had you create for `pioneeringspirit.xyz` in the Cloudflare dashboard.
-3. **Deploy.** `npm run deploy` builds the archive and attaches `pioneeringspirit.xyz` as a Worker custom domain, which creates the DNS record and certificate automatically.
+3. **Deploy.** Uncomment the `routes` block in `wrangler.jsonc` and push to `main` (or run `npm run deploy`). The deploy builds the archive and attaches `pioneeringspirit.xyz` as a Worker custom domain, which creates the DNS record and certificate automatically.
 4. **Log in and push your settings.** `npm run blyg -- login`, then `npm run blyg -- settings`. You can also visit https://pioneeringspirit.xyz/studio.
 5. **Redirect `www`.** In Cloudflare, add a redirect rule from `www.pioneeringspirit.xyz/*` to `https://pioneeringspirit.xyz/${1}` so the blyg has a single origin.
 6. **Check the old links.** Any old post URL such as `https://pioneeringspirit.xyz/<slug>` should now show the archived copy, and `https://pioneeringspirit.xyz/paragraph/` lists them all.
 
-If you want to rehearse before step 2, temporarily comment out the `routes` block in `wrangler.jsonc`, deploy, and try the `*.workers.dev` URL that Wrangler prints; then restore the block for the real cutover.
+Until the cutover, the `routes` block stays commented out and the blyg runs at https://pioneering-spirit-blyg.patrickatwater.workers.dev, which is a good place to rehearse: log in to `/studio`, push settings, and publish a test fragment.
 
 ### 5. Deploys
 
