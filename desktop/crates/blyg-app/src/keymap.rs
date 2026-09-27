@@ -537,9 +537,17 @@ pub fn platform_key(key: &'static str) -> &'static str {
         .or_insert_with(|| Box::leak(respell_for_windows(key).into_boxed_str()))
 }
 
+/// Keys whose plain respelling would take a Windows convention: Ctrl+Y is
+/// Redo in every Windows text field (and gpui-base's `Input` binds it).
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_OVERRIDES: &[(&str, &str)] = &[("cmd-y", "ctrl-shift-y")];
+
 /// The pure part of `platform_key`.
 #[cfg(any(target_os = "windows", test))]
 pub fn respell_for_windows(key: &str) -> String {
+    if let Some((_, win)) = WINDOWS_OVERRIDES.iter().find(|(mac, _)| *mac == key) {
+        return win.to_string();
+    }
     let (body, minus) = match key.strip_suffix("--") {
         Some(b) => (b, true),
         None => (key, false),
@@ -992,6 +1000,8 @@ mod tests {
         assert_eq!(respell_for_windows("cmd--"), "ctrl--");
         assert_eq!(respell_for_windows("cmd-shift--"), "ctrl-shift--");
         assert_eq!(respell_for_windows("alt-up"), "alt-up");
+        // Ctrl+Y is Redo on Windows, so Versions moves over.
+        assert_eq!(respell_for_windows("cmd-y"), "ctrl-shift-y");
         assert_eq!(windows_label("ctrl-shift-,"), "Ctrl+Shift+,");
         assert_eq!(windows_label("ctrl-enter"), "Ctrl+Enter");
         assert_eq!(windows_label("ctrl--"), "Ctrl+-");
@@ -1009,7 +1019,7 @@ mod tests {
         assert!(
             table()
                 .iter()
-                .any(|k| k.key == "ctrl-y" && k.action == "ShowVersions")
+                .any(|k| k.key == "ctrl-shift-y" && k.action == "ShowVersions")
         );
         assert_eq!(glyphs("ctrl-enter"), "Ctrl+Enter");
         assert!(list().contains("Publish"));

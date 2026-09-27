@@ -89,7 +89,8 @@ pub fn default_locations(env: &dyn Fn(&str) -> Option<OsString>) -> Vec<PathBuf>
     let home = home(env);
     let xdg = env("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
+        // Rooted, so `/xdg` counts on Windows too (where it has no drive).
+        .filter(|p| p.has_root())
         .unwrap_or_else(|| home.join(".config"));
     vec![
         xdg.join("blygger").join(CONFIG_FILE_NAME),
@@ -146,9 +147,16 @@ pub fn migrate_data_dir(old: &Path, new: &Path) -> std::io::Result<Vec<PathBuf>>
     Ok(moved)
 }
 
+/// `$HOME`, or `%USERPROFILE%` on Windows (which has no HOME, as a rule).
+pub fn home_var() -> Option<OsString> {
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .or_else(|| std::env::var_os("USERPROFILE").filter(|h| cfg!(windows) && !h.is_empty()))
+}
+
 /// Replace a leading `$HOME` with `~` for display.
 pub fn tilde(p: &Path) -> String {
-    if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty())
+    if let Some(home) = home_var()
         && let Ok(rest) = p.strip_prefix(&home)
     {
         return format!("~/{}", rest.display());
