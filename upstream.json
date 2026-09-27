@@ -1,0 +1,7 @@
+{
+  "repo": "https://github.com/blygger/blygger-spec.git",
+  "path": "worker",
+  "commit": "c5884b9214b6972c3aed2fecf9aae68c9eab5267",
+  "date": "2026-09-25",
+  "note": "worker/ is a verbatim copy of this upstream path at this commit. Update it with `npm run upgrade-worker`, never by hand."
+}

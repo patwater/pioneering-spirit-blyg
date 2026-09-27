@@ -1,0 +1,118 @@
+{
+  // Blygger v0.1 "Seed" reference client.
+  // This top-level (unnamed-env) block has no live deployment: it was the
+  // workers.dev rehearsal instance (task 11, session 10), decommissioned
+  // session 11 (2026-08-09) once the two named envs below covered ongoing
+  // testing — Worker, D1 database, and R2 bucket were all deleted from the
+  // personal Cloudflare account. database_id below is now stale/orphaned
+  // (the database it named no longer exists) but harmless: local dev and
+  // tests use miniflare's local D1 and never contact this ID. Don't run a
+  // bare `wrangler deploy` (no --env) expecting this to work without first
+  // re-provisioning D1/R2.
+  "name": "blyg",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-01",
+  // Deployment mount for the public surface (decision #14): "" = domain root,
+  // otherwise "/path". Wire filenames (blyg.json etc.) are fixed regardless.
+  "vars": {
+    "MOUNT": "/blyg"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "blyg",
+      "database_id": "f9fbfd23-c0b8-40bc-b0df-eb80b992b5a4",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "MEDIA",
+      "bucket_name": "blyg-media"
+    }
+  ],
+  // Named environments are per-domain deploys of the same reference client
+  // (docs/deploy-stub-sites-plan.md). Non-inheritable keys (vars, d1_databases,
+  // r2_buckets, routes) must be redeclared per environment — wrangler does not
+  // merge them from the top level.
+  "env": {
+    "venkateshrao": {
+      "name": "blyg-venkateshrao",
+      "account_id": "7026b5d7c1ad16cb808987576bb07ab2",
+      "vars": {
+        "MOUNT": "/blyg"
+      },
+      // v0.2 subscribe side (§4.2): poll due subscriptions every 15 min.
+      "triggers": {
+        "crons": ["*/15 * * * *"]
+      },
+      "routes": [
+        // Cloudflare's trailing "/*" wildcard requires the literal "/" and does
+        // not match the bare prefix itself (e.g. "/blyg/*" misses "/blyg"), so
+        // each prefix needs its own exact-match entry alongside the wildcard —
+        // otherwise the bare path falls through to the static Pages site.
+        { "pattern": "venkateshrao.com/blyg", "zone_name": "venkateshrao.com" },
+        { "pattern": "venkateshrao.com/blyg/*", "zone_name": "venkateshrao.com" },
+        { "pattern": "venkateshrao.com/studio", "zone_name": "venkateshrao.com" },
+        { "pattern": "venkateshrao.com/studio/*", "zone_name": "venkateshrao.com" },
+        { "pattern": "venkateshrao.com/api", "zone_name": "venkateshrao.com" },
+        { "pattern": "venkateshrao.com/api/*", "zone_name": "venkateshrao.com" }
+      ],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "blyg-venkateshrao",
+          "database_id": "c9342724-d1d9-4337-9737-b3850d27c15e",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "MEDIA",
+          "bucket_name": "blyg-venkateshrao-media"
+        }
+      ]
+    },
+    // Second two-node-network node, session 11 (2026-08-09). Deployed to a
+    // dedicated subdomain rather than path-mounted on protocol-institute.org's
+    // root, because that zone already runs a live production API (member
+    // directory, symposium voting, admin) at /api/* via Cloudflare Pages
+    // Functions — path-mounting here would collide with it, since blyg's own
+    // /api route is host-rooted regardless of MOUNT, and /studio is
+    // mount-relative but was host-rooted (same collision risk) before
+    // session 16 (index.ts). A dedicated subdomain has its own path space,
+    // so MOUNT="" (domain root) is used instead of "/blyg" — which also
+    // means session 16's studio move is a no-op here (mount+"/studio" ===
+    // "/studio" at MOUNT=""). Provisioned under the PI org Cloudflare
+    // account (7e8c7969b2464d23795c555bc6a32af8), not Venkat's personal one —
+    // see protocol-institute/admin/keys.md.
+    "protocolInstitute": {
+      "name": "blyg-protocol-institute",
+      "account_id": "7e8c7969b2464d23795c555bc6a32af8",
+      "vars": {
+        "MOUNT": ""
+      },
+      // v0.2 subscribe side (§4.2): poll due subscriptions every 15 min.
+      "triggers": {
+        "crons": ["*/15 * * * *"]
+      },
+      "routes": [
+        { "pattern": "blyg.protocol-institute.org/*", "zone_name": "protocol-institute.org" }
+      ],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "blyg-protocol-institute",
+          "database_id": "a6f51542-0195-46be-bac4-320fac382c65",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "MEDIA",
+          "bucket_name": "blyg-protocol-institute-media"
+        }
+      ]
+    }
+  }
+}

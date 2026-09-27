@@ -1,0 +1,25 @@
+{
+  "name": "pioneering-spirit-blyg",
+  "private": true,
+  "type": "module",
+  "description": "Pioneering Spirit as a Blygger blyg at pioneeringspirit.xyz, plus the writing room around it",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "postinstall": "npm ci --prefix worker",
+    "predev": "node tools/build-archive.mjs",
+    "dev": "wrangler dev",
+    "test": "npm test --prefix worker",
+    "typecheck": "cd worker && npx tsc --noEmit",
+    "migrate:local": "wrangler d1 migrations apply pioneering-spirit-blyg --local",
+    "migrate": "wrangler d1 migrations apply pioneering-spirit-blyg --remote",
+    "predeploy": "node tools/build-archive.mjs",
+    "deploy": "wrangler deploy",
+    "blyg": "node tools/blyg.mjs",
+    "export-paragraph": "node tools/paragraph-export.mjs",
+    "build-archive": "node tools/build-archive.mjs",
+    "upgrade-worker": "node tools/upgrade-worker.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "4.112.0"
+  }
+}

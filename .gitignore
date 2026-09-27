@@ -1,4 +1,9 @@
-output/
-__pycache__/
-*.pyc
+node_modules/
+.wrangler/
+.dev.vars
 .env
+.env.*
+.blyg-session
+__pycache__/
+.DS_Store
+archive-site/
