@@ -1,0 +1,19 @@
+{
+  // Type-checks the extensions against the reference Worker's real types,
+  // with the Worker's own toolchain (worker/node_modules).
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022"],
+    "typeRoots": ["../worker/node_modules/@cloudflare", "../worker/node_modules/@types"],
+    "types": ["workers-types", "node"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "allowImportingTsExtensions": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

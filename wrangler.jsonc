@@ -4,9 +4,12 @@
   // Blygger reference client (see upstream.json) and is never edited here;
   // everything specific to this deployment lives in this file and in the
   // studio settings pushed by `npm run blyg -- settings`.
+  //
+  // `main` is server-ext/, a thin wrapper that adds the owner-API
+  // extensions Blygger Desktop needs and hands everything else to worker/.
   "$schema": "worker/node_modules/wrangler/config-schema.json",
   "name": "pioneering-spirit-blyg",
-  "main": "worker/src/index.ts",
+  "main": "server-ext/src/index.ts",
   "compatibility_date": "2026-07-01",
 
   // Pin the Cloudflare account so a deploy can never land somewhere else
