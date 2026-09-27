@@ -1469,7 +1469,7 @@ enum ListLength {
     Height(Pixels),
 }
 
-const TITLEBAR_H: f32 = 34.;
+pub(crate) const TITLEBAR_H: f32 = 34.;
 const OMNI_H: f32 = 46.;
 const STATUS_H: f32 = 30.;
 
@@ -1625,7 +1625,9 @@ impl Render for MainView {
             .bg(p.bg)
             .text_color(p.ink)
             .font_family(ui_font.clone())
-            .child(self.render_titlebar(&ui_font, show_title))
+            // Windows shows the title in its own title bar.
+            .child(self.render_titlebar(&ui_font, show_title && cfg!(target_os = "macos")))
+            .children(crate::platform::menu_button(p, cx)) // Windows menu
             .child(self.render_view_switcher(cx)) // --- reading & versions ---
             .children(self.render_toolbar(toolbar, &ui_font, cx)) // --- buttons ---
             .children(self.render_problems(cx))
@@ -1670,6 +1672,7 @@ impl Render for MainView {
             .children(profile_overlay) // --- profiles ---
             .children(self.render_toast())
             .children(onboarding) // --- onboarding ---
+            .children(crate::platform::menu_panel(p, window, cx)) // Windows menu
     }
 }
 

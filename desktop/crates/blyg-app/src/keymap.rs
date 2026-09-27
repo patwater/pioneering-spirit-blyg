@@ -143,9 +143,10 @@ macro_rules! button {
     };
 }
 
-/// The one table. Order matters only for display.
+/// The one table. Order matters only for display. Keys are written in
+/// macOS terms; `platform_keys` respells them for Windows.
 pub fn table() -> Vec<Keybind> {
-    vec![
+    platform_keys(vec![
         kb!(
             "cmd-l",
             Main,
@@ -498,7 +499,63 @@ pub fn table() -> Vec<Keybind> {
             "Help › Blygger Tutorial"
         ),
         // --- end onboarding ---
-    ]
+    ])
+}
+
+/// The table as this platform spells it. On Windows GPUI's `cmd` is the
+/// Windows key, which the system owns, so every `cmd` becomes `ctrl`.
+fn platform_keys(rows: Vec<Keybind>) -> Vec<Keybind> {
+    #[cfg(target_os = "windows")]
+    {
+        let mut rows = rows;
+        for k in &mut rows {
+            k.key = platform_key(k.key);
+            k.menu_key = k.menu_key.map(platform_key);
+        }
+        rows
+    }
+    #[cfg(not(target_os = "windows"))]
+    rows
+}
+
+/// `cmd-shift-,` → `ctrl-shift-,` (and `ctrl-alt-cmd-o` → `ctrl-alt-o`).
+/// Interned, so the table can keep `&'static str` keys.
+#[cfg(target_os = "windows")]
+pub fn platform_key(key: &'static str) -> &'static str {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static SPELLED: OnceLock<Mutex<HashMap<&'static str, &'static str>>> = OnceLock::new();
+    if !key.split('-').any(|p| p == "cmd") {
+        return key;
+    }
+    let mut spelled = SPELLED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    spelled
+        .entry(key)
+        .or_insert_with(|| Box::leak(respell_for_windows(key).into_boxed_str()))
+}
+
+/// The pure part of `platform_key`.
+#[cfg(any(target_os = "windows", test))]
+pub fn respell_for_windows(key: &str) -> String {
+    let (body, minus) = match key.strip_suffix("--") {
+        Some(b) => (b, true),
+        None => (key, false),
+    };
+    let mut out: Vec<&str> = Vec::new();
+    for p in body.split('-') {
+        let p = if p == "cmd" { "ctrl" } else { p };
+        if !(matches!(p, "ctrl" | "alt" | "shift") && out.contains(&p)) {
+            out.push(p);
+        }
+    }
+    let mut s = out.join("-");
+    if minus {
+        s.push_str("--");
+    }
+    s
 }
 
 /// Register every binding. Call after `gpui_kit::init`, so that ours are
@@ -526,7 +583,48 @@ pub fn bind_keys(cx: &mut App) {
     let _ = Withdraw; // --- delete & withdraw ---
 }
 
+/// `Ctrl+Shift+,` for `ctrl-shift-,` (Windows spells keys out).
+#[cfg(target_os = "windows")]
+pub fn glyphs(key: &str) -> String {
+    if key.is_empty() {
+        return "—".into();
+    }
+    windows_label(key)
+}
+
+/// A key as Windows menus and tooltips write it: `Ctrl+Shift+Enter`.
+#[cfg(any(target_os = "windows", test))]
+pub fn windows_label(key: &str) -> String {
+    let (mods, last) = normalize(key);
+    let mut parts: Vec<String> = [
+        ("ctrl", "Ctrl"),
+        ("alt", "Alt"),
+        ("shift", "Shift"),
+        ("cmd", "Win"),
+    ]
+    .iter()
+    .filter(|(m, _)| mods.contains(m))
+    .map(|(_, name)| name.to_string())
+    .collect();
+    parts.push(match last.as_str() {
+        "enter" => "Enter".into(),
+        "space" => "Space".into(),
+        "escape" => "Esc".into(),
+        "tab" => "Tab".into(),
+        "backspace" => "Backspace".into(),
+        "up" | "down" | "left" | "right" => {
+            let mut c = last.chars();
+            c.next()
+                .map(|f| f.to_uppercase().chain(c).collect())
+                .unwrap_or_default()
+        }
+        k => k.to_uppercase(),
+    });
+    parts.join("+")
+}
+
 /// `⌘⇧,` for `cmd-shift-,`.
+#[cfg(not(target_os = "windows"))]
 pub fn glyphs(key: &str) -> String {
     if key.is_empty() {
         return "—".into();
@@ -664,9 +762,30 @@ pub fn clash_with_hotkey(hotkey: &str) -> Option<Keybind> {
         .find(|k| !k.key.is_empty() && normalize(k.key) == want)
 }
 
+/// Windows shortcuts the system (or every Windows app) owns, in the
+/// respelled form `table()` produces there.
+#[cfg(all(test, target_os = "windows"))]
+pub const RESERVED: &[(&str, &str, Option<&str>)] = &[
+    ("ctrl-q", "Quit", Some("Quit")),
+    ("alt-f4", "Close window", None),
+    ("alt-tab", "App switcher", None),
+    ("alt-shift-tab", "App switcher", None),
+    ("ctrl-escape", "Start menu", None),
+    ("ctrl-shift-escape", "Task Manager", None),
+    ("ctrl-alt-delete", "Security screen", None),
+    ("alt-space", "Window menu", None),
+    ("ctrl-c", "Copy", None),
+    ("ctrl-v", "Paste", None),
+    ("ctrl-x", "Cut", None),
+    ("ctrl-z", "Undo", None),
+    ("ctrl-y", "Redo", None),
+    ("ctrl-shift-z", "Redo", None),
+    ("ctrl-a", "Select all", None),
+];
+
 /// macOS shortcuts the system (or every Mac app) owns. An entry's action is
 /// the only one of ours allowed on that key (⌘Q is our Quit).
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "windows")))]
 pub const RESERVED: &[(&str, &str, Option<&str>)] = &[
     ("cmd-q", "Quit", Some("Quit")),
     ("cmd-w", "Close window", None),
@@ -701,12 +820,14 @@ pub const KEYLESS_BUTTONS: &[&str] = &["Withdraw"];
 
 /// Named keys the native menu does turn into their key equivalent
 /// (gpui-pre-macos `key_to_native`), unlike "enter".
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "windows")))]
 pub const NATIVE_MENU_KEYS: &[&str] = &["backspace"];
 
 /// Keys we bind on purpose over one of gpui-base's own `Input` bindings.
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "windows")))]
 pub const OUTRANKS_INPUT: &[&str] = &["cmd-enter"];
+#[cfg(all(test, target_os = "windows"))]
+pub const OUTRANKS_INPUT: &[&str] = &["ctrl-enter"];
 
 /// `blygger +list-keybinds`.
 pub fn list() -> String {
@@ -815,12 +936,18 @@ mod tests {
             clash_with_hotkey(crate::prefs::DEFAULT_HOTKEY).is_none(),
             "the default quick-capture hotkey clashes with an app binding"
         );
+        // Windows respells ⌘ as Ctrl (`platform_keys`).
+        let cmd = if cfg!(target_os = "windows") {
+            "ctrl"
+        } else {
+            "cmd"
+        };
         assert_eq!(
-            clash_with_hotkey("cmd+T").map(|k| k.action),
+            clash_with_hotkey(&format!("{cmd}+T")).map(|k| k.action),
             Some("ToggleKind")
         );
         assert_eq!(
-            clash_with_hotkey("CMD+KeyL").map(|k| k.action),
+            clash_with_hotkey(&format!("{}+KeyL", cmd.to_uppercase())).map(|k| k.action),
             Some("FocusSearch")
         );
     }
@@ -844,6 +971,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn planned_keys_are_reserved() {
         assert!(table().iter().any(|k| k.key == "cmd-l"));
         // ⌘Y graduated from planned to the version browser.
@@ -857,6 +985,38 @@ mod tests {
     }
 
     #[test]
+    fn keys_respell_for_windows() {
+        assert_eq!(respell_for_windows("cmd-l"), "ctrl-l");
+        assert_eq!(respell_for_windows("cmd-shift-,"), "ctrl-shift-,");
+        assert_eq!(respell_for_windows("ctrl-alt-cmd-o"), "ctrl-alt-o");
+        assert_eq!(respell_for_windows("cmd--"), "ctrl--");
+        assert_eq!(respell_for_windows("cmd-shift--"), "ctrl-shift--");
+        assert_eq!(respell_for_windows("alt-up"), "alt-up");
+        assert_eq!(windows_label("ctrl-shift-,"), "Ctrl+Shift+,");
+        assert_eq!(windows_label("ctrl-enter"), "Ctrl+Enter");
+        assert_eq!(windows_label("ctrl--"), "Ctrl+-");
+        assert_eq!(windows_label("ctrl+alt+b"), "Ctrl+Alt+B");
+        assert_eq!(windows_label("alt-up"), "Alt+Up");
+    }
+
+    /// On Windows every key is respelled, `⌘` never survives, and the
+    /// table still has no clashes (`no_duplicate_keys_in_one_place`).
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn windows_keys_use_ctrl() {
+        assert!(live().iter().all(|k| !k.key.split('-').any(|p| p == "cmd")));
+        assert!(table().iter().any(|k| k.key == "ctrl-l"));
+        assert!(
+            table()
+                .iter()
+                .any(|k| k.key == "ctrl-y" && k.action == "ShowVersions")
+        );
+        assert_eq!(glyphs("ctrl-enter"), "Ctrl+Enter");
+        assert!(list().contains("Publish"));
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
     fn glyphs_and_listing() {
         assert_eq!(glyphs("cmd-shift-,"), "⇧⌘,");
         assert_eq!(glyphs("cmd-enter"), "⌘⏎");
@@ -913,7 +1073,12 @@ mod tests {
                 if k.key.is_empty() {
                     if action == "ShowCapture" {
                         // Quick capture: the configured global hotkey.
-                        assert!(tip.ends_with("  ⌃⌥B"), "{tip}");
+                        let want = if cfg!(target_os = "windows") {
+                            "  Ctrl+Alt+B"
+                        } else {
+                            "  ⌃⌥B"
+                        };
+                        assert!(tip.ends_with(want), "{tip}");
                     } else {
                         // Keyless on purpose (Withdraw is irreversible): menu only.
                         assert_eq!(KEYLESS_BUTTONS, &[action], "{action} has no key");
@@ -947,7 +1112,11 @@ mod tests {
         });
         assert_eq!(
             tooltip("Publish", &button_row("Publish").unwrap(), ""),
-            "Publish  ⌘⏎"
+            if cfg!(target_os = "windows") {
+                "Publish  Ctrl+Enter"
+            } else {
+                "Publish  ⌘⏎"
+            }
         );
     }
 
@@ -956,6 +1125,7 @@ mod tests {
     /// its key into a key equivalent verbatim: "enter" became the letter e
     /// (⌘E on Publish). The first Publish binding must be the ⌘↩ shim.
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn the_publish_menu_shows_cmd_return() {
         let cx = gpui_kit::TestAppContext::single();
         cx.update(|cx| {

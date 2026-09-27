@@ -111,9 +111,17 @@ pub fn open_config_file(cx: &App) -> Result<PathBuf, String> {
         .store
         .ensure_primary_exists()
         .map_err(|e| format!("Couldn't create the config file: {e}"))?;
-    std::process::Command::new("/usr/bin/open")
-        .arg("-t")
-        .arg(&path)
+    // The file has no extension, so Windows has no default app for it:
+    // Notepad is always there.
+    #[cfg(windows)]
+    let mut cmd = std::process::Command::new("notepad.exe");
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("/usr/bin/open");
+        c.arg("-t");
+        c
+    };
+    cmd.arg(&path)
         .spawn()
         .map_err(|e| format!("Couldn't open the config file: {e}"))?;
     Ok(path)

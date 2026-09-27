@@ -331,7 +331,14 @@ pub fn parse_hotkey(s: &str) -> Option<global_hotkey::hotkey::HotKey> {
     s.trim().parse().ok()
 }
 
+/// Pretty form for display: `Ctrl+Alt+B` on Windows.
+#[cfg(target_os = "windows")]
+pub fn hotkey_glyphs(s: &str) -> String {
+    crate::keymap::windows_label(s)
+}
+
 /// Pretty form for display: `⌃⌥B`.
+#[cfg(not(target_os = "windows"))]
 pub fn hotkey_glyphs(s: &str) -> String {
     let mut mods = String::new();
     let mut key = String::new();
@@ -451,7 +458,15 @@ mod tests {
         assert!(parse_hotkey("ctrl+alt+B").is_some());
         assert!(parse_hotkey("cmd+shift+space").is_some());
         assert!(parse_hotkey("nonsense+").is_none());
-        assert_eq!(hotkey_glyphs("ctrl+alt+b"), "⌃⌥B");
-        assert_eq!(hotkey_glyphs("cmd+alt+ctrl+KeyK"), "⌃⌥⌘K");
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert_eq!(hotkey_glyphs("ctrl+alt+b"), "⌃⌥B");
+            assert_eq!(hotkey_glyphs("cmd+alt+ctrl+KeyK"), "⌃⌥⌘K");
+        }
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(hotkey_glyphs("ctrl+alt+b"), "Ctrl+Alt+B");
+            assert_eq!(hotkey_glyphs("cmd+alt+ctrl+KeyK"), "Ctrl+Alt+Win+K");
+        }
     }
 }
