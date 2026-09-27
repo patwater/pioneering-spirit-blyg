@@ -1,0 +1,62 @@
+{
+  // Deployment config for the Pioneering Spirit blyg at the root of
+  // pioneeringspirit.xyz. The code in worker/ is a pristine copy of the
+  // Blygger reference client (see upstream.json) and is never edited here;
+  // everything specific to this deployment lives in this file and in the
+  // studio settings pushed by `npm run blyg -- settings`.
+  "$schema": "worker/node_modules/wrangler/config-schema.json",
+  "name": "pioneering-spirit-blyg",
+  "main": "worker/src/index.ts",
+  "compatibility_date": "2026-07-01",
+
+  // Pin the Cloudflare account so a deploy can never land somewhere else
+  // (upstream incident 2026-09-12-01). Find it in the dashboard sidebar or
+  // with `npx wrangler whoami`. It is an identifier, not a secret.
+  "account_id": "REPLACE_WITH_CLOUDFLARE_ACCOUNT_ID",
+
+  // "" mounts the blyg at the domain root: feed at /feed.xml, studio at
+  // /studio, owner API at /api. The protocol file names never change.
+  "vars": {
+    "MOUNT": ""
+  },
+
+  // Serve the apex domain directly. A Custom Domain provisions DNS and TLS
+  // automatically once the zone is on Cloudflare. Redirect www to the apex
+  // with a Cloudflare redirect rule rather than serving it here, so the blyg
+  // keeps a single origin identity.
+  "routes": [
+    { "pattern": "pioneeringspirit.xyz", "custom_domain": true }
+  ],
+
+  // Poll subscriptions and retry outbound webmentions every 15 minutes.
+  "triggers": {
+    "crons": ["*/15 * * * *"]
+  },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "pioneering-spirit-blyg",
+      // Paste the id printed by `npx wrangler d1 create pioneering-spirit-blyg`.
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "worker/migrations"
+    }
+  ],
+
+  // Old Paragraph posts, rendered by `npm run build-archive` into
+  // archive-site/ and served at their original URLs. A request that matches
+  // a file is answered from assets; everything else falls through to the
+  // blyg. The build never writes at "/" or at any blyg route.
+  "assets": {
+    "directory": "archive-site",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "none"
+  },
+
+  "r2_buckets": [
+    {
+      "binding": "MEDIA",
+      "bucket_name": "pioneering-spirit-blyg-media"
+    }
+  ]
+}

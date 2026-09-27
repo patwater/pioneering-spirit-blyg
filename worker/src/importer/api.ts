@@ -1,0 +1,269 @@
+// Subscribe-side owner API (cookie auth, JSON) — v0.2-plan.md §4.2. Mounted
+// alongside ../api.ts under /api.
+
+import { Hono } from "hono";
+import { createDraft, setStubOf } from "../model.ts";
+import { parseStubOf } from "../stub.ts";
+import type { Env } from "../types.ts";
+import { pollSubscription, reconcileIndex } from "./poll.ts";
+import { resolve } from "./resolve.ts";
+import { sourceTitleAndUrl } from "./util.ts";
+import {
+  addHopperItem,
+  createHopper,
+  createSubscription,
+  deleteHopper,
+  deleteSignal,
+  deleteSubscription,
+  getHopper,
+  getHopperBySlug,
+  getImportedItem,
+  getSubscription,
+  removeHopperItem,
+  renameHopper,
+  setBlogrollFlag,
+  setHopperPublic,
+  setSignal,
+  setSubscriptionStatus,
+  setSubscriptionTitle,
+} from "./store.ts";
+
+export const importerApi = new Hono<{ Bindings: Env }>({ strict: false });
+
+function titleFromUrl(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Two-phase add-by-URL (§2.1/§4.2): without `confirm`, resolves and returns
+ * the identity for the owner to confirm (surfacing any site-vs-origin
+ * mismatch); with `confirm: true`, actually creates the subscription and
+ * runs an initial backfill so the first read isn't empty.
+ */
+importerApi.post("/subscriptions", async (c) => {
+  const body = await c.req.json<{ url?: string; confirm?: boolean; title?: string }>().catch(() => ({}) as { url?: string; confirm?: boolean; title?: string });
+  if (typeof body.url !== "string" || !body.url.trim()) return c.json({ error: "url required" }, 400);
+
+  const result = await resolve(body.url.trim());
+  if (result.kind === "failure") {
+    return c.json({ error: "could not resolve this URL to a blyg or a feed", tried: result.tried }, 422);
+  }
+
+  if (!body.confirm) {
+    if (result.kind === "blyg") {
+      return c.json({
+        needsConfirm: true,
+        kind: "blyg",
+        origin: result.origin,
+        title: typeof result.manifest.title === "string" ? result.manifest.title : titleFromUrl(result.origin),
+        siteMismatch: result.siteMismatch,
+      });
+    }
+    return c.json({ needsConfirm: true, kind: "rss", feedUrl: result.feedUrl, title: titleFromUrl(result.feedUrl) });
+  }
+
+  const title = typeof body.title === "string" && body.title.trim() ? body.title.trim() : undefined;
+  const sub =
+    result.kind === "blyg"
+      ? await createSubscription(c.env.DB, {
+          kind: "blyg",
+          origin: result.origin,
+          feedUrl: typeof result.manifest.feed === "string" ? new URL(result.manifest.feed, result.origin).toString() : `${result.origin}feed.xml`,
+          title: title ?? (typeof result.manifest.title === "string" ? result.manifest.title : titleFromUrl(result.origin)),
+        })
+      : await createSubscription(c.env.DB, {
+          kind: "rss",
+          origin: result.feedUrl,
+          feedUrl: result.feedUrl,
+          title: title ?? titleFromUrl(result.feedUrl),
+        });
+  // Initial backfill (§3.2 step 4 / plan §7 open decision #2: import the full
+  // archive on first subscribe) — a fresh subscription's null
+  // last_index_sync_at makes the very first pollSubscription() call reconcile
+  // unconditionally, which also bootstraps newest_guid/etag for future gap
+  // detection (§3.2) in one pass, for both kinds uniformly.
+  await pollSubscription(c.env.DB, sub);
+  return c.json({ id: sub.id, kind: sub.kind, origin: sub.origin }, 201);
+});
+
+importerApi.put("/subscriptions/:id", async (c) => {
+  const sub = await getSubscription(c.env.DB, c.req.param("id"));
+  if (!sub) return c.json({ error: "not found" }, 404);
+  const body = await c.req.json<{ in_blogroll?: boolean; title?: string }>().catch(() => ({}) as Record<string, never>);
+  if (typeof body.in_blogroll === "boolean") await setBlogrollFlag(c.env.DB, sub.id, body.in_blogroll);
+  if (typeof body.title === "string" && body.title.trim()) await setSubscriptionTitle(c.env.DB, sub.id, body.title.trim());
+  return c.json({ ok: true });
+});
+
+importerApi.post("/subscriptions/:id/pause", async (c) => {
+  const sub = await getSubscription(c.env.DB, c.req.param("id"));
+  if (!sub) return c.json({ error: "not found" }, 404);
+  await setSubscriptionStatus(c.env.DB, sub.id, "paused");
+  return c.json({ ok: true });
+});
+
+importerApi.post("/subscriptions/:id/resume", async (c) => {
+  const sub = await getSubscription(c.env.DB, c.req.param("id"));
+  if (!sub) return c.json({ error: "not found" }, 404);
+  await setSubscriptionStatus(c.env.DB, sub.id, "active");
+  return c.json({ ok: true });
+});
+
+/** Force an index reconciliation right now, regardless of the periodic schedule. */
+importerApi.post("/subscriptions/:id/resync", async (c) => {
+  const sub = await getSubscription(c.env.DB, c.req.param("id"));
+  if (!sub) return c.json({ error: "not found" }, 404);
+  if (sub.kind !== "blyg") return c.json({ error: "resync only applies to blyg subscriptions" }, 409);
+  const result = await reconcileIndex(c.env.DB, sub);
+  return c.json({ ok: result.ok, changed: result.changed });
+});
+
+importerApi.delete("/subscriptions/:id", async (c) => {
+  const sub = await getSubscription(c.env.DB, c.req.param("id"));
+  if (!sub) return c.json({ error: "not found" }, 404);
+  await deleteSubscription(c.env.DB, sub.id);
+  return c.json({ ok: true });
+});
+
+// --- Hoppers + signals (task 10, §3.4/§4.2) ---
+
+function slugify(name: string): string {
+  return (
+    name
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 60) || "hopper"
+  );
+}
+
+/** Slugify, then disambiguate against every other hopper's slug (`exceptId` lets a rename keep its own). */
+async function uniqueSlug(db: D1Database, name: string, exceptId?: string): Promise<string> {
+  const base = slugify(name);
+  let slug = base;
+  for (let i = 2; ; i++) {
+    const clash = await getHopperBySlug(db, slug);
+    if (!clash || clash.id === exceptId) return slug;
+    slug = `${base}-${i}`;
+  }
+}
+
+importerApi.post("/hoppers", async (c) => {
+  const body = await c.req.json<{ name?: string }>().catch(() => ({}) as { name?: string });
+  if (typeof body.name !== "string" || !body.name.trim()) return c.json({ error: "name required" }, 400);
+  const hopper = await createHopper(c.env.DB, body.name.trim(), await uniqueSlug(c.env.DB, body.name.trim()));
+  return c.json({ id: hopper.id, name: hopper.name, slug: hopper.slug }, 201);
+});
+
+importerApi.put("/hoppers/:id", async (c) => {
+  const hopper = await getHopper(c.env.DB, c.req.param("id"));
+  if (!hopper) return c.json({ error: "not found" }, 404);
+  const body = await c.req
+    .json<{ public?: boolean; name?: string }>()
+    .catch(() => ({}) as { public?: boolean; name?: string });
+
+  // Rename first: if this request both renames and publishes, the slug should
+  // be derived from the new name and *then* frozen, not frozen at the old one.
+  let slug = hopper.slug;
+  if (typeof body.name === "string") {
+    const name = body.name.trim();
+    if (!name) return c.json({ error: "name must not be empty" }, 400);
+    // A slug that has ever been public is the hopper's permanent address
+    // (migration 0006) — the name moves, the URL does not.
+    slug = hopper.slug_frozen ? hopper.slug : await uniqueSlug(c.env.DB, name, hopper.id);
+    await renameHopper(c.env.DB, hopper.id, name, slug);
+  }
+  if (typeof body.public === "boolean") await setHopperPublic(c.env.DB, hopper.id, body.public);
+  return c.json({ ok: true, slug, slug_frozen: hopper.slug_frozen === 1 || body.public === true });
+});
+
+importerApi.delete("/hoppers/:id", async (c) => {
+  const hopper = await getHopper(c.env.DB, c.req.param("id"));
+  if (!hopper) return c.json({ error: "not found" }, 404);
+  await deleteHopper(c.env.DB, hopper.id);
+  return c.json({ ok: true });
+});
+
+importerApi.put("/hoppers/:id/items/:sub/:remoteId", async (c) => {
+  const hopper = await getHopper(c.env.DB, c.req.param("id"));
+  if (!hopper) return c.json({ error: "hopper not found" }, 404);
+  const sub = await getSubscription(c.env.DB, c.req.param("sub"));
+  if (!sub) return c.json({ error: "subscription not found" }, 404);
+  await addHopperItem(c.env.DB, hopper.id, sub.id, c.req.param("remoteId"));
+  return c.json({ ok: true });
+});
+
+importerApi.delete("/hoppers/:id/items/:sub/:remoteId", async (c) => {
+  const hopper = await getHopper(c.env.DB, c.req.param("id"));
+  if (!hopper) return c.json({ error: "hopper not found" }, 404);
+  await removeHopperItem(c.env.DB, hopper.id, c.req.param("sub"), c.req.param("remoteId"));
+  return c.json({ ok: true });
+});
+
+importerApi.put("/signals/:sub/:remoteId", async (c) => {
+  const sub = await getSubscription(c.env.DB, c.req.param("sub"));
+  if (!sub) return c.json({ error: "subscription not found" }, 404);
+  const body = await c.req.json<{ thumb?: number }>().catch(() => ({}) as { thumb?: number });
+  if (body.thumb !== 1 && body.thumb !== -1) return c.json({ error: "thumb must be 1 or -1" }, 400);
+  await setSignal(c.env.DB, sub.id, c.req.param("remoteId"), body.thumb);
+  return c.json({ ok: true });
+});
+
+importerApi.delete("/signals/:sub/:remoteId", async (c) => {
+  await deleteSignal(c.env.DB, c.req.param("sub"), c.req.param("remoteId"));
+  return c.json({ ok: true });
+});
+
+/**
+ * The stub action (v0.3-plan §3.1, decision #27) — one gesture, replacing
+ * `respond`. Creates a **thread** draft citing exactly one target and opens
+ * in the editor; the body is prefilled but entirely the author's to change.
+ *
+ * A blyg target gets the transclusion directive, because a stub without the
+ * quote is not a stub in this medium's aesthetic. An L0 target gets the old
+ * respond prefill — a markdown link and nothing else — keeping respond's one
+ * real discipline: none of *their* text is copied.
+ *
+ * `stub_of` is set regardless of whether the body ends up quoting the target:
+ * readers rely on the marker, never on body inspection (§2.2).
+ */
+importerApi.post("/stubs", async (c) => {
+  type StubReq = { subscription_id?: string; remote_id?: string };
+  const body = await c.req.json<StubReq>().catch(() => ({}) as StubReq);
+  const subId = body.subscription_id;
+  const remoteId = body.remote_id;
+  if (!subId || !remoteId) return c.json({ error: "subscription_id and remote_id required" }, 400);
+  const sub = await getSubscription(c.env.DB, subId);
+  if (!sub) return c.json({ error: "subscription not found" }, 404);
+  const row = await getImportedItem(c.env.DB, subId, remoteId);
+  if (!row) return c.json({ error: "imported item not found" }, 404);
+
+  let contentMd: string;
+  let stubInput: unknown;
+  if (row.l0) {
+    const { title, url } = sourceTitleAndUrl(row, sub.origin);
+    const label = (title || sub.title || sub.origin).replace(/[[\]]/g, "");
+    contentMd = `[${label}](${url})\n\n`;
+    stubInput = { url };
+  } else {
+    // What a quote of this row would bake: the retained pinned version for a
+    // tombstone we kept, the watermark otherwise. An unretained tombstone has
+    // no bytes to quote, so the citation stands alone — a response to a
+    // withdrawal is legitimate (§2.3.6), it just cannot include the text.
+    const quotable = row.state === "current" || row.pinned_version_retained !== null;
+    const version = row.state === "tombstone" && row.pinned_version_retained !== null ? row.pinned_version_retained : row.version;
+    contentMd = quotable ? `![[${remoteId}]]\n\n` : "";
+    stubInput = { origin: sub.origin, id: remoteId, version };
+  }
+
+  const parsed = parseStubOf(stubInput);
+  if (!parsed.ok) return c.json({ error: parsed.reason }, 400);
+  const item = await createDraft(c.env.DB, contentMd, "thread");
+  await setStubOf(c.env.DB, item.id, parsed.stub);
+  return c.json({ id: item.id }, 201);
+});

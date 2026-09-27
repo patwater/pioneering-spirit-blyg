@@ -1,0 +1,616 @@
+// Subscribe-side studio pages — v0.2-plan.md §4.2 task 7 (subs list +
+// add-by-URL), task 9 (reading feed), task 10 (hoppers). Server-rendered
+// HTML + vanilla JS against the /api/* endpoints, same conventions as
+// ../studio.ts (no client framework, per CLAUDE.md stack conventions).
+
+import { Hono } from "hono";
+import { excerptFromHtml } from "../markdown.ts";
+import { authoredKind, listPublic, publishedVersion } from "../model.ts";
+import { formatDate, studioHeader, studioLayout } from "../studio.ts";
+import type { Env, SubscriptionRow } from "../types.ts";
+import { escapeHtml, normalizeMount, studioPath } from "../util.ts";
+import type { ImportedEntryInput, OwnEntryInput, ReadingFeedEntry } from "./reading.ts";
+import { buildReadingFeed } from "./reading.ts";
+import { sanitizeHtml } from "./sanitize.ts";
+import { previewFromHtml, splitL0Content } from "../preview.ts";
+import {
+  getHopper,
+  getImportedItem,
+  getSignal,
+  listAllImportedItems,
+  listHoppers,
+  listHopperItems,
+  listSubscriptions,
+} from "./store.ts";
+import type { HopperRow } from "../types.ts";
+
+const SUBS_STYLE = `
+.sub-row { border-top: 1px solid var(--rule); padding: 0.75rem 0; }
+.sub-row .title-line { display: flex; align-items: center; gap: 0.5rem; }
+.status-dot { font-size: 0.8rem; }
+.status-dot.active { color: var(--ok); }
+.status-dot.paused { opacity: 0.5; }
+.status-dot.degraded { color: var(--warn); }
+.kind-chip { font-size: 0.8rem; font-style: italic; color: var(--pencil); }
+.sub-row .meta { font-size: 0.82rem; opacity: 0.7; margin: 0.25rem 0; }
+.sub-row .flags { font-size: 0.8rem; color: var(--warn); margin: 0.25rem 0; }
+.sub-row .actions { display: flex; gap: 0.4rem; align-items: center; margin-top: 0.4rem; flex-wrap: wrap; font-size: 0.85rem; }
+.sub-row label.blogroll { font-size: 0.85rem; display: flex; align-items: center; gap: 0.3rem; }
+.add-sub { border: 1px solid var(--rule); border-radius: 6px; padding: 0.75rem; margin-bottom: 1rem; }
+.add-sub input[type="url"] { width: 100%; font: inherit; padding: 0.4rem 0.5rem; border-radius: 4px; border: 1px solid var(--rule-strong); background: transparent; color: inherit; }
+.add-sub .confirm { margin-top: 0.6rem; font-size: 0.9rem; padding: 0.5rem; border: 1px solid var(--rule); border-radius: 4px; }
+.add-sub .mismatch { color: var(--warn); }
+`;
+
+function subRow(sub: SubscriptionRow): string {
+  const flags: { type: string; at: string; detail?: string }[] = (() => {
+    try {
+      const parsed = JSON.parse(sub.flags);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  })();
+  const flagsHtml = flags.length
+    ? `<p class="flags">⚠ ${flags
+        .slice(-3)
+        .map((f) => escapeHtml(f.type + (f.detail ? `: ${f.detail}` : "")))
+        .join(" · ")}</p>`
+    : "";
+  const pollLine = sub.last_poll_at ? `last polled ${formatDate(sub.last_poll_at)}` : "never polled";
+  const pauseResume =
+    sub.status === "paused"
+      ? `<button type="button" data-action="resume" data-id="${sub.id}">resume</button>`
+      : `<button type="button" data-action="pause" data-id="${sub.id}">pause</button>`;
+  const resyncBtn =
+    sub.kind === "blyg" ? `<button type="button" data-action="resync" data-id="${sub.id}">resync</button>` : "";
+  return `<div class="sub-row">
+<div class="title-line">
+<span class="status-dot ${sub.status}">●</span>
+<span class="kind-chip">${sub.kind}</span>
+<strong>${escapeHtml(sub.title || sub.origin)}</strong>
+</div>
+<p class="meta">${escapeHtml(sub.origin)} &middot; ${pollLine}${sub.status === "degraded" ? ` &middot; degraded (${sub.fail_count} consecutive failures)` : ""}</p>
+${flagsHtml}
+<div class="actions">
+${pauseResume}
+${resyncBtn}
+<button type="button" class="danger" data-action="delete-sub" data-id="${sub.id}">delete</button>
+<label class="blogroll"><input type="checkbox" data-action="toggle-blogroll" data-id="${sub.id}" ${sub.in_blogroll ? "checked" : ""}> in blogroll</label>
+</div>
+</div>`;
+}
+
+const SUBS_SCRIPT = `
+async function subsApi(method, path, body) {
+  const res = await fetch(path, {
+    method,
+    headers: body !== undefined ? { "content-type": "application/json" } : undefined,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  const json = await res.json().catch(() => null);
+  return { ok: res.ok, status: res.status, json };
+}
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-action]");
+  if (!btn) return;
+  const action = btn.dataset.action, id = btn.dataset.id;
+  if (action === "pause") await subsApi("POST", "/api/subscriptions/" + id + "/pause");
+  else if (action === "resume") await subsApi("POST", "/api/subscriptions/" + id + "/resume");
+  else if (action === "resync") { await subsApi("POST", "/api/subscriptions/" + id + "/resync"); alert("resynced"); }
+  else if (action === "delete-sub") {
+    if (!confirm("Delete this subscription? Local imports, hopper memberships, and signals for it are removed. Nothing public is affected.")) return;
+    await subsApi("DELETE", "/api/subscriptions/" + id);
+  } else return;
+  location.reload();
+});
+document.addEventListener("change", async (e) => {
+  if (e.target.dataset.action !== "toggle-blogroll") return;
+  await subsApi("PUT", "/api/subscriptions/" + e.target.dataset.id, { in_blogroll: e.target.checked });
+});
+
+const addForm = document.getElementById("add-sub-form");
+const urlInput = document.getElementById("add-sub-url");
+const confirmSlot = document.getElementById("add-sub-confirm");
+let pendingResolve = null;
+addForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const url = urlInput.value.trim();
+  if (!url) return;
+  const { ok, json } = await subsApi("POST", "/api/subscriptions", { url });
+  if (!ok) {
+    confirmSlot.innerHTML = '<div class="confirm mismatch">Could not resolve: ' + (json && json.error ? json.error.replace(/</g, "&lt;") : "unknown error") + '</div>';
+    return;
+  }
+  pendingResolve = { url, title: json.title };
+  const mismatchHtml = json.siteMismatch
+    ? '<p class="mismatch">Note: this origin\\'s manifest claims to be ' + json.siteMismatch.asserted.replace(/</g, "&lt;") + ', but was actually fetched from ' + json.siteMismatch.actual.replace(/</g, "&lt;") + '. Subscribing to the fetched origin.</p>'
+    : "";
+  confirmSlot.innerHTML =
+    '<div class="confirm">Resolved as <strong>' + json.kind + '</strong>: ' + (json.origin || json.feedUrl).replace(/</g, "&lt;") +
+    mismatchHtml +
+    '<p><button type="button" id="confirm-sub-btn">confirm subscribe</button></p></div>';
+  document.getElementById("confirm-sub-btn").addEventListener("click", async () => {
+    if (!pendingResolve) return;
+    const { ok: ok2 } = await subsApi("POST", "/api/subscriptions", { url: pendingResolve.url, confirm: true, title: pendingResolve.title });
+    if (ok2) location.reload();
+  });
+});
+`;
+
+export const importerStudio = new Hono<{ Bindings: Env }>({ strict: false });
+
+importerStudio.get("/subs", async (c) => {
+  const subs = await listSubscriptions(c.env.DB);
+  const mount = normalizeMount(c.env.MOUNT);
+  const body = `${studioHeader("blyg studio — subscriptions", mount, "subs")}
+<style>${SUBS_STYLE}</style>
+<div class="add-sub">
+<form id="add-sub-form">
+<label for="add-sub-url" style="display:block;font-size:0.85rem;opacity:0.8;margin-bottom:0.3rem;">Subscribe to a URL (a blyg origin, its feed, or a legacy RSS feed)</label>
+<input type="url" id="add-sub-url" placeholder="https://example.com/" required>
+<p style="margin-top:0.5rem;"><button type="submit">resolve</button></p>
+</form>
+<div id="add-sub-confirm"></div>
+</div>
+${subs.length ? subs.map(subRow).join("\n") : "<p>No subscriptions yet.</p>"}
+<script>${SUBS_SCRIPT}</script>`;
+  return c.html(studioLayout("subscriptions — blyg studio", body));
+});
+
+// --- Reading feed (task 9, §3.6) ---
+
+const READING_STYLE = `
+.reading-entry { border-top: 1px solid var(--rule); padding: 0.85rem 0; }
+.reading-entry .byline { font-size: 0.8rem; opacity: 0.7; display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+.reading-entry .byline .kind-chip { font-size: 0.68rem; padding: 0.02rem 0.3rem; }
+.reading-entry .byline .l0-chip { font-size: 0.72rem; color: var(--ink-soft); border: 1px solid var(--rule); border-radius: 3px; padding: 0.02rem 0.3rem; }
+.reading-entry .entry-title { margin: 0.25rem 0 0.15rem; font-size: 1.02rem; font-weight: 600; line-height: 1.35; }
+.reading-entry .entry-title a { text-decoration: none; }
+.reading-entry .entry-title a:hover { text-decoration: underline; }
+.reading-entry .entry-title, .reading-entry .content { max-width: 72ch; }
+.reading-entry .content { margin-top: 0.4rem; }
+.reading-entry .content img { max-width: 100%; }
+.reading-entry .content > :first-child { margin-top: 0; }
+.reading-entry .content > :last-child { margin-bottom: 0; }
+/* An item's own headings shouldn't shout in a feed context — a fragment
+   starting with an h1 otherwise renders at full display size in the list. */
+.reading-entry .content :is(h1,h2,h3,h4,h5,h6) { font-size: 1rem; font-weight: 600; margin: 0.45rem 0 0.2rem; line-height: 1.35; }
+.reading-entry .content blockquote { margin: 0.5rem 0; padding-left: 0.8rem; border-left: 2px solid var(--rule); }
+/* Clamp by line count, not by cutting markup — see readingEntryHtml. */
+.reading-entry .content.clamped { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.reading-entry .expand-btn { font-size: 0.78rem; opacity: 0.7; margin-top: 0.2rem; }
+.reading-entry .content:not(.clamped) + .expand-btn { display: none; }
+.reading-pager { display: flex; justify-content: space-between; align-items: center; margin: 1.25rem 0 0; font-size: 0.9rem; border-top: 1px solid var(--rule); padding-top: 0.75rem; }
+.reading-pager .pager-info { opacity: 0.7; }
+.reading-entry.withdrawn-entry { opacity: 0.6; font-style: italic; }
+.entry-actions { margin-top: 0.5rem; display: flex; gap: 0.5rem; align-items: center; font-size: 0.85rem; }
+.entry-actions button { font-size: 0.9rem; padding: 0.1rem 0.4rem; border-radius: 4px; border: 1px solid var(--rule); background: transparent; cursor: pointer; }
+.entry-actions button.active { border-color: currentColor; background: var(--paper-sunk); }
+.entry-actions .stub-btn { font-size: 0.85rem; background: none; border: 0; padding: 0; cursor: pointer; color: inherit; border-bottom: 1px dotted currentColor; opacity: 0.8; }
+.entry-actions .stub-btn:hover { opacity: 1; }
+.entry-actions select { font: inherit; font-size: 0.85rem; padding: 0.15rem 0.3rem; border-radius: 4px; border: 1px solid var(--rule); background: transparent; color: inherit; }
+`;
+
+async function ownEntries(db: D1Database): Promise<OwnEntryInput[]> {
+  const items = await listPublic(db);
+  const out: OwnEntryInput[] = [];
+  for (const item of items) {
+    const withdrawn = item.kind === "withdrawn";
+    const kind = await authoredKind(db, item);
+    const latest = withdrawn ? null : await publishedVersion(db, item);
+    out.push({ id: item.id, kind, withdrawn, updated: item.updated, contentHtml: latest?.content_html ?? "" });
+  }
+  return out;
+}
+
+async function importedEntries(db: D1Database): Promise<ImportedEntryInput[]> {
+  const [imports, subs] = await Promise.all([listAllImportedItems(db), listSubscriptions(db)]);
+  const titleOf = new Map(subs.map((s) => [s.id, s.title || s.origin]));
+  const out: ImportedEntryInput[] = [];
+  for (const row of imports) {
+    out.push({
+      subscriptionId: row.subscription_id,
+      subscriptionTitle: titleOf.get(row.subscription_id) ?? row.subscription_id,
+      remoteId: row.remote_id,
+      kind: row.kind,
+      withdrawn: row.state === "tombstone",
+      l0: row.l0 === 1,
+      updated: row.updated,
+      observedAt: row.observed_at,
+      contentHtml: row.l0 ? row.content_html : await sanitizeHtml(row.content_html),
+      pinnedVersionRetained: row.pinned_version_retained,
+    });
+  }
+  return out;
+}
+
+/**
+ * Hoppers are the unit of curation (decision #12: make-public is a *list* you
+ * keep, not a thing you said), so this picker is the entry point to the whole
+ * public-curation feature. It used to render nothing at all when you had no
+ * hoppers yet — hiding the feature precisely at the moment you had never used
+ * it, which is a cold start with no door. It now always renders and can create
+ * a hopper inline, so the first one is reachable from the item that prompted it.
+ */
+function hopperPicker(imp: NonNullable<ReadingFeedEntry["imported"]>, hoppers: HopperRow[]): string {
+  const options = hoppers.map((h) => `<option value="${h.id}">${escapeHtml(h.name)}</option>`).join("");
+  return `<select data-action="add-to-hopper" data-sub="${imp.subscriptionId}" data-remote="${imp.remoteId}">
+<option value="">+ add to hopper…</option>
+${options}
+<option value="__new__">${hoppers.length ? "+ new hopper…" : "+ create your first hopper…"}</option>
+</select>`;
+}
+
+function thumbButtons(imp: NonNullable<ReadingFeedEntry["imported"]>, thumb: 1 | -1 | null): string {
+  return `<button type="button" data-action="thumb" data-sub="${imp.subscriptionId}" data-remote="${imp.remoteId}" data-thumb="1" class="${thumb === 1 ? "active" : ""}">👍</button>
+<button type="button" data-action="thumb" data-sub="${imp.subscriptionId}" data-remote="${imp.remoteId}" data-thumb="-1" class="${thumb === -1 ? "active" : ""}">👎</button>`;
+}
+
+async function readingEntryHtml(db: D1Database, e: ReadingFeedEntry, hoppers: HopperRow[], mount: string): Promise<string> {
+  if (e.withdrawn) {
+    const retained = e.imported?.pinnedVersionRetained;
+    if (retained === null || retained === undefined) {
+      return `<div class="reading-entry withdrawn-entry">
+<p class="byline"><span class="kind-chip">${e.kind}</span> ${escapeHtml(e.imported?.subscriptionTitle ?? "")}</p>
+<p>withdrawn by origin</p>
+</div>`;
+    }
+    // Pinned-retained content still renders below, with the withdrawal noted.
+  }
+  const byline =
+    e.source === "own"
+      ? `<span class="kind-chip">${e.kind}</span> you`
+      : `<span class="kind-chip">${e.kind}</span> ${e.l0 ? '<span class="l0-chip">legacy rss</span> ' : ""}${escapeHtml(e.imported?.subscriptionTitle ?? "")}`;
+  const withdrawnNote = e.withdrawn ? `<p style="opacity:0.7;font-style:italic;">withdrawn by origin — retained via a pin (v${e.imported?.pinnedVersionRetained})</p>` : "";
+  let actions = "";
+  if (e.imported) {
+    const signal = await getSignal(db, e.imported.subscriptionId, e.imported.remoteId);
+    // `stub ↗` (decision #27) — the one "respond to this" gesture. It creates
+    // a thread that cites this item, which is what makes the response
+    // machine-readable on the far side; `respond`, which produced an
+    // unmarked fragment with a bare link, is retired rather than kept as a
+    // lighter sibling.
+    actions = `<div class="entry-actions">${thumbButtons(e.imported, signal ? (signal.thumb as 1 | -1) : null)} ${hopperPicker(e.imported, hoppers)} ${stubButton(e.imported.subscriptionId, e.imported.remoteId)}${
+      e.l0 ? "" : " " + forkLink(mount, e.imported.subscriptionId, e.imported.remoteId)
+    }</div>`;
+  }
+  // L0 entries lead with a title link (l0.ts renders "[title](link)" as the
+  // first paragraph); promote it out of the body so the list is scannable
+  // instead of title and summary reading as one undifferentiated block.
+  const { titleHtml, bodyHtml } = e.l0 ? splitL0Content(e.contentHtml) : { titleHtml: null, bodyHtml: e.contentHtml };
+  const titleLine = titleHtml ? `<p class="entry-title">${titleHtml}</p>` : "";
+  // Entries are clamped rather than truncated: nothing is lost, and no
+  // markup is cut (which would break tags). "more" lifts the clamp.
+  const body = bodyHtml.trim()
+    ? `<div class="content clamped">${bodyHtml}</div>
+<button type="button" class="link expand-btn" data-action="expand">more</button>`
+    : titleHtml
+      ? ""
+      : "<div class=\"content\"><p><em>(empty)</em></p></div>";
+  return `<div class="reading-entry">
+<p class="byline">${byline} <span>&middot; ${formatDate(e.displayAt)}</span></p>
+${withdrawnNote}
+${titleLine}
+${body}
+${actions}
+</div>`;
+}
+
+/** The stub affordance, shared by the reading feed and hopper detail (§3.1). */
+export function stubButton(subId: string, remoteId: string): string {
+  return `<button type="button" class="stub-btn" data-action="stub" data-sub="${escapeHtml(subId)}" data-remote="${escapeHtml(remoteId)}">stub ↗</button>`;
+}
+
+/**
+ * The fork affordance (§2.4). A plain link, not a button: forking needs a
+ * *pinned* version and which ones exist is the origin's to say, so this opens
+ * the picker rather than pretending the choice has already been made.
+ *
+ * Absent for L0 entries — a legacy RSS feed has no items, no versions and no
+ * pins, so there is nothing a lineage pointer could name.
+ */
+export function forkLink(mount: string, subId: string, remoteId: string): string {
+  return `<a class="stub-btn" href="${studioPath(mount)}/fork?sub=${encodeURIComponent(subId)}&amp;id=${encodeURIComponent(remoteId)}">fork ↗</a>`;
+}
+
+/**
+ * Click handler for stubButton. Creates the draft server-side (so a refresh
+ * can't mint duplicates the way a GET-with-side-effects would) and lands the
+ * author in the thread editor with the citation already attached.
+ */
+export function stubScript(mount: string): string {
+  return `
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-action='stub']");
+  if (!btn) return;
+  btn.disabled = true;
+  const res = await fetch("/api/stubs", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ subscription_id: btn.dataset.sub, remote_id: btn.dataset.remote }),
+  });
+  if (!res.ok) { btn.disabled = false; alert("Could not start a stub for that item."); return; }
+  const data = await res.json();
+  location.href = "${studioPath(mount)}/edit/" + data.id;
+});
+`;
+}
+
+const READING_SCRIPT = `
+async function readingApi(method, path, body) {
+  await fetch(path, { method, headers: body !== undefined ? { "content-type": "application/json" } : undefined, body: body !== undefined ? JSON.stringify(body) : undefined });
+}
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-action='thumb']");
+  if (!btn) return;
+  await readingApi("PUT", "/api/signals/" + btn.dataset.sub + "/" + btn.dataset.remote, { thumb: Number(btn.dataset.thumb) });
+  location.reload();
+});
+document.addEventListener("change", async (e) => {
+  const sel = e.target.closest("[data-action='add-to-hopper']");
+  if (!sel || !sel.value) return;
+  let hopperId = sel.value;
+  let created = "";
+  if (hopperId === "__new__") {
+    const name = prompt("Name the new hopper (a curated list — you make the whole list public, not single items):");
+    sel.value = "";
+    if (!name || !name.trim()) return;
+    const res = await fetch("/api/hoppers", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: name.trim() }),
+    });
+    if (!res.ok) { alert("Could not create that hopper."); return; }
+    hopperId = (await res.json()).id;
+    created = " (new hopper created)";
+  }
+  await readingApi("PUT", "/api/hoppers/" + hopperId + "/items/" + sel.dataset.sub + "/" + sel.dataset.remote);
+  sel.value = "";
+  alert("added to hopper" + created);
+  if (created) location.reload();
+});
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-action='expand']");
+  if (!btn) return;
+  const content = btn.previousElementSibling;
+  const clamped = content.classList.toggle("clamped");
+  btn.textContent = clamped ? "more" : "less";
+});
+// Hide "more" where the text was never long enough to be clamped, so the
+// affordance only appears when it actually does something.
+for (const btn of document.querySelectorAll("[data-action='expand']")) {
+  const content = btn.previousElementSibling;
+  if (content && content.scrollHeight <= content.clientHeight + 1) btn.hidden = true;
+}
+`;
+
+export const READING_PAGE_SIZE = 25;
+
+/** 1-based page number from `?page=`, clamped into range; out-of-range or junk lands on page 1. */
+export function readingPage(raw: string | undefined, total: number, pageSize = READING_PAGE_SIZE): { page: number; pages: number; start: number } {
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  const asked = Number(raw);
+  const page = Number.isInteger(asked) && asked >= 1 && asked <= pages ? asked : 1;
+  return { page, pages, start: (page - 1) * pageSize };
+}
+
+importerStudio.get("/reading", async (c) => {
+  const mount = normalizeMount(c.env.MOUNT);
+  const [own, imported, hoppers] = await Promise.all([ownEntries(c.env.DB), importedEntries(c.env.DB), listHoppers(c.env.DB)]);
+  const feed = buildReadingFeed(own, imported);
+  // Paged: the merged feed grows without bound as subscriptions accumulate,
+  // and every entry renders its full (clamped) content.
+  const { page, pages, start } = readingPage(c.req.query("page"), feed.length);
+  const rows = await Promise.all(feed.slice(start, start + READING_PAGE_SIZE).map((e) => readingEntryHtml(c.env.DB, e, hoppers, mount)));
+  const href = (p: number) => `${studioPath(mount)}/reading?page=${p}`;
+  const pager =
+    pages > 1
+      ? `<nav class="reading-pager">
+<span>${page > 1 ? `<a href="${href(page - 1)}">&larr; newer</a>` : ""}</span>
+<span class="pager-info">page ${page} of ${pages} &middot; ${feed.length} entries</span>
+<span>${page < pages ? `<a href="${href(page + 1)}">older &rarr;</a>` : ""}</span>
+</nav>`
+      : "";
+  const body = `${studioHeader("blyg studio — reading", mount, "reading")}
+<style>${READING_STYLE}</style>
+${rows.length ? rows.join("\n") : "<p>Nothing to read yet — publish something, or subscribe to a blyg or feed.</p>"}
+${pager}
+<script>${READING_SCRIPT}</script>
+<script>${stubScript(mount)}</script>`;
+  return c.html(studioLayout("reading — blyg studio", body, true));
+});
+
+// --- Hoppers (task 10, §3.4) ---
+
+const HOPPERS_STYLE = `
+.hopper-row { border-top: 1px solid var(--rule); padding: 0.85rem 0; display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
+.hopper-row .hopper-main { min-width: 0; flex: 1; }
+.hopper-row .hopper-meta { font-size: 0.85rem; opacity: 0.7; margin: 0.15rem 0 0; }
+.hopper-row .hopper-url { font-size: 0.85rem; margin: 0.15rem 0 0; }
+.hopper-row .actions { display: flex; gap: 0.5rem; align-items: center; font-size: 0.85rem; flex-shrink: 0; }
+.hopper-row .peek { margin: 0.45rem 0 0; padding: 0; list-style: none; font-size: 0.85rem; }
+.hopper-row .peek li { opacity: 0.8; padding: 0.1rem 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hopper-row .peek li .peek-title { font-weight: 600; }
+.hopper-row .peek li .peek-src { opacity: 0.65; }
+.hopper-row .peek .peek-more { opacity: 0.55; font-style: italic; }
+.hopper-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
+.hopper-head .hopper-url, .hopper-head .hopper-meta { font-size: 0.85rem; opacity: 0.75; margin: 0.2rem 0 0; }
+.hopper-head .actions { display: flex; gap: 0.5rem; align-items: center; font-size: 0.85rem; }
+.rename-form { display: flex; gap: 0.4rem; align-items: center; }
+.rename-form input { font: inherit; font-size: 0.9rem; padding: 0.2rem 0.4rem; border-radius: 4px; border: 1px solid var(--rule); background: transparent; color: inherit; }
+.slug-note { font-size: 0.8rem; opacity: 0.6; }
+`;
+
+/**
+ * One-line peek at what is in a hopper, for the list page — the same
+ * rendered-HTML-derived preview the index rows use (`previewFromHtml`), never
+ * an excerpt of markdown source. Shows source attribution too, since a
+ * hopper's whole point is that its items come from elsewhere.
+ */
+const HOPPER_PEEK_ROWS = 3;
+
+async function hopperPeek(db: D1Database, hopperId: string, titleOf: Map<string, string>): Promise<string> {
+  const memberships = await listHopperItems(db, hopperId);
+  if (!memberships.length) return "";
+  const lines: string[] = [];
+  for (const m of memberships.slice(0, HOPPER_PEEK_ROWS)) {
+    const row = await getImportedItem(db, m.subscription_id, m.remote_id);
+    if (!row) continue;
+    const src = escapeHtml(titleOf.get(m.subscription_id) ?? m.subscription_id);
+    if (row.state === "tombstone") {
+      lines.push(`<li><span class="peek-src">${src}</span> &middot; <em>withdrawn by origin</em></li>`);
+      continue;
+    }
+    const { title, body } = previewFromHtml(row.content_html, 80);
+    const label = title ? `<span class="peek-title">${escapeHtml(title)}</span>` : escapeHtml(body);
+    lines.push(`<li><span class="peek-src">${src}</span> &middot; ${label}</li>`);
+  }
+  const extra = memberships.length - lines.length;
+  if (extra > 0) lines.push(`<li class="peek-more">+${extra} more</li>`);
+  return `<ul class="peek">${lines.join("")}</ul>`;
+}
+
+/** Public-URL line: the address a public hopper actually lives at, or why it has none yet. */
+function hopperUrlLine(hopper: HopperRow, mount: string): string {
+  if (!hopper.public) {
+    return `<p class="hopper-meta">Not public${hopper.slug_frozen ? ` &middot; was public at <code>${mount}/h/${escapeHtml(hopper.slug ?? "")}/</code>` : ""}</p>`;
+  }
+  return `<p class="hopper-url">Public at <a href="${mount}/h/${escapeHtml(hopper.slug ?? "")}/">${mount}/h/${escapeHtml(hopper.slug ?? "")}/</a></p>`;
+}
+
+function hoppersScript(mount: string): string {
+  return `
+document.addEventListener("submit", async (e) => {
+  if (e.target.id !== "new-hopper-form") return;
+  e.preventDefault();
+  const name = document.getElementById("new-hopper-name").value.trim();
+  if (!name) return;
+  const res = await fetch("/api/hoppers", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name }) });
+  if (res.ok) location.reload();
+});
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-action]");
+  if (!btn) return;
+  if (btn.dataset.action === "delete-hopper") {
+    if (!confirm("Delete this hopper? Membership is removed locally; nothing public is affected.")) return;
+    await fetch("/api/hoppers/" + btn.dataset.id, { method: "DELETE" });
+    location.href = "${studioPath(mount)}/hoppers";
+  } else if (btn.dataset.action === "remove-hopper-item") {
+    await fetch("/api/hoppers/" + btn.dataset.hopper + "/items/" + btn.dataset.sub + "/" + btn.dataset.remote, { method: "DELETE" });
+    location.reload();
+  }
+});
+document.addEventListener("change", async (e) => {
+  if (e.target.dataset.action !== "toggle-public") return;
+  await fetch("/api/hoppers/" + e.target.dataset.id, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ public: e.target.checked }),
+  });
+  // Reload: publishing freezes the slug and gives the hopper a public URL,
+  // both of which the page states in prose above.
+  location.reload();
+});
+document.addEventListener("submit", async (e) => {
+  if (e.target.dataset.action !== "rename-hopper") return;
+  e.preventDefault();
+  const name = e.target.elements.name.value.trim();
+  if (!name) return;
+  const res = await fetch("/api/hoppers/" + e.target.dataset.id, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: name }),
+  });
+  if (!res.ok) { alert("Rename failed."); return; }
+  location.reload();
+});
+`;
+}
+
+importerStudio.get("/hoppers", async (c) => {
+  const mount = normalizeMount(c.env.MOUNT);
+  const [hoppers, subs] = await Promise.all([listHoppers(c.env.DB), listSubscriptions(c.env.DB)]);
+  const titleOf = new Map(subs.map((sub) => [sub.id, sub.title || sub.origin]));
+  const rows = await Promise.all(
+    hoppers.map(async (h) => {
+      const items = await listHopperItems(c.env.DB, h.id);
+      const sources = new Set(items.map((m) => m.subscription_id)).size;
+      const counts = `${items.length} item${items.length === 1 ? "" : "s"}${sources ? ` &middot; ${sources} source${sources === 1 ? "" : "s"}` : ""}`;
+      return `<div class="hopper-row">
+<div class="hopper-main">
+<a href="${studioPath(mount)}/hoppers/${h.id}"><strong>${escapeHtml(h.name)}</strong></a>
+<p class="hopper-meta">${counts} &middot; slug: <code>${escapeHtml(h.slug ?? "")}</code></p>
+${hopperUrlLine(h, mount)}
+${await hopperPeek(c.env.DB, h.id, titleOf)}
+</div>
+<div class="actions">
+<label><input type="checkbox" data-action="toggle-public" data-id="${h.id}" ${h.public ? "checked" : ""}> public</label>
+<button type="button" data-action="delete-hopper" data-id="${h.id}">delete</button>
+</div>
+</div>`;
+    }),
+  );
+  const body = `${studioHeader("blyg studio — hoppers", mount, "hoppers")}
+<style>${HOPPERS_STYLE}</style>
+<form id="new-hopper-form" style="margin-bottom:1rem;">
+<input type="text" id="new-hopper-name" placeholder="new hopper name" required>
+<button type="submit">create</button>
+</form>
+${rows.length ? rows.join("\n") : "<p>No hoppers yet — add items to a hopper from the reading feed.</p>"}
+<script>${hoppersScript(mount)}</script>`;
+  return c.html(studioLayout("hoppers — blyg studio", body));
+});
+
+importerStudio.get("/hoppers/:id", async (c) => {
+  const hopper = await getHopper(c.env.DB, c.req.param("id"));
+  if (!hopper) return c.notFound();
+  const mount = normalizeMount(c.env.MOUNT);
+  const [memberships, subs] = await Promise.all([listHopperItems(c.env.DB, hopper.id), listSubscriptions(c.env.DB)]);
+  const titleOf = new Map(subs.map((sub) => [sub.id, sub.title || sub.origin]));
+  const originOf = new Map(subs.map((sub) => [sub.id, sub.origin]));
+  const rows: string[] = [];
+  for (const m of memberships) {
+    const row = await getImportedItem(c.env.DB, m.subscription_id, m.remote_id);
+    if (!row) continue;
+    const withdrawn = row.state === "tombstone";
+    const content = withdrawn
+      ? row.pinned_version_retained !== null
+        ? `<p style="opacity:0.7;font-style:italic;">withdrawn by origin — retained via a pin (v${row.pinned_version_retained})</p>${row.l0 ? row.content_html : await sanitizeHtml(row.content_html)}`
+        : `<p>withdrawn by origin</p>`
+      : row.l0
+        ? row.content_html
+        : await sanitizeHtml(row.content_html);
+    // A hopper item is always someone else's — name the source and link its
+    // origin, the same attribution the public hopper page carries (§4.2).
+    const srcName = escapeHtml(titleOf.get(m.subscription_id) ?? m.subscription_id);
+    const srcOrigin = originOf.get(m.subscription_id);
+    const srcLabel = srcOrigin ? `<a href="${escapeHtml(srcOrigin)}">${srcName}</a>` : srcName;
+    rows.push(`<div class="reading-entry">
+<p class="byline"><span class="kind-chip">${row.kind}</span>${row.l0 ? ' <span class="l0-chip">legacy rss</span>' : ""} ${srcLabel} &middot; added ${formatDate(m.added_at)}</p>
+<div class="content">${content}</div>
+<div class="entry-actions"><button type="button" data-action="remove-hopper-item" data-hopper="${hopper.id}" data-sub="${m.subscription_id}" data-remote="${m.remote_id}">remove from hopper</button> ${stubButton(m.subscription_id, m.remote_id)}</div>
+</div>`);
+  }
+  const sources = new Set(memberships.map((m) => m.subscription_id)).size;
+  const body = `${studioHeader(`blyg studio — ${hopper.name}`, mount, "hoppers")}
+<style>${READING_STYLE}${HOPPERS_STYLE}</style>
+<nav style="margin:-0.5rem 0 1rem;font-size:0.9rem;"><a href="${studioPath(mount)}/hoppers">← hoppers</a></nav>
+<div class="hopper-head">
+<div>
+<form class="rename-form" data-action="rename-hopper" data-id="${hopper.id}">
+<input type="text" name="name" value="${escapeHtml(hopper.name)}" required>
+<button type="submit">rename</button>
+</form>
+<p class="hopper-meta">${rows.length} item${rows.length === 1 ? "" : "s"}${sources ? ` &middot; ${sources} source${sources === 1 ? "" : "s"}` : ""} &middot; slug: <code>${escapeHtml(hopper.slug ?? "")}</code>${hopper.slug_frozen ? ` <span class="slug-note">(frozen — renaming keeps this URL)</span>` : ""}</p>
+${hopperUrlLine(hopper, mount)}
+</div>
+<div class="actions">
+<label><input type="checkbox" data-action="toggle-public" data-id="${hopper.id}" ${hopper.public ? "checked" : ""}> public</label>
+</div>
+</div>
+${rows.length ? rows.join("\n") : "<p>Nothing in this hopper yet.</p>"}
+<script>${hoppersScript(mount)}</script>
+<script>${stubScript(mount)}</script>`;
+  return c.html(studioLayout(`${hopper.name} — blyg studio`, body, true));
+});
