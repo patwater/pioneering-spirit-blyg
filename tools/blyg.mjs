@@ -8,6 +8,8 @@
 //   id:                     # filled in by `push`; never edit by hand
 //   version: 0              # last published version, filled in by `publish`
 //   note:                   # optional version note, consumed by the next publish
+//   stub_of:                # optional, threads only: what this responds to, either
+//                           # a URL or {"origin": "...", "id": "...", "version": N}
 //   ---
 //   Your markdown. Threads can quote with ![[id]] on its own line.
 //   Either kind can ask for AI prose with [TK]an instruction[/TK].
@@ -60,13 +62,15 @@ function readDraft(file) {
 function parseValue(v) {
   const quoted = v.match(/^("(?:[^"\\]|\\.)*")\s*(#.*)?$/);
   if (quoted) return JSON.parse(quoted[1]);
+  if (v.trim().startsWith("{")) return JSON.parse(v.trim());
   return v.replace(/(^|\s)#.*$/, "").trim();
 }
 
 function writeDraft(file, meta, body) {
-  const order = ["kind", "id", "version", "note", "source", "source_url"];
+  const order = ["kind", "id", "version", "note", "stub_of", "source", "source_url"];
   const keys = [...order.filter((k) => k in meta), ...Object.keys(meta).filter((k) => !order.includes(k))];
   const lines = keys.map((k) => {
+    if (meta[k] && typeof meta[k] === "object") return `${k}: ${JSON.stringify(meta[k])}`;
     const v = meta[k] == null ? "" : String(meta[k]);
     return v === "" ? `${k}:` : `${k}: ${/[#:]/.test(v) ? JSON.stringify(v) : v}`;
   });
@@ -143,8 +147,9 @@ async function push(file, { quiet = false } = {}) {
       console.warn(`warning: fragment is ${stripped.length} characters; publish will refuse anything over ${FRAGMENT_MAX}.`);
     }
   }
+  const stub = stubOf(meta, kind);
   if (!meta.id) {
-    const created = await request("POST", "/api/items", { kind, content_md: body });
+    const created = await request("POST", "/api/items", { kind, content_md: body, ...(stub !== undefined ? { stub_of: stub } : {}) });
     meta.id = created.id;
     meta.kind = kind;
     meta.version ??= "0";
@@ -152,7 +157,7 @@ async function push(file, { quiet = false } = {}) {
     if (!quiet) console.log(`Created ${kind} draft ${meta.id}.`);
   } else {
     if (!ID_RE.test(meta.id)) fail(`${file}: front-matter id "${meta.id}" is not a blyg id`);
-    await request("PUT", `/api/items/${meta.id}`, { content_md: body });
+    await request("PUT", `/api/items/${meta.id}`, { content_md: body, ...(stub !== undefined ? { stub_of: stub } : {}) });
     if (!quiet) console.log(`Saved working copy of ${meta.id}.`);
   }
   return { meta, body, kind };
@@ -286,6 +291,16 @@ function status(dir) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// A stub is a thread declaring the one thing it responds to. An empty field
+// sends nothing, so a stub set in the browser studio is left alone.
+function stubOf(meta, kind) {
+  const v = meta.stub_of;
+  if (v === undefined || v === "") return undefined;
+  if (kind !== "thread") fail("stub_of is only allowed on threads");
+  if (v === "none") return null;
+  return typeof v === "object" ? v : { url: v };
+}
 
 function tkScopes(md) {
   const scopes = [];

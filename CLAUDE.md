@@ -20,6 +20,7 @@ kind: thread        # or fragment (1,000 characters max once published)
 id:                 # filled in by push; never invent or edit one
 version: 0          # filled in by publish
 note:               # optional version note for the next publish
+stub_of:            # optional, threads only: a URL, or {"origin": "...", "id": "...", "version": N}
 ---
 ```
 
@@ -28,6 +29,7 @@ The authoring grammar, which the studio resolves at publish time:
 - `![[id]]` alone on its own line in a **thread** transcludes a published item (a fragment or another thread, his own or one imported from a subscribed blyg). The published thread bakes in a snapshot of that item's current version.
 - `[TK]an instruction[/TK]` asks the studio's AI to write that span. `npm run blyg -- generate <file>` fills it as `[TK]instruction[=]output[/TK]`, and publishing strips it to the output with a machine-generated provenance record. Inside a TK scope, `![[id]]` names a source for the generator rather than a quote, and it must be one of his own published **fragments**. That constraint is why corpus passages get quoted in as fragments first.
 - Fragments cannot transclude; only threads can.
+- A thread with `stub_of` is a **stub**: it declares the one post or page it responds to, and the studio notifies that author by Webmention when it is published.
 
 The CLI (`npm run blyg -- <command>`):
 
