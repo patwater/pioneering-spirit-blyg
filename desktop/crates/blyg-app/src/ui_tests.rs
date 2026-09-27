@@ -160,7 +160,11 @@ fn cmd_t_toggles_kind_and_over_limit_publish_shakes(cx: &mut TestAppContext) {
             "no publish sheet for an over-limit fragment"
         );
         assert_eq!(v.shake_gen, 1);
-        assert!(v.toast.as_ref().is_some_and(|t| t.text.contains("⌘T")));
+        assert!(
+            v.toast
+                .as_ref()
+                .is_some_and(|t| t.text.contains(crate::keymap::hint("⌘T")))
+        );
     });
     cx.simulate_keystrokes(&crate::keymap::keys("cmd-t"));
     cx.run_until_parked();

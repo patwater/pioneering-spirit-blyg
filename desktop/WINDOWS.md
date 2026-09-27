@@ -16,7 +16,7 @@ The first launch walks you through **Connect your blyg**: your blyg's address an
 
 ## What is different from macOS
 
-- **Keys.** Every `⌘` shortcut is `Ctrl` on Windows, so Publish is `Ctrl+Enter` and search is `Ctrl+L`. The one exception is Versions, which is `Ctrl+Shift+Y` rather than `Ctrl+Y`, because `Ctrl+Y` is Redo on Windows. Toolbar tooltips and the menu show the Windows keys. Some hints written into the app's text still show macOS symbols; read `⌘` as `Ctrl`, `⌥` as `Alt`, `⇧` as `Shift`, and `⏎` as `Enter`.
+- **Keys.** Every `⌘` shortcut is `Ctrl` on Windows, so Publish is `Ctrl+Enter` and search is `Ctrl+L`. The one exception is Versions, which is `Ctrl+Shift+Y` rather than `Ctrl+Y`, because `Ctrl+Y` is Redo on Windows. Toolbar tooltips, the menu, the tutorial, and the hints written into the app's text all show the Windows keys.
 - **Menu.** Windows has no global menu bar, so a **Menu** button at the top left of the window lists every menu item, including the ones without a key (Subscribe…, Site Settings…, Open Config File).
 - **Title bar.** The window uses the normal Windows title bar with its minimise, maximise, and close buttons.
 - **Where things live.** The config file is `%APPDATA%\Blygger\config` (Menu › Open Config File opens it in Notepad). The local database, caches, and media are in `%LOCALAPPDATA%\Blygger\`. Your token is stored in Windows Credential Manager under `org.blygger.desktop`.
@@ -42,7 +42,7 @@ Every Windows change is gated with `cfg(target_os = "windows")` (or `cfg(windows
 | Area | Change |
 |---|---|
 | Preview and editor | A WebView2 surface through `wry` (`studio/webview.rs`), reusing the macOS page script, IPC, and navigation guard. GPUI's topmost DirectComposition layer is turned off at startup (`GPUI_DISABLE_DIRECT_COMPOSITION`), because it would cover the child webview. |
-| Keys | `keymap::platform_keys` respells `cmd` as `ctrl`; `glyphs` and `hotkey_glyphs` write `Ctrl+Shift+X`; the clash tests use a Windows list of system shortcuts. |
+| Keys | `keymap::platform_keys` respells `cmd` as `ctrl`; `glyphs` and `hotkey_glyphs` write `Ctrl+Shift+X`; `keymap::hint` rewrites key hints in the app's text (`⇧⌘G` → `Ctrl+Shift+G`) and is the identity on macOS; the clash tests use a Windows list of system shortcuts. |
 | Window and menu | The native title bar, and `windows_menu.rs`, a Menu button that lists `cx.get_menus()`. |
 | Paths and tokens | `%APPDATA%` and `%LOCALAPPDATA%` in `blyg-core/src/config/paths.rs`; `keyring`'s `windows-native` backend. |
 | External programs | Notepad for the config file, the shell URL handler for the browser, `.exe`/`.cmd` CLI shims. |
@@ -53,5 +53,4 @@ Every Windows change is gated with `cfg(target_os = "windows")` (or `cfg(windows
 
 - The Windows build has been compiled, linted, and tested in CI, but it has not yet had much use on real Windows machines. Please report anything that looks or behaves wrong.
 - Keyboard focus between the webview and the editor is handled more simply than on macOS: when the preview hides or the window regains focus, the keyboard always returns to the editor.
-- Some in-app hint text still uses macOS key symbols.
 - No installer, auto-update, or code signing yet.

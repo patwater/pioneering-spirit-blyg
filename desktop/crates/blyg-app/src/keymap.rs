@@ -539,11 +539,10 @@ pub fn platform_key(key: &'static str) -> &'static str {
 
 /// Keys whose plain respelling would take a Windows convention: Ctrl+Y is
 /// Redo in every Windows text field (and gpui-base's `Input` binds it).
-#[cfg(any(target_os = "windows", test))]
 const WINDOWS_OVERRIDES: &[(&str, &str)] = &[("cmd-y", "ctrl-shift-y")];
 
 /// The pure part of `platform_key`.
-#[cfg(any(target_os = "windows", test))]
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 pub fn respell_for_windows(key: &str) -> String {
     if let Some((_, win)) = WINDOWS_OVERRIDES.iter().find(|(mac, _)| *mac == key) {
         return win.to_string();
@@ -564,6 +563,106 @@ pub fn respell_for_windows(key: &str) -> String {
         s.push_str("--");
     }
     s
+}
+
+/// Key hints written into the app's text (`"then ⌘G again"`), as this
+/// platform spells them: unchanged on macOS; on Windows every run of
+/// modifier glyphs and its key is respelled like the bindings
+/// (`⇧⌘G` → `Ctrl+Shift+G`, `⌘Y` → `Ctrl+Shift+Y`). Interned, so it can
+/// stand wherever the literal did.
+pub fn hint(text: &'static str) -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        use std::collections::HashMap;
+        use std::sync::{Mutex, OnceLock};
+        static SPELLED: OnceLock<Mutex<HashMap<&'static str, &'static str>>> = OnceLock::new();
+        let mut spelled = SPELLED
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        spelled
+            .entry(text)
+            .or_insert_with(|| Box::leak(windows_hint(text).into_boxed_str()))
+    }
+    #[cfg(not(target_os = "windows"))]
+    text
+}
+
+/// `hint` for text built at runtime (`format!`).
+pub fn hint_owned(text: String) -> String {
+    if cfg!(target_os = "windows") {
+        windows_hint(&text)
+    } else {
+        text
+    }
+}
+
+/// The pure part of `hint`: rewrite each run of macOS modifier glyphs
+/// (`⌃⌥⇧⌘`) and the key after it as Windows writes the respelled binding.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+pub fn windows_hint(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let mut mods = Vec::new();
+        while i < chars.len() {
+            match chars[i] {
+                '⌃' => mods.push("ctrl"),
+                '⌥' => mods.push("alt"),
+                '⇧' => mods.push("shift"),
+                '⌘' => mods.push("cmd"),
+                _ => break,
+            }
+            i += 1;
+        }
+        if mods.is_empty() {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        // The key: a named key, one glyph, or one character; none when the
+        // modifiers stand alone ("⌘-click", "hold ⌘").
+        let rest: String = chars[i..].iter().collect();
+        let (key, used) = if rest.starts_with("Space") {
+            (Some("space".to_string()), 5)
+        } else if rest.starts_with("esc") {
+            (Some("escape".to_string()), 3)
+        } else {
+            match chars.get(i) {
+                Some('⏎') => (Some("enter".into()), 1),
+                Some('⌫') => (Some("backspace".into()), 1),
+                Some('⇥') => (Some("tab".into()), 1),
+                Some('←') => (Some("left".into()), 1),
+                Some('→') => (Some("right".into()), 1),
+                Some('↑') => (Some("up".into()), 1),
+                Some('↓') => (Some("down".into()), 1),
+                Some('-') if chars.get(i + 1).is_some_and(|c| c.is_alphabetic()) => (None, 0),
+                Some(c) if !c.is_whitespace() && !matches!(c, ')' | '·' | '/') => {
+                    (Some(c.to_lowercase().collect()), 1)
+                }
+                _ => (None, 0),
+            }
+        };
+        let Some(key) = key else {
+            // Modifiers alone: name them the Windows way.
+            let names: Vec<&str> = mods
+                .iter()
+                .map(|m| match *m {
+                    "cmd" | "ctrl" => "Ctrl",
+                    "alt" => "Alt",
+                    _ => "Shift",
+                })
+                .collect();
+            out.push_str(&names.join("+"));
+            continue;
+        };
+        // `cmd--` is how the table spells a minus key.
+        let mac = format!("{}-{}", mods.join("-"), key);
+        out.push_str(&windows_label(&respell_for_windows(&mac)));
+        i += used;
+    }
+    out
 }
 
 /// Tests write keystrokes in macOS terms, like the table. On Windows they
@@ -616,7 +715,7 @@ pub fn glyphs(key: &str) -> String {
 }
 
 /// A key as Windows menus and tooltips write it: `Ctrl+Shift+Enter`.
-#[cfg(any(target_os = "windows", test))]
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 pub fn windows_label(key: &str) -> String {
     let (mods, last) = normalize(key);
     let mut parts: Vec<String> = [
@@ -1022,6 +1121,25 @@ mod tests {
         assert_eq!(windows_label("ctrl--"), "Ctrl+-");
         assert_eq!(windows_label("ctrl+alt+b"), "Ctrl+Alt+B");
         assert_eq!(windows_label("alt-up"), "Alt+Up");
+    }
+
+    #[test]
+    fn hints_respell_for_windows() {
+        assert_eq!(windows_hint("then ⌘G again"), "then Ctrl+G again");
+        assert_eq!(windows_hint("⇧⌘G"), "Ctrl+Shift+G");
+        assert_eq!(windows_hint("⌘⏎ publishes"), "Ctrl+Enter publishes");
+        assert_eq!(windows_hint("Settings (⌘,)"), "Settings (Ctrl+,)");
+        assert_eq!(windows_hint("⌘Y versions"), "Ctrl+Shift+Y versions");
+        assert_eq!(windows_hint("⌃⌥B"), "Ctrl+Alt+B");
+        assert_eq!(windows_hint("⇧⌘Space"), "Ctrl+Shift+Space");
+        assert_eq!(windows_hint("⌘-click"), "Ctrl-click");
+        assert_eq!(windows_hint("hold ⌘ and"), "hold Ctrl and");
+        assert_eq!(windows_hint("⌘1 · ⌘2"), "Ctrl+1 · Ctrl+2");
+        assert_eq!(windows_hint("no keys here ⏎"), "no keys here ⏎");
+        // macOS text is untouched.
+        if !cfg!(target_os = "windows") {
+            assert_eq!(hint("then ⌘G"), "then ⌘G");
+        }
     }
 
     /// On Windows every key is respelled, `⌘` never survives, and the

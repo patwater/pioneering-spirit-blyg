@@ -449,7 +449,7 @@ impl MainView {
         match crate::settings::open_config_file(cx) {
             Ok(path) => self.show_toast(
                 format!("Opening {}", blyg_core::config::paths::tilde(&path)),
-                Some("Save it, then ⌘⇧, reloads".into()),
+                Some(crate::keymap::hint("Save it, then ⌘⇧, reloads").into()),
                 cx,
             ),
             Err(e) => self.show_toast(e, None, cx),
@@ -970,7 +970,9 @@ impl MainView {
             PublishDecision::Shake => {
                 self.shake_gen += 1;
                 self.show_toast(
-                    "Too long to publish as a fragment. Press ⌘T to make it a thread.",
+                    crate::keymap::hint(
+                        "Too long to publish as a fragment. Press ⌘T to make it a thread.",
+                    ),
                     None,
                     cx,
                 );
@@ -1037,7 +1039,10 @@ impl MainView {
                             Some(n) => format!("Published v{} · “{n}”", out.version),
                             None => format!("Published v{}", out.version),
                         };
-                        let sub = format!("{} · ⌘O opens it", vm::short_permalink(&out.permalink));
+                        let sub = crate::keymap::hint_owned(format!(
+                            "{} · ⌘O opens it",
+                            vm::short_permalink(&out.permalink)
+                        ));
                         let head = match out.warning {
                             Some(w) => format!("{head} · {w}"),
                             None => head,
@@ -1750,11 +1755,11 @@ impl MainView {
                             div()
                                 .text_color(p.ink)
                                 .font_weight(FontWeight::MEDIUM)
-                                .child(format!(
+                                .child(crate::keymap::hint_owned(format!(
                                     "The config file has {n} problem{} · ⌘⇧, reloads it after you fix {}",
                                     if n == 1 { "" } else { "s" },
                                     if n == 1 { "it" } else { "them" }
-                                )),
+                                ))),
                         )
                         .children(lines)
                         .when(n > SHOWN, |d| {
@@ -2739,7 +2744,12 @@ impl MainView {
                             },
                         )),
                     )
-                    .child(div().ml(px(8.)).text_color(p.muted).child("⌘+  ⌘−  ⌘0"))
+                    .child(
+                        div()
+                            .ml(px(8.))
+                            .text_color(p.muted)
+                            .child(crate::keymap::hint("⌘+  ⌘−  ⌘0")),
+                    )
                     .into_any_element(),
             ))
             .child(row(
@@ -2815,10 +2825,17 @@ impl MainView {
                                     ),
                             )
                             .child(
-                                chip("reload-config".into(), "Reload  ⌘⇧,".into(), false, None)
-                                    .on_click(cx.listener(|this, _, window, cx| {
+                                chip(
+                                    "reload-config".into(),
+                                    crate::keymap::hint("Reload  ⌘⇧,").into(),
+                                    false,
+                                    None,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
                                         this.reload_config(&ReloadConfig, window, cx)
-                                    })),
+                                    },
+                                )),
                             ),
                     )
                     .child(
@@ -2857,7 +2874,7 @@ impl MainView {
                             .flex()
                             .items_center()
                             .gap(px(5.))
-                            .child(kbd("⌘,"))
+                            .child(kbd(crate::keymap::hint("⌘,")))
                             .child("toggle"),
                     ),
             )

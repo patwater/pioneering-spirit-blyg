@@ -221,7 +221,11 @@ impl MainView {
             return;
         }
         let Some(item) = self.current.clone() else {
-            self.show_toast("Open a post first, then ⌘G inside [TK]…[/TK]", None, cx);
+            self.show_toast(
+                crate::keymap::hint("Open a post first, then ⌘G inside [TK]…[/TK]"),
+                None,
+                cx,
+            );
             return;
         };
         let text = self.editor.read(cx).value().to_string();
@@ -230,7 +234,7 @@ impl MainView {
             Under::Scope(index) => self.ai_fill(item, text, index, window, cx),
             Under::Malformed => self.show_toast(
                 "This TK isn't closed yet",
-                Some("End it with [/TK], then ⌘G again".into()),
+                Some(crate::keymap::hint("End it with [/TK], then ⌘G again").into()),
                 cx,
             ),
             Under::Nothing => self.ai_open_palette(&item, &text, window, cx),
@@ -544,7 +548,7 @@ impl MainView {
         let Some(sid) = item.server_id.clone().filter(|_| !item.pending_sync) else {
             self.show_toast(
                 "The blyg doesn't have this version yet",
-                Some("Wait for it to sync, then ⌘G again".into()),
+                Some(crate::keymap::hint("Wait for it to sync, then ⌘G again").into()),
                 cx,
             );
             return;
@@ -833,7 +837,7 @@ impl MainView {
                 let end = new.len();
                 self.ai_write(&item, &old, new, scopes, Some(end), window, cx);
                 self.show_toast(
-                    "Reply drafted · review it, then ⌘⏎ publishes",
+                    crate::keymap::hint("Reply drafted · review it, then ⌘⏎ publishes"),
                     Some("Generated text is disclosed when published".into()),
                     cx,
                 );
@@ -1231,7 +1235,7 @@ impl MainView {
 
     fn ai_use(&mut self, kind: ProviderKind, window: &mut Window, cx: &mut Context<Self>) {
         let r = ais::set_default(kind, cx);
-        let ok = format!("⌘G now uses {}", kind.label());
+        let ok = crate::keymap::hint_owned(format!("⌘G now uses {}", kind.label()));
         self.ai_settings_result(r, ok, cx);
         let model = crate::ai::with_accounts(cx, |a| blyg_ai::accounts::model_in(a.config(), kind))
             .unwrap_or_default();
@@ -1569,7 +1573,7 @@ impl MainView {
             .child(heading("AI helpers".into()))
             .child(div().flex().flex_col().children(rows))
             .child(div().mt(px(8.)).text_size(px(11.5)).text_color(p.muted).child(
-                "Inside [TK]instruction[/TK], ⌘G fills it. Generated text is disclosed when published.",
+                crate::keymap::hint("Inside [TK]instruction[/TK], ⌘G fills it. Generated text is disclosed when published."),
             ))
             .child(keys(p, &[("↑↓", "choose"), ("⏎", "run"), ("esc", "close")]))
             .into_any_element()
@@ -1727,7 +1731,13 @@ impl MainView {
             }
             if ready && !row.is_default {
                 controls = controls.child(
-                    chip(p, format!("ai-use-{name}"), "Use for ⌘G", false).on_click(
+                    chip(
+                        p,
+                        format!("ai-use-{name}"),
+                        crate::keymap::hint("Use for ⌘G"),
+                        false,
+                    )
+                    .on_click(
                         cx.listener(move |this, _, window, cx| this.ai_use(kind, window, cx)),
                     ),
                 );
@@ -1753,7 +1763,7 @@ impl MainView {
                                     .border_1()
                                     .border_color(p.accent)
                                     .text_color(p.accent)
-                                    .child("⌘G uses this"),
+                                    .child(crate::keymap::hint("⌘G uses this")),
                             )
                         }),
                 )
@@ -1796,10 +1806,10 @@ impl MainView {
             }))
             .child(heading("Settings › AI".into()))
             .child(div().text_color(p.muted).text_size(px(12.)).line_height(relative(1.45)).child(
-                "AI stays off until you switch a provider on or sign in to one. Then ⌘G inside \
+                crate::keymap::hint("AI stays off until you switch a provider on or sign in to one. Then ⌘G inside \
                  [TK]instruction[/TK] writes the gap, and the text is disclosed as generated when \
                  you publish. Keys go straight to your macOS Keychain and are never shown again. \
-                 There's no claude.ai login: to use a Claude plan, switch on Claude Code.",
+                 There's no claude.ai login: to use a Claude plan, switch on Claude Code."),
             ))
             .child(div().flex().flex_col().mt(px(6.)).children(rows))
             .child(
