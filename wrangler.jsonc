@@ -12,7 +12,7 @@
   // Pin the Cloudflare account so a deploy can never land somewhere else
   // (upstream incident 2026-09-12-01). Find it in the dashboard sidebar or
   // with `npx wrangler whoami`. It is an identifier, not a secret.
-  "account_id": "REPLACE_WITH_CLOUDFLARE_ACCOUNT_ID",
+  "account_id": "20bc6fd3f81cd3964a12311247e66ccc",
 
   // "" mounts the blyg at the domain root: feed at /feed.xml, studio at
   // /studio, owner API at /api. The protocol file names never change.
@@ -38,7 +38,7 @@
       "binding": "DB",
       "database_name": "pioneering-spirit-blyg",
       // Paste the id printed by `npx wrangler d1 create pioneering-spirit-blyg`.
-      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "database_id": "2acfe52f-1eff-45c6-94c0-8aa9eceb3156",
       "migrations_dir": "worker/migrations"
     }
   ],
