@@ -72,9 +72,18 @@ Do these in order, ideally in one sitting, since the site is briefly unavailable
 
 If you want to rehearse before step 2, temporarily comment out the `routes` block in `wrangler.jsonc`, deploy, and try the `*.workers.dev` URL that Wrangler prints; then restore the block for the real cutover.
 
-### 5. Automate deploys (optional)
+### 5. Deploys
 
-Add a repository secret named `CLOUDFLARE_API_TOKEN`, created from the *Edit Cloudflare Workers* template, and make sure it also carries **D1: Edit** on the account (add it if the template does not include it), because the migration step fails without D1 access and the error reads misleadingly like a wrong-account problem. After that, every push to `main` that changes the Worker, its config, or the Paragraph corpus runs the tests, applies migrations, deploys, and verifies the live surfaces. Posts themselves never need a deploy, because they live in the database.
+Cloudflare Workers Builds deploys this repo on every push to `main`. The project's build settings are:
+
+| Setting | Value |
+|---|---|
+| Build command | `npm run build-archive` |
+| Deploy command | `npx wrangler d1 migrations apply pioneering-spirit-blyg --remote && npx wrangler deploy` |
+| Preview command | `npx wrangler versions upload` |
+| Build variable | `NODE_VERSION` = `22` |
+
+Posts themselves never need a deploy, because they live in the database.
 
 ## Writing
 

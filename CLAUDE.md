@@ -6,6 +6,7 @@ This repo is two things at once. It deploys Patrick Atwater's blyg at the root o
 
 - **Never edit `worker/`.** It is a verbatim copy of the Blygger reference client (pinned in `upstream.json`) and is replaced wholesale by `npm run upgrade-worker`. Anything deployment-specific belongs in `wrangler.jsonc`, `blyg.settings.json`, or `tools/`.
 - **Never publish without an explicit request.** Publishing is public and permanent in spirit: an item can be withdrawn but never deleted, and the feed notifies subscribers at once. `push` (saving a studio draft) is fine whenever it helps; `publish` and `quote --publish` need Patrick to say so in the current conversation.
+- **Commit and push directly to `main`.** Patrick has authorized this for this repo. Every push to `main` deploys to the live site through Cloudflare Workers Builds, so run `npm test` before pushing any change to `worker/`, `wrangler.jsonc`, or `tools/build-archive.mjs`.
 - **Never pin a version unless asked.** A pin is an irrevocable promise to host those bytes forever.
 - Patrick prefers full sentences and full paragraphs in everything written for him. Avoid sentence fragments, verbless sentences, and one-line paragraphs.
 
