@@ -17,6 +17,8 @@ This repository runs [Pioneering Spirit](https://pioneeringspirit.xyz) as a [Bly
 ```
 
 - `worker/` is a verbatim copy of the Blygger reference client (pinned in `upstream.json`). It provides the public blyg, the private **studio** editor at `/studio`, subscriptions to other blygs, transclusion, and TK (AI) generation. It is never edited here, so upgrades are a clean overwrite.
+- `server-ext/` is the Worker's entry point: a thin wrapper that adds the owner API Blygger Desktop needs (bearer-token auth, JSON reads, reading list, AI provenance, read-state sync) and hands everything else to `worker/` unchanged. See `server-ext/README.md`.
+- `desktop/` is Blygger Desktop, Aneesh Sathe's native reading-and-writing app, ported to Windows (pinned in `desktop-upstream.json`). See `desktop/WINDOWS.md`.
 - `wrangler.jsonc` holds everything specific to this deployment: the root mount, the custom domain, the database, the media bucket, and the static archive.
 - `blyg.settings.json` holds the site identity and the AI style prompt as code.
 - `corpus/` is the library you write in dialogue with: the Paragraph export, *A New California Dream*, Stag Hunt, and anything else.
@@ -57,7 +59,10 @@ Wrangler prompts for each value, so nothing lands in your shell history or in a 
 npx wrangler secret put OWNER_PASSWORD    # your studio login password
 npx wrangler secret put COOKIE_SECRET     # any long random string
 npx wrangler secret put AI_PROVIDER_KEY   # an Anthropic API key; optional, enables [TK] generation
+npx wrangler secret put BLYG_OWNER_TOKEN  # a long random string; the desktop app signs in with it
 ```
+
+You can set the same secrets in the Cloudflare dashboard under the Worker's **Settings → Variables and Secrets**, as type **Secret**.
 
 ### 4. Cut the domain over from Paragraph
 
@@ -106,7 +111,7 @@ npm run blyg -- status
 
 Set `BLYG_PASSWORD` in your environment to skip the password prompt. `CLAUDE.md` explains the authoring grammar and the drafting workflow in detail, and it tells Claude never to publish unless you ask.
 
-**Blygger Desktop** is a fast native client by Aneesh Sathe that syncs with the same studio. It is macOS-only today; see "A Windows client" below.
+**Blygger Desktop** is a fast native app by Aneesh Sathe that puts your reading list and your drafts in one window. This repo carries a Windows port of it; see "The desktop app" below.
 
 ### The authoring grammar in brief
 
@@ -132,9 +137,19 @@ A few habits make the most of what Blygger offers for this kind of writing.
 
 Paragraph readers who subscribed by email will not follow the move automatically. The simplest bridge is an RSS-to-email service (Buttondown, Kit, and Mailchimp all offer one) pointed at `https://pioneeringspirit.xyz/feed.xml`, seeded with the subscriber list you exported. Because the feed announces every new version, you may want the service to send a digest rather than one email per update.
 
-## A Windows client
+## The desktop app
 
-Blygger Desktop is written in Rust on GPUI and wry, both of which run on Windows, and most of its roughly 60,000 lines are platform-neutral. The macOS-specific parts are small: a few Objective-C calls for the dock icon and window focus, the Keychain backend for stored tokens, the `⌘` key bindings, the self-updater (which installs `.app` bundles), and the `.dmg` packaging. A Windows port would mean swapping those for Windows equivalents and adding an installer, which is likely a few focused days of work for someone comfortable with Rust, and it is best done as a contribution to the upstream project rather than as a fork. Until then the browser studio works on Windows as is.
+`desktop/` is Blygger Desktop, ported to Windows from Aneesh Sathe's macOS app. It reads the blygs and RSS feeds you subscribe to, lets you quote, stub, and follow what you read, and writes and publishes to your own blyg, all in one window and offline-first. Every Windows change is gated to Windows, so the macOS build is unchanged, and `desktop/WINDOWS.md` lists each one so the port can be offered back upstream.
+
+**Getting it.** Each push that changes `desktop/` runs the *Desktop app* workflow, which builds and tests on Windows and macOS and leaves a `Blygger-<version>-windows-x64` zip on the run's summary page under **Artifacts**. Pushing a tag such as `desktop-v0.3.0-win1` also publishes that zip as a GitHub release. The build is unsigned, so SmartScreen asks once; `desktop/WINDOWS.md` explains it.
+
+**Connecting it.** Set the `BLYG_OWNER_TOKEN` secret (step 3), then enter your blyg's address and that token in the app's **Connect your blyg** screen.
+
+**Testing the pair.** Aneesh's end-to-end suite drives the real client against two local copies of this Worker, which is the best check that the app and `server-ext/` still agree:
+
+```bash
+cd desktop && BLYG_WORKER_DIR=.. bash scripts/e2e-local.sh
+```
 
 ## Keeping the reference client current
 
@@ -151,7 +166,7 @@ The protocol is pre-1.0, so upstream may change the wire format between versions
 ## Local development
 
 ```bash
-printf 'OWNER_PASSWORD=dev\nCOOKIE_SECRET=dev-secret\n' > .dev.vars
+printf 'OWNER_PASSWORD=dev\nCOOKIE_SECRET=dev-secret\nBLYG_OWNER_TOKEN=dev-token\n' > .dev.vars
 npm run migrate:local
 npm run dev                                       # http://localhost:8787
 BLYG_URL=http://localhost:8787 BLYG_PASSWORD=dev npm run blyg -- status
