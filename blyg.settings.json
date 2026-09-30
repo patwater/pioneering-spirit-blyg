@@ -1,6 +1,6 @@
 {
   "$note": "Studio settings as code. Push with `npm run blyg -- settings`. Every key is optional; the studio's /studio/settings page edits the same values.",
-  "site_title": "Pioneering Spirit",
+  "site_title": "Pioneering Spirit Blyg",
   "site_url": "https://pioneeringspirit.xyz/",
   "theme": "auto",
   "author_name": "Patrick Atwater",
