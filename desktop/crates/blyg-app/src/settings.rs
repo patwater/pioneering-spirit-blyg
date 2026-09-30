@@ -188,9 +188,15 @@ mod tests {
 
     #[test]
     fn app_checks_fonts_and_hotkeys() {
-        let s = ConfigStore::in_memory(
-            "font-family-writing = Comic Sans\nfont-family-ui = sf pro\ncapture-hotkey = ctrl+alt+nope\nbogus = 1\n",
-        );
+        // A system font, as this platform names it (any case).
+        let ui = if cfg!(target_os = "windows") {
+            "segoe ui"
+        } else {
+            "sf pro"
+        };
+        let s = ConfigStore::in_memory(&format!(
+            "font-family-writing = Comic Sans\nfont-family-ui = {ui}\ncapture-hotkey = ctrl+alt+nope\nbogus = 1\n",
+        ));
         let d = diagnostics(s.loaded());
         let lines: Vec<(usize, Severity)> = d.iter().map(|d| (d.line, d.severity)).collect();
         assert_eq!(

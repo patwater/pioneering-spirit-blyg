@@ -662,6 +662,44 @@ pub fn windows_hint(text: &str) -> String {
         out.push_str(&windows_label(&respell_for_windows(&mac)));
         i += used;
     }
+    windows_words(&out)
+}
+
+/// Mac words in the app's text, as Windows says them, longest first so a
+/// phrase wins over the word inside it.
+const WINDOWS_WORDS: &[(&str, &str)] = &[
+    ("your macOS Keychain", "Windows Credential Manager"),
+    ("the macOS Keychain", "Windows Credential Manager"),
+    ("macOS Keychain", "Windows Credential Manager"),
+    ("your Keychain", "Credential Manager"),
+    ("the Keychain", "Credential Manager"),
+    ("Keychain", "Credential Manager"),
+    ("follow macOS", "follow Windows"),
+    ("this Mac", "this PC"),
+    ("your Mac", "your PC"),
+    ("another Mac", "another PC"),
+    // Windows has no menu bar; the Menu button lists the same items.
+    ("the Blygger menu", "the Menu button"),
+];
+
+/// The wording half of `windows_hint`: Keychain → Credential Manager,
+/// this Mac → this PC.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+pub fn windows_words(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    'scan: while !rest.is_empty() {
+        for (mac, win) in WINDOWS_WORDS {
+            if let Some(after) = rest.strip_prefix(mac) {
+                out.push_str(win);
+                rest = after;
+                continue 'scan;
+            }
+        }
+        let c = rest.chars().next().expect("not empty");
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
     out
 }
 
@@ -1136,6 +1174,19 @@ mod tests {
         assert_eq!(windows_hint("hold ⌘ and"), "hold Ctrl and");
         assert_eq!(windows_hint("⌘1 · ⌘2"), "Ctrl+1 · Ctrl+2");
         assert_eq!(windows_hint("no keys here ⏎"), "no keys here ⏎");
+        assert_eq!(
+            windows_hint("The token is kept in your macOS Keychain; the address"),
+            "The token is kept in Windows Credential Manager; the address"
+        );
+        assert_eq!(
+            windows_hint("saved in your Keychain"),
+            "saved in Credential Manager"
+        );
+        assert_eq!(
+            windows_hint("scratch · only on this Mac"),
+            "scratch · only on this PC"
+        );
+        assert_eq!(windows_hint("Macintosh"), "Macintosh");
         // macOS text is untouched.
         if !cfg!(target_os = "windows") {
             assert_eq!(hint("then ⌘G"), "then ⌘G");

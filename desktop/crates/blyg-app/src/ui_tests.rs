@@ -14,6 +14,13 @@ use crate::prefs::Prefs;
 
 const CONNECTED: &str = "# test config\nblyg-url = https://blyg.example.com\n";
 
+/// A non-bundled writing font, as this platform names it.
+const CHARTER: &str = if cfg!(target_os = "windows") {
+    "Cambria"
+} else {
+    "Charter"
+};
+
 fn setup(cx: &mut TestAppContext) -> (Entity<MainView>, Arc<FakeBackend>, &mut VisualTestContext) {
     setup_with(cx, CONNECTED, Arc::new(MemoryTokenStore::default()))
 }
@@ -388,7 +395,7 @@ fn reload_applies_the_file_live(cx: &mut TestAppContext) {
             &[
                 ("layout", Change::Set("stacked".into())),
                 ("theme", Change::Set("dark".into())),
-                ("font-family-writing", Change::Set("Charter".into())),
+                ("font-family-writing", Change::Set(CHARTER.into())),
                 ("fnot-size", Change::Set("3".into())),
             ],
             cx,
@@ -406,7 +413,7 @@ fn reload_applies_the_file_live(cx: &mut TestAppContext) {
         assert_eq!(v.prefs.layout, crate::prefs::LayoutPref::Stacked);
         assert_eq!(v.prefs.theme, crate::prefs::ThemePref::Dark);
         assert!(v.palette.dark);
-        assert_eq!(v.prefs.writing().family, "Charter");
+        assert_eq!(v.prefs.writing().family, CHARTER);
         assert_eq!(v.config_problems.len(), 1, "{:?}", v.config_problems);
         assert_eq!(v.config_problems[0].line, 6);
         assert!(!v.problems_dismissed);

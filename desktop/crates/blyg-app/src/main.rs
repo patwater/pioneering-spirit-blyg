@@ -9,6 +9,13 @@
 //! --default --docs`); `blygger +action` runs a command-line action instead
 //! of the app (see `cli.rs`).
 
+// A GUI program on Windows, so no console window opens behind the app.
+// Debug builds keep the console for their logs.
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 mod ai;
 mod app;
 mod capture;

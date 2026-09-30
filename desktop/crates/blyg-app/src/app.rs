@@ -358,17 +358,17 @@ impl MainView {
                     (Ok(()), Some(host)) => v.show_toast(
                         format!("Connected to {host}"),
                         Some(
-                            format!(
+                            crate::keymap::hint_owned(format!(
                                 "{n} post{} loaded · the token is in your Keychain",
                                 if n == 1 { "" } else { "s" }
-                            )
+                            ))
                             .into(),
                         ),
                         cx,
                     ),
                     (Ok(()), None) => {}
                     (Err(CoreError::Offline), _) => v.show_toast(
-                        "Offline: showing what's on this Mac",
+                        crate::keymap::hint("Offline: showing what's on this Mac"),
                         Some("Changes sync when the blyg is reachable".into()),
                         cx,
                     ),
@@ -577,7 +577,7 @@ impl MainView {
                 self.focus_after_sheet(window, cx);
                 self.show_toast(
                     format!("Connected to {host}"),
-                    Some("The token is in your Keychain".into()),
+                    Some(crate::keymap::hint("The token is in your Keychain").into()),
                     cx,
                 );
             }
@@ -620,7 +620,7 @@ impl MainView {
                     Some(if delete_local {
                         "The token and the local copy are gone".into()
                     } else {
-                        "The token is gone; your posts stay on this Mac".into()
+                        crate::keymap::hint("The token is gone; your posts stay on this Mac").into()
                     }),
                     cx,
                 );
@@ -1686,7 +1686,12 @@ impl MainView {
         let p = self.palette;
         div()
             .id("titlebar")
-            .window_control_area(WindowControlArea::Drag)
+            // On Windows the OS title bar moves the window, and a drag area
+            // here would answer HTCAPTION for the toolbar and Menu buttons
+            // drawn over it, so clicks on them would drag the window instead.
+            .when(!cfg!(target_os = "windows"), |d| {
+                d.window_control_area(WindowControlArea::Drag)
+            })
             .h(px(TITLEBAR_H))
             .flex_none()
             .flex()
@@ -2364,14 +2369,54 @@ impl MainView {
                     }))
                     .child(heading(format!("Disconnect from {host}?")))
                     .child(div().text_color(p.muted).line_height(relative(1.45)).child(
-                        "The owner token is removed from your Keychain and the address from \
+                        crate::keymap::hint(
+                            "The owner token is removed from your Keychain and the address from \
                          your config file. Nothing changes on the blyg itself.",
+                        ),
                     ))
-                    .child(keys_row(vec![
-                        key_hint("1", "disconnect, keep the posts on this Mac"),
-                        key_hint("2", "also delete the local copy"),
-                    ]))
-                    .child(keys_row(vec![key_hint("esc", "cancel")]))
+                    // Windows: the keys are buttons too.
+                    .child(if cfg!(target_os = "windows") {
+                        keys_row(vec![])
+                            .child(
+                                key_hint(
+                                    "1",
+                                    crate::keymap::hint("disconnect, keep the posts on this Mac"),
+                                )
+                                .id("disconnect-keep")
+                                .cursor_pointer()
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| this.disconnect_now(false, window, cx),
+                                )),
+                            )
+                            .child(
+                                key_hint("2", "also delete the local copy")
+                                    .id("disconnect-delete")
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.disconnect_now(true, window, cx)
+                                    })),
+                            )
+                    } else {
+                        keys_row(vec![
+                            key_hint(
+                                "1",
+                                crate::keymap::hint("disconnect, keep the posts on this Mac"),
+                            ),
+                            key_hint("2", "also delete the local copy"),
+                        ])
+                    })
+                    .child(if cfg!(target_os = "windows") {
+                        keys_row(vec![]).child(
+                            key_hint("esc", "cancel")
+                                .id("disconnect-cancel")
+                                .cursor_pointer()
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.close_sheet(window, cx)),
+                                ),
+                        )
+                    } else {
+                        keys_row(vec![key_hint("esc", "cancel")])
+                    })
                     .into_any_element(),
             ),
             Sheet::Connect {
@@ -2398,9 +2443,11 @@ impl MainView {
                         }))
                         .child(heading("Connect your blyg".into()))
                         .child(div().text_color(p.muted).line_height(relative(1.45)).child(
-                            "Blygger writes to your own blyg. Enter its address and its \
+                            crate::keymap::hint(
+                                "Blygger writes to your own blyg. Enter its address and its \
                                      owner token. The token is kept in your macOS Keychain; the \
                                      address goes in your config file.",
+                            ),
                         ))
                         .child(label("BLYG ADDRESS"))
                         .child(input_box(
@@ -2421,10 +2468,31 @@ impl MainView {
                                     .child("Checking the address and token…"),
                             )
                         })
-                        .child(keys_row(vec![
-                            key_hint("⏎", "next · connect"),
-                            key_hint("esc", "not now"),
-                        ]))
+                        // Windows: the keys are buttons too.
+                        .child(if cfg!(target_os = "windows") {
+                            keys_row(vec![])
+                                .child(
+                                    key_hint("⏎", "next · connect")
+                                        .id("connect-submit")
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.submit_connect(window, cx)
+                                        })),
+                                )
+                                .child(
+                                    key_hint("esc", "not now")
+                                        .id("connect-cancel")
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.close_sheet(window, cx)
+                                        })),
+                                )
+                        } else {
+                            keys_row(vec![
+                                key_hint("⏎", "next · connect"),
+                                key_hint("esc", "not now"),
+                            ])
+                        })
                         .into_any_element(),
                 )
             }
@@ -2863,11 +2931,18 @@ impl MainView {
                     .text_color(p.muted)
                     .child(
                         div()
+                            .id("settings-close")
                             .flex()
                             .items_center()
                             .gap(px(5.))
                             .child(kbd("esc"))
-                            .child("close"),
+                            .child("close")
+                            // Windows: the key is a button too.
+                            .when(cfg!(target_os = "windows"), |d| {
+                                d.cursor_pointer().on_click(
+                                    cx.listener(|this, _, window, cx| this.close_sheet(window, cx)),
+                                )
+                            }),
                     )
                     .child(
                         div()

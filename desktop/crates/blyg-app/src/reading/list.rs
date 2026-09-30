@@ -585,10 +585,10 @@ impl MainView {
                                 .font_family("Inter")
                                 .text_size(px(11.5))
                                 .text_color(p.muted)
-                                .child(
+                                .child(crate::keymap::hint(
                                     "Searches titles, authors and text of the posts held \
                                      on this Mac · esc clears",
-                                ),
+                                )),
                         ),
                 )
             })

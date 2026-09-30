@@ -67,9 +67,12 @@ pub(crate) fn create_note(
         NewNote::Draft => backend
             .create_draft(Kind::Fragment, seed)
             .map(|id| (id, "New draft created")),
-        NewNote::Scratch => backend
-            .create_scratch(Kind::Fragment, seed)
-            .map(|id| (id, "New scratch note · only on this Mac")),
+        NewNote::Scratch => backend.create_scratch(Kind::Fragment, seed).map(|id| {
+            (
+                id,
+                crate::keymap::hint("New scratch note · only on this Mac"),
+            )
+        }),
     }
 }
 
@@ -127,7 +130,7 @@ impl MainView {
                 let (new_text, caret) = insert_image(&text, cursor, &url);
                 self.splice_editor(&text, &new_text, Some(caret), window, cx);
                 self.show_toast(
-                    "Image kept on this Mac",
+                    crate::keymap::hint("Image kept on this Mac"),
                     Some("It's uploaded when the note becomes a draft or is published".into()),
                     cx,
                 );
@@ -199,7 +202,10 @@ impl MainView {
                     // Nothing changed: it's still a scratch note.
                     Err(e) => v.show_toast(
                         format!("Couldn't make a draft: {e}"),
-                        images.then(|| "It's still a scratch note, only on this Mac".into()),
+                        images.then(|| {
+                            crate::keymap::hint("It's still a scratch note, only on this Mac")
+                                .into()
+                        }),
                         cx,
                     ),
                 }
@@ -307,7 +313,10 @@ mod tests {
             assert_eq!(vm::pill(row), ("scratch".to_string(), false));
             assert!(!vm::has_unpublished_edits(row));
             let cur = v.current.as_ref().unwrap();
-            assert_eq!(vm::version_label(cur), "scratch · only on this Mac");
+            assert_eq!(
+                vm::version_label(cur),
+                crate::keymap::hint("scratch · only on this Mac")
+            );
         });
         // Editing it saves locally and never queues a push.
         cx.simulate_input(", green as a pond.");
@@ -376,7 +385,10 @@ mod tests {
         let first = fake.items().remove(0);
         assert_eq!(first.content_md, "rain on tin roofs");
         assert_eq!(first.status, Status::Scratch);
-        assert_eq!(toast(&view, cx), "New scratch note · only on this Mac");
+        assert_eq!(
+            toast(&view, cx),
+            crate::keymap::hint("New scratch note · only on this Mac")
+        );
     }
 
     #[gpui_kit::test]
@@ -429,7 +441,10 @@ mod tests {
             .scratch_media_file(&format!("blyg-local:{}", refs[0]))
             .expect("the image is in the scratch media folder");
         assert_eq!(std::fs::read(file).unwrap(), PNG);
-        assert_eq!(toast(&view, cx), "Image kept on this Mac");
+        assert_eq!(
+            toast(&view, cx),
+            crate::keymap::hint("Image kept on this Mac")
+        );
 
         // The studio preview shows it (inline bytes; nothing is fetched).
         let item = fake.item(&id).unwrap();

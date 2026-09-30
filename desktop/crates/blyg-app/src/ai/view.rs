@@ -1174,7 +1174,11 @@ impl MainView {
         input.update(cx, |s, cx| s.set_value("", window, cx));
         let r = ais::save_api_key(kind, &key, cx);
         drop(key);
-        self.ai_settings_result(r, format!("{} saved in your Keychain", kind.label()), cx);
+        self.ai_settings_result(
+            r,
+            crate::keymap::hint_owned(format!("{} saved in your Keychain", kind.label())),
+            cx,
+        );
     }
 
     fn ai_save_cloudflare(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1200,7 +1204,7 @@ impl MainView {
         }
         self.ai_settings_result(
             r,
-            "Cloudflare Workers AI saved (token in your Keychain)".into(),
+            crate::keymap::hint("Cloudflare Workers AI saved (token in your Keychain)").into(),
             cx,
         );
     }
@@ -1680,15 +1684,28 @@ impl MainView {
                     );
             } else {
                 controls = match kind {
-                    ProviderKind::AnthropicApi => {
-                        controls.child(input_box("ai-key-anthropic", &s.anthropic_key))
-                    }
-                    ProviderKind::OpenaiApi => {
-                        controls.child(input_box("ai-key-openai", &s.openai_key))
-                    }
+                    ProviderKind::AnthropicApi => controls
+                        .child(input_box("ai-key-anthropic", &s.anthropic_key))
+                        .children(save_chip(p, "ai-save-anthropic").map(|c| {
+                            c.on_click(cx.listener(|this, _, window, cx| {
+                                this.ai_save_key(ProviderKind::AnthropicApi, window, cx)
+                            }))
+                        })),
+                    ProviderKind::OpenaiApi => controls
+                        .child(input_box("ai-key-openai", &s.openai_key))
+                        .children(save_chip(p, "ai-save-openai").map(|c| {
+                            c.on_click(cx.listener(|this, _, window, cx| {
+                                this.ai_save_key(ProviderKind::OpenaiApi, window, cx)
+                            }))
+                        })),
                     ProviderKind::CloudflareWorkersAi => controls
                         .child(input_box("ai-cf-account", &s.cf_account))
-                        .child(input_box("ai-cf-token", &s.cf_token)),
+                        .child(input_box("ai-cf-token", &s.cf_token))
+                        .children(save_chip(p, "ai-save-cloudflare").map(|c| {
+                            c.on_click(cx.listener(|this, _, window, cx| {
+                                this.ai_save_cloudflare(window, cx)
+                            }))
+                        })),
                     ProviderKind::ChatgptAccount => {
                         if s.chatgpt_running.is_some() {
                             controls
@@ -1830,7 +1847,12 @@ impl MainView {
                                 None => "MODEL".to_string(),
                             }),
                     )
-                    .child(input_box("ai-model", &s.model)),
+                    .child(input_box("ai-model", &s.model))
+                    .children(save_chip(p, "ai-save-model").map(|c| {
+                        c.on_click(
+                            cx.listener(|this, _, window, cx| this.ai_save_model(window, cx)),
+                        )
+                    })),
             )
             .when_some(s.message.clone(), |d, (m, is_err)| {
                 d.child(
@@ -1843,8 +1865,23 @@ impl MainView {
                 )
             })
             .child(keys(p, &[("⏎", "save a field"), ("esc", "close")]))
+            // Windows: a way out for the mouse, too.
+            .when(cfg!(target_os = "windows"), |d| {
+                d.child(
+                    div().mt(px(10.)).flex().justify_end().child(
+                        chip(p, "ai-settings-done", "Done", true).on_click(
+                            cx.listener(|this, _, window, cx| this.ai_close(window, cx)),
+                        ),
+                    ),
+                )
+            })
             .into_any_element()
     }
+}
+
+/// Windows: a Save button beside a field, which macOS saves with ⏎ alone.
+fn save_chip(p: crate::theme::Palette, id: &'static str) -> Option<Stateful<Div>> {
+    cfg!(target_os = "windows").then(|| chip(p, id, "Save", false))
 }
 
 /// `BLYGGER_TIMING`: print what AI did (automation; never any secret).

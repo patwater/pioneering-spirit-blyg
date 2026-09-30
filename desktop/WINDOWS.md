@@ -19,7 +19,9 @@ The first launch walks you through **Connect your blyg**: your blyg's address an
 - **Keys.** Every `⌘` shortcut is `Ctrl` on Windows, so Publish is `Ctrl+Enter` and search is `Ctrl+L`. The one exception is Versions, which is `Ctrl+Shift+Y` rather than `Ctrl+Y`, because `Ctrl+Y` is Redo on Windows. Toolbar tooltips, the menu, the tutorial, and the hints written into the app's text all show the Windows keys.
 - **Menu.** Windows has no global menu bar, so a **Menu** button at the top left of the window lists every menu item, including the ones without a key (Subscribe…, Site Settings…, Open Config File).
 - **Title bar.** The window uses the normal Windows title bar with its minimise, maximise, and close buttons.
-- **Where things live.** The config file is `%APPDATA%\Blygger\config` (Menu › Open Config File opens it in Notepad). The local database, caches, and media are in `%LOCALAPPDATA%\Blygger\`. Your token is stored in Windows Credential Manager under `org.blygger.desktop`.
+- **Where things live.** The config file is `%APPDATA%\Blygger\config` (Menu › Open Config File opens it in Notepad). The local database, caches, and media are in `%LOCALAPPDATA%\Blygger\`. Your token and AI keys are stored in Windows Credential Manager under `org.blygger.desktop`, and the app's text says so wherever the macOS app says Keychain.
+- **Settings › AI.** Each key field has a **Save** button and the sheet has a **Done** button, alongside the ⏎ and Esc keys that macOS relies on.
+- **Fonts.** The macOS system fonts in the font list become their nearest Windows equivalents: New York becomes Georgia, Charter becomes Cambria, SF Pro becomes Segoe UI, and Menlo becomes Consolas. The bundled fonts, including the defaults, are the same on both.
 - **Updates.** The macOS app updates itself; the Windows build does not yet. Download new versions from the release page.
 - **AI helpers.** The "local Claude Code" and "Codex" providers find `claude` and `codex` on your `PATH`, in `%USERPROFILE%\.local\bin`, and in npm's global folder (`%APPDATA%\npm`).
 
@@ -43,9 +45,12 @@ Every Windows change is gated with `cfg(target_os = "windows")` (or `cfg(windows
 |---|---|
 | Preview and editor | A WebView2 surface through `wry` (`studio/webview.rs`), reusing the macOS page script, IPC, and navigation guard. GPUI's topmost DirectComposition layer is turned off at startup (`GPUI_DISABLE_DIRECT_COMPOSITION`), because it would cover the child webview. |
 | Keys | `keymap::platform_keys` respells `cmd` as `ctrl`; `glyphs` and `hotkey_glyphs` write `Ctrl+Shift+X`; `keymap::hint` rewrites key hints in the app's text (`⇧⌘G` → `Ctrl+Shift+G`) and is the identity on macOS; the clash tests use a Windows list of system shortcuts. |
-| Window and menu | The native title bar, and `windows_menu.rs`, a Menu button that lists `cx.get_menus()`. |
+| Window and menu | The native title bar, and `windows_menu.rs`, a Menu button that lists `cx.get_menus()`. The toolbar strip is not a window drag area on Windows (`app.rs`), because GPUI answers `HTCAPTION` for it and clicks on the toolbar and Menu buttons drawn over it would move the window instead. Release builds use the `windows` subsystem, so no console window opens; `blygger +action` attaches to the terminal that ran it. |
+| Wording | `keymap::hint` also rewrites macOS words (`Keychain` → `Credential Manager`, `this Mac` → `this PC`); the config file header is Windows-worded. |
+| Secrets | `KeychainTokenStore` splits secrets longer than one Credential Manager entry holds (1,280 UTF-16 units, less than a ChatGPT sign-in) across `account#1`, `account#2`… (`config/tokens.rs`). |
+| Fonts | `prefs::system` names Windows fonts in place of the macOS system fonts. |
 | Paths and tokens | `%APPDATA%` and `%LOCALAPPDATA%` in `blyg-core/src/config/paths.rs`; `keyring`'s `windows-native` backend. |
-| External programs | Notepad for the config file, the shell URL handler for the browser, `.exe`/`.cmd` CLI shims. |
+| External programs | Notepad for the config file, the shell URL handler for the browser, `.exe`/`.cmd` CLI shims. The CLI bridges start with `CREATE_NO_WINDOW`, and npm's `claude.cmd` shim gets the system prompt through `--system-prompt-file`, because cmd.exe can't pass a multi-line argument. |
 | Updates | Off on Windows (`update::disabled_reason`); the updater's tests stay macOS-only. |
 | Executable | `build.rs` embeds `packaging/Blygger.ico`; GPUI's `windows-manifest` feature supplies the per-monitor-DPI manifest. |
 

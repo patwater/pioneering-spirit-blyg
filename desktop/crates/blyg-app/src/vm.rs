@@ -223,7 +223,7 @@ pub fn version_label(item: &Item) -> String {
         }
         Status::Withdrawn => format!("withdrawn · v{}", item.version),
         Status::Draft => "draft".into(),
-        Status::Scratch => "scratch · only on this Mac".into(),
+        Status::Scratch => crate::keymap::hint("scratch · only on this Mac").into(),
     }
 }
 
@@ -254,7 +254,10 @@ pub fn sync_label(status: SyncStatus, publishing: bool) -> (String, SyncDot) {
     }
     match status {
         SyncStatus::Synced => ("synced".into(), SyncDot::Green),
-        SyncStatus::Saving => ("saved on this Mac".into(), SyncDot::Amber),
+        SyncStatus::Saving => (
+            crate::keymap::hint("saved on this Mac").into(),
+            SyncDot::Amber,
+        ),
         SyncStatus::Syncing => ("syncing…".into(), SyncDot::Busy),
         SyncStatus::Offline { pending } => (
             format!(
