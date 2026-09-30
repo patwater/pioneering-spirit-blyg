@@ -35,6 +35,11 @@
   //   { "pattern": "pioneeringspirit.xyz", "custom_domain": true }
   // ],
   "workers_dev": true,
+  // Keep variables set in the Cloudflare dashboard across deploys. Without
+  // this, every deploy from main deletes dashboard "Variables" that aren't
+  // listed here (Secrets always survive), which silently logs Blygger
+  // Desktop out if BLYG_OWNER_TOKEN was saved as a plain Variable.
+  "keep_vars": true,
 
   // Poll subscriptions and retry outbound webmentions every 15 minutes.
   "triggers": {

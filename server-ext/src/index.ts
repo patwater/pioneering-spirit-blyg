@@ -55,7 +55,12 @@ async function fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Res
   if (!path.startsWith("/api/")) return reference.fetch(req, env, ctx);
 
   const auth = await authenticate(req, env);
-  if (auth === "bad-bearer") return json({ error: "unauthorized" }, 401);
+  if (auth === "bad-bearer") {
+    // Say when the blyg has no token at all: the usual cause is a deploy
+    // that dropped BLYG_OWNER_TOKEN, and "wrong token" would mislead.
+    const reason = env.BLYG_OWNER_TOKEN ? undefined : "BLYG_OWNER_TOKEN is not set on this blyg";
+    return json(reason ? { error: "unauthorized", reason } : { error: "unauthorized" }, 401);
+  }
   const route = match(req.method, path);
   if (route) {
     if (auth === "none") return json({ error: "unauthorized" }, 401);
