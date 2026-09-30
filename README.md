@@ -18,7 +18,6 @@ This repository runs [Pioneering Spirit](https://pioneeringspirit.xyz) as a [Bly
 
 - `worker/` is a verbatim copy of the Blygger reference client (pinned in `upstream.json`). It provides the public blyg, the private **studio** editor at `/studio`, subscriptions to other blygs, transclusion, and TK (AI) generation. It is never edited here, so upgrades are a clean overwrite.
 - `server-ext/` is the Worker's entry point: a thin wrapper that adds the owner API Blygger Desktop needs (bearer-token auth, JSON reads, reading list, AI provenance, read-state sync) and hands everything else to `worker/` unchanged. See `server-ext/README.md`.
-- `desktop/` is Blygger Desktop, Aneesh Sathe's native reading-and-writing app, ported to Windows (pinned in `desktop-upstream.json`). See `desktop/WINDOWS.md`.
 - `wrangler.jsonc` holds everything specific to this deployment: the root mount, the custom domain, the database, the media bucket, and the static archive.
 - `blyg.settings.json` holds the site identity and the AI style prompt as code.
 - `corpus/` is the library you write in dialogue with: the Paragraph export, *A New California Dream*, Stag Hunt, and anything else.
@@ -111,7 +110,7 @@ npm run blyg -- status
 
 Set `BLYG_PASSWORD` in your environment to skip the password prompt. `CLAUDE.md` explains the authoring grammar and the drafting workflow in detail, and it tells Claude never to publish unless you ask.
 
-**Blygger Desktop** is a fast native app by Aneesh Sathe that puts your reading list and your drafts in one window. This repo carries a Windows port of it; see "The desktop app" below.
+**Blygger Desktop** is a fast native app by Aneesh Sathe that puts your reading list and your drafts in one window. Its Windows port lives in its own repository; see "The desktop app" below.
 
 ### The authoring grammar in brief
 
@@ -139,16 +138,14 @@ Paragraph readers who subscribed by email will not follow the move automatically
 
 ## The desktop app
 
-`desktop/` is Blygger Desktop, ported to Windows from Aneesh Sathe's macOS app. It reads the blygs and RSS feeds you subscribe to, lets you quote, stub, and follow what you read, and writes and publishes to your own blyg, all in one window and offline-first. Every Windows change is gated to Windows, so the macOS build is unchanged, and `desktop/WINDOWS.md` lists each one so the port can be offered back upstream.
+Blygger Desktop, Aneesh Sathe's native reading-and-writing app, is ported to Windows in its own repository, [patwater/burrow-blyg-windows-](https://github.com/patwater/burrow-blyg-windows-). It reads the blygs and RSS feeds you subscribe to, lets you quote, stub, and follow what you read, and writes and publishes to this blyg, all in one window. Download it from that repository's Releases page; its `WINDOWS.md` covers installing and connecting it.
 
-**Getting it.** Each push that changes `desktop/` runs the *Desktop app* workflow, which builds and tests on Windows and macOS and leaves a `Blygger-<version>-windows-x64` zip on the run's summary page under **Artifacts**. To publish a release, open **Releases → Draft a new release** on GitHub, create a tag such as `desktop-v0.3.0-win1` on `main`, and publish it; the workflow builds and tests both platforms and attaches the zip and `SHA256SUMS` to that release a half hour or so later. The build is unsigned, so SmartScreen asks once; `desktop/WINDOWS.md` explains it.
+**Connecting it.** Set the `BLYG_OWNER_TOKEN` secret (step 3), then enter your blyg's address and that token in the app's **Connect your blyg** screen. The app talks to this blyg through the owner API in `server-ext/`.
 
-**Connecting it.** Set the `BLYG_OWNER_TOKEN` secret (step 3), then enter your blyg's address and that token in the app's **Connect your blyg** screen.
-
-**Testing the pair.** Aneesh's end-to-end suite drives the real client against two local copies of this Worker, which is the best check that the app and `server-ext/` still agree:
+**Testing the pair.** Aneesh's end-to-end suite drives the real client against two local copies of this Worker, which is the best check that the app and `server-ext/` still agree. Run it from a checkout of the app, pointing it at this repository:
 
 ```bash
-cd desktop && BLYG_WORKER_DIR=.. bash scripts/e2e-local.sh
+cd burrow-blyg-windows- && BLYG_WORKER_DIR=../pioneering-spirit-blyg bash scripts/e2e-local.sh
 ```
 
 ## Keeping the reference client current

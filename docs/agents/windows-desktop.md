@@ -1,5 +1,7 @@
 # Agent brief: Blygger Desktop for Windows
 
+> This brief is how the Windows port began. The port is done and now lives in [patwater/burrow-blyg-windows-](https://github.com/patwater/burrow-blyg-windows-); its `WINDOWS.md` describes what was built.
+
 You are porting Blygger Desktop to Windows so that Patrick Atwater can read and write his blyg (https://pioneeringspirit.xyz) in one native app. Read this whole brief before writing code, and stop to ask Patrick when a decision below says to.
 
 ## The goal
