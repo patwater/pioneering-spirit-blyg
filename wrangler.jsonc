@@ -41,6 +41,10 @@
   // Desktop out if BLYG_OWNER_TOKEN was saved as a plain Variable.
   "keep_vars": true,
 
+  // Keep Workers Logs on (Observability tab). Deploys apply this file's
+  // settings, so a dashboard-only toggle is reset by the next push.
+  "observability": { "enabled": true },
+
   // Poll subscriptions and retry outbound webmentions every 15 minutes.
   "triggers": {
     "crons": ["*/15 * * * *"]
