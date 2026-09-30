@@ -68,7 +68,11 @@ async function fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Res
     if (res) return res;
   }
   // The reference Worker's own /api routes, with a bearer turned into the
-  // owner session it expects.
+  // owner session it expects. That session is signed with COOKIE_SECRET; say
+  // so plainly if it's missing rather than crash on an empty HMAC key.
+  if (auth === "bearer" && !env.COOKIE_SECRET) {
+    return json({ error: "COOKIE_SECRET is not set on this blyg; add it as a Secret in Cloudflare" }, 500);
+  }
   return reference.fetch(auth === "bearer" ? await withSession(req, env) : req, env, ctx);
 }
 
