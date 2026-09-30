@@ -1,6 +1,6 @@
 // The Pioneering Spirit Worker: the Blygger reference client (worker/,
 // never edited) plus the owner-API extensions Blygger Desktop needs
-// (desktop/docs/SERVER.md):
+// (docs/SERVER.md in Blygger Desktop):
 //
 //   1. bearer-token owner auth (BLYG_OWNER_TOKEN)          auth.ts
 //   2. owner JSON reads: items, one item, subscriptions    reads.ts

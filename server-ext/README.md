@@ -25,11 +25,11 @@ Without it, bearer auth is off and everything else behaves exactly as before.
 
 ## Testing
 
-`npm test` runs the reference Worker's suite and this folder's unit tests. The real acceptance test is Blygger Desktop's own end-to-end suite, which drives the Rust client against two local copies of this Worker:
+`npm test` runs the reference Worker's suite and this folder's unit tests. The real acceptance test is Blygger Desktop's own end-to-end suite, which drives the Rust client against two local copies of this Worker. Run it from a checkout of the Windows app, [burrow-blyg-windows-](https://github.com/patwater/burrow-blyg-windows-), pointing it at this repository:
 
 ```bash
-cd desktop
-BLYG_WORKER_DIR=.. bash scripts/e2e-local.sh
+cd burrow-blyg-windows-
+BLYG_WORKER_DIR=../pioneering-spirit-blyg bash scripts/e2e-local.sh
 ```
 
 As of the import, 21 of its 22 tests pass. The one failure, `tk_output_with_dollar_patterns_publishes_verbatim`, is a bug in the reference Worker, not here: `worker/src/tk.ts` line 247 splices generated HTML with `out.replace(token, blockHtml)`, so `$&`, `` $` ``, `$'`, or `$$` inside AI-generated text are read as replacement patterns. The fix is `out.replace(token, () => blockHtml)`; it belongs upstream in `blygger/blygger-spec`, and arrives here through `npm run upgrade-worker`.
