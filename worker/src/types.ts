@@ -11,8 +11,12 @@ export interface Env {
    * protocol vocabulary.
    */
   MOUNT?: string;
-  /** TK generation (tk-core-plan.md §4): Anthropic Messages API key. Wrangler secret, per security-policy.md — never in code or .dev.vars committed to git. */
+  /** The Anthropic API key (the manifest's anthropic key_secret). Wrangler secret, per security-policy.md — never in code or .dev.vars committed to git. */
   AI_PROVIDER_KEY?: string;
+  /** OpenAI API key, when an OpenAI model is chosen in Settings (0.26.0). Wrangler secret. */
+  OPENAI_API_KEY?: string;
+  /** Google Gemini API key, when a Gemini model is chosen in Settings (0.26.0). Wrangler secret. */
+  GOOGLE_AI_KEY?: string;
 }
 
 export interface ItemRow {
@@ -36,7 +40,18 @@ export interface ItemRow {
    * §3.4). Off by default: other people's names appearing on your page is an
    * editorial act, so it is one you take deliberately, per item.
    */
+  /** Legacy two-valued flag, superseded by `responses_override` (migration 0012). Retained, not read. */
   show_responses: number;
+  /**
+   * Whether this item shows its verified responses, or `null` to follow the
+   * global default (migration 0012).
+   *
+   * Three states rather than two, because "off" and "no opinion" stop being
+   * the same thing the moment a global default exists: an item that has never
+   * been touched should follow the setting, and an item the author decided
+   * about should not.
+   */
+  responses_override: number | null;
   /**
    * Working-copy stub citation (migration 0007, v0.3-plan §2.2) — JSON `StubOf`
    * or null. Threads only. Carried onto the published version by publish(),
@@ -65,6 +80,32 @@ export interface Transclusion {
    * is what keeps every 0.2 document a valid 0.3 document unchanged.
    */
   origin?: string;
+  /**
+   * The frozen human half of this reference (§16.1, decision #30). Emitted for
+   * **remote** entries only: for an own-origin target a reader can just fetch
+   * it, so a label would be words with nothing to add.
+   */
+  cited?: StubCite;
+  /**
+   * Present only on a **partial** transclusion (§16.4, decision #49) — the
+   * passage quoted, in the W3C Web Annotation text-quote shape. `exact` is the
+   * selection as normalized by `selectionText`; `prefix`/`suffix` are up to 32
+   * characters either side of where it was found, for a reader that wants to
+   * relocate it in a moved document.
+   *
+   * A reader may ignore this entirely and stay conformant: the passage is baked
+   * into `content_html` like any other transclusion, the relation is still
+   * `transclusion`, and staleness is §5.9 unchanged. Mention verification
+   * (§15.4) ignores it, as it ignores `cited`.
+   */
+  selector?: TextQuoteSelector;
+}
+
+/** §16.4's `selector` — the W3C text-quote shape, kept minimal. */
+export interface TextQuoteSelector {
+  exact: string;
+  prefix?: string;
+  suffix?: string;
 }
 
 /**
@@ -72,7 +113,9 @@ export interface Transclusion {
  * which `origin` is REQUIRED even when it is our own (a citation is absolute),
  * or a plain-web URL. Exactly one shape per stub, exactly one target per stub.
  */
-export type StubOf = { origin: string; id: string; version: number } | { url: string };
+export type StubOf =
+  | { origin: string; id: string; version: number; cited?: StubCite }
+  | { url: string; cited?: StubCite };
 
 /**
  * A blyg citation: origin + item + version, the shape `stub_of` uses for a blyg
@@ -83,16 +126,28 @@ export type StubOf = { origin: string; id: string; version: number } | { url: st
  * hosting promise (#8), so it is the only version anyone can promise the
  * lineage still points at.
  */
-export type ForkedFrom = { origin: string; id: string; version: number };
+export type ForkedFrom = { origin: string; id: string; version: number; cited?: StubCite };
 
 /**
  * The human half of a citation, frozen when it is made — at publish for a
  * stub (migration 0008), at fork time for lineage (migration 0010).
  * The marker (`stub_of` / `forked_from`) is machine-readable and never
  * changes; this is what a reader needs when the link has rotted — who it was,
- * what it said, and when we saw it. **Never on the wire**: it is composed from
- * what this client happened to know locally, so another client reading our
- * document composes its own from the marker instead of inheriting our guesses.
+ * what it said, and when we saw it.
+ *
+ * **On the wire since decision #30** (spec §16.1), as `cited` inside any
+ * reference — it was client-side only through 0.3's first draft, on the
+ * argument that another client should compose its own rather than inherit our
+ * guesses. What changed: six independent implementations exist, so "compose
+ * your own" means six clients each inventing a label cache, and a reader whose
+ * target has disappeared is shown an identity with no words. A transclusion
+ * already bakes the target's *entire* content into our document self-asserted;
+ * a label is strictly weaker than what the protocol already permits.
+ *
+ * It is self-asserted and never authoritative: frozen at the moment the
+ * reference was made (which is what makes it a citation rather than a lookup),
+ * never consulted by mention verification, never rendered into `content_html`,
+ * and a reader that ignores it entirely stays conformant.
  */
 export interface StubCite {
   /** Whose blyg it was — the subscription's title, our own title for a self-citation, or the host. */
@@ -133,6 +188,8 @@ export interface VersionRow {
   stub_of: string | null;
   /** JSON `StubCite` (migration 0008) — the citation's human half, frozen at publish so it survives link rot. Client-side only. */
   stub_cite: string | null;
+  /** 1 when the studio drafted this version's note and the author published it unedited (migration 0015, #40). */
+  note_generated: number;
 }
 
 export interface MediaRow {
@@ -142,6 +199,8 @@ export interface MediaRow {
   mime: string;
   alt: string | null;
   created: string;
+  /** 1 when the studio placed it in the text (migration 0016): shown only where referenced. */
+  inline: number;
 }
 
 export interface AuthorLink {
@@ -189,6 +248,10 @@ export interface ImportedItemRow {
   pinned_version_retained: number | null;
   /** Origin-relative permalink as the origin itself declares it (item doc `page`, v0.3-plan §2.3.2); null when the origin omits it and the f/·t/ convention applies. */
   page: string | null;
+  /** The origin's `stub_of`, verbatim JSON (migration 0017, studio#12). */
+  stub_of_json: string | null;
+  /** The origin's `forked_from`, verbatim JSON (migration 0017). */
+  forked_from_json: string | null;
 }
 
 export interface HopperRow {
@@ -199,6 +262,8 @@ export interface HopperRow {
   created: string;
   /** Latches to 1 the first time the hopper is made public — see migration 0006. A frozen slug never re-derives from a rename. */
   slug_frozen: number;
+  /** One line shown on the public page and in Collections (migration 0018); null when unset. */
+  description: string | null;
 }
 
 export interface HopperItemRow {
@@ -252,7 +317,15 @@ export interface MentionInRow {
 export interface MentionOutRow {
   id: string;
   item_id: string;
+  /** Our own version that carried the reference. */
   version: number;
+  /**
+   * The *target's* version this mention was sent about (§15.2, migration 0011).
+   * Null for a `{url}` stub, whose target has no version, and for rows written
+   * before the column existed. It is the whole re-send test: unchanged means
+   * not re-sent.
+   */
+  target_version: number | null;
   target: string;
   endpoint: string | null;
   status: "pending" | "sent" | "failed" | "no_endpoint";
@@ -272,11 +345,92 @@ export interface Settings {
   author_links: AuthorLink[];
   /** Canonical origin (full base URL incl. any mount path, e.g. https://example.com/blyg/); empty = derive from request origin + MOUNT. */
   site_url: string;
+  /**
+   * IANA timezone for **rendering dates only** (session 28). Empty = UTC.
+   *
+   * A Worker runs with its clock in UTC, so `toLocaleDateString` rendered every
+   * date in UTC regardless of where the author lives — which is why an evening
+   * post could show tomorrow's date on its own page.
+   *
+   * **The wire does not move.** Feed dates stay RFC-822, item documents stay
+   * ISO-8601 UTC, and `toIsoUtc()` keeps normalizing at the parse boundary.
+   * Writing local time into a feed would reintroduce the session-18
+   * reading-list sort bug on every subscriber that reads us — their sort
+   * compares instants, and a local-time string is not one.
+   */
+  timezone: string;
   avatar_media_id: string;
-  /** TK generation (tk-core-plan.md §4/§5): provider model id. Empty = provider default. */
+  /**
+   * Deprecated alias (0.26.0): reads as the TK model; writing it sets both the
+   * TK and changelog models. Kept one release for tools that still send it.
+   */
   ai_model: string;
+  /** Model for each AI function (0.26.0); a model id from the manifest or typed in. Empty = not configured. */
+  ai_model_tk: string;
+  ai_model_changelog: string;
+  /** Feed scoring: stored now, used once the smart feed's agent exists. */
+  ai_model_feed: string;
+  /** The smart feed's rubric: how the owner's agent should score new items. Stored only, for now. */
+  feed_prompt: string;
   /** TK generation: optional site-level style prompt appended to every generation request. */
   ai_style_prompt: string;
+  /**
+   * Whether this blyg receives Webmentions (0.3 §15, which is **OPTIONAL at
+   * every level**). When false the endpoint 404s, the manifest omits its
+   * `webmention` key and pages omit the `rel="webmention"` link and header —
+   * §15.1: the advertisement is "present only when mentions are accepted".
+   *
+   * A deployment setting rather than an `Env` var on purpose: it is the one
+   * thing an operator who did not want an unauthenticated public endpoint
+   * needs to reach, and a setting lives in D1, so it survives the re-clone
+   * that is how a hand-stood node upgrades (README § Releases and upgrading).
+   * Sending is unaffected — a blyg that does not receive mentions still sends
+   * them.
+   */
+  accept_mentions: boolean;
+  /**
+   * Check for a newer release of this client and show a banner in the studio
+   * when one exists. **Off by default, and that default is the design.**
+   *
+   * A client that phones home unasked is the wrong shape for a medium whose
+   * whole claim is that nothing needs a company in the middle — so this is an
+   * operator's choice, made once, rather than something every node does
+   * because we shipped it that way. Nothing is sent: it is a GET of a public
+   * release feed, with no identifier of this blyg attached, and the answer is
+   * used only to render a line in your own studio.
+   *
+   * The wire is untouched. Venkat's session-26 ruling put the version alert
+   * directory-side and off the wire, and that is unchanged: no manifest key,
+   * nothing a reader can see, nothing another client must implement. This is
+   * the same fact reaching the same operator through the one surface only they
+   * look at. (#18d governs *protocol* version, a different question.)
+   */
+  update_check: boolean;
+  /**
+   * Whether items show their verified responses when they express no
+   * preference of their own (session 28).
+   *
+   * Off by default, which preserves the session-23 ruling's shape: a response
+   * list is opt-in, because it is a page built out of *other people's* items
+   * and publishing one is an editorial act. The setting moves that decision
+   * from per-item to once — it does not reverse it.
+   */
+  show_responses_default: boolean;
+  /**
+   * Draft a changelog note with the configured model whenever a new version is
+   * published with an empty note (#40). The draft is shown for editing before
+   * anything is published; off by default, because it spends the operator's key.
+   */
+  auto_change_notes: boolean;
+  /** Where to ask. Configurable so a fork checks its own releases, not ours. */
+  update_feed_url: string;
+  /**
+   * Whether the operator has been told that update checking is on. Because the
+   * default is on, they are owed that sentence once — a background network call
+   * nobody mentioned is the thing the default-off argument was right about, and
+   * saying so plainly is what buys the default.
+   */
+  update_notice_ack: boolean;
 }
 
 /**
@@ -306,7 +460,41 @@ export const DEFAULT_MOUNT = "/blyg";
 /** Origin-relative path of the reference client's Webmention endpoint (v0.3-plan §2.3.1) — inside the origin surface, because it is a protocol surface, unlike host-rooted /studio and /api. */
 export const WEBMENTION_PATH = "webmention";
 
-export const GENERATOR = `${BRAND.slug}-ref/0.3.0`;
+/**
+ * This client's own name and version — deliberately NOT derived from BRAND.
+ * Renamed from `blyg-ref` to `blygger-studio` at session 26 (2026-09-28), when
+ * the client moved to its own repo: six independent implementations now exist,
+ * so "the reference client" stopped being a name and became a role. `blyg-ref`
+ * is left free as a generic conformance label.
+ *
+ * The client version is independent of PROTOCOL_VERSION below and always will
+ * be: this is implementation identity, which the wire is indifferent to.
+ */
+import { CLIENT } from "./client.ts";
+export { CLIENT, FRAGMENT_MAX_CHARS } from "./client.ts";
+
+/**
+ * Manifest `generator` key — informative per decision #18d, never a
+ * compatibility gate. Nodes that never upgrade keep reporting `blyg-ref/0.3.0`
+ * truthfully; blygger.com's directory reads this key to census the ecosystem,
+ * which is the whole version-alert mechanism (roadmap-tracks.md, Track 3.1).
+ */
+export const GENERATOR = `${CLIENT.name}/${CLIENT.version}`;
+
+/**
+ * Manifest `generator_url` — one absolute URL to this client's canonical source
+ * (§16.6a, decision #34; the precedent is Atom's generator `uri`). SHOULD be
+ * emitted, and readers MUST NOT gate on it (§3.2), so it is honesty for
+ * directories and strangers rather than a compatibility signal. Derived from
+ * `CLIENT` exactly as `GENERATOR` is, because a hand-written copy of an
+ * identity string is how both user agents drifted two versions stale.
+ *
+ * There is deliberately no maintained/unmaintained companion: the software that
+ * would have to say "I am unmaintained" is exactly the software nobody is
+ * updating, so maintenance is for directories to observe, never for the wire to
+ * assert.
+ */
+export const GENERATOR_URL = CLIENT.url;
 /**
  * Version key policy (v0.2-plan.md §2.3, decision #18d): the spec version this
  * deployment **implements**, and informative rather than a compatibility gate —
@@ -320,7 +508,14 @@ export const GENERATOR = `${BRAND.slug}-ref/0.3.0`;
  * the implementation is how the protocol gets tested).
  */
 export const PROTOCOL_VERSION = "0.3";
-export const PROTOCOL_LEVEL = 1;
-export const FRAGMENT_MAX_CHARS = 1000;
+/**
+ * The conformance level this deployment implements. **2 since session 27:** 0.3
+ * §3 defines L2 as this specification, and live nodes were publishing 0.3
+ * constructs — `page`, `stub_of`, `transclusions[].origin`, threads,
+ * Webmention — while still announcing `1`. Readers may not gate on the level
+ * (§3.2), so this is honesty rather than compatibility; it was wrong in the one
+ * way a self-report can be wrong, which is by understating what is there.
+ */
+export const PROTOCOL_LEVEL = 2;
 export const FEED_WINDOW = 50;
 export const FEED_PAGE_SIZE = 100;

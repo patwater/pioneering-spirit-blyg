@@ -18,10 +18,22 @@ import { transition } from "../src/importer/transition.ts";
 import { discoverEndpoint, endpointFromHtml, endpointFromLinkHeader } from "../src/mentions/discover.ts";
 import { receiveMention, relationTo, verifyMention } from "../src/mentions/receive.ts";
 import { drainOutbound } from "../src/mentions/send.ts";
-import { getInbound, INBOUND_HOURLY_LIMIT, listOutbound, upsertInbound } from "../src/mentions/store.ts";
+import {
+  FAILED_INBOUND_RETENTION_MS,
+  getInbound,
+  INBOUND_DOMAIN_HOURLY_LIMIT,
+  INBOUND_GLOBAL_HOURLY_LIMIT,
+  INBOUND_HOURLY_LIMIT,
+  listOutbound,
+  markInboundUnverified,
+  markOutbound,
+  pruneFailedInbound,
+  registrableDomain,
+  upsertInbound,
+} from "../src/mentions/store.ts";
 import { newId } from "../src/util.ts";
 import { itemDocBody } from "./importer/fixtures.ts";
-import { apiJson, BASE, createAndPublish, getPublic, login, STUDIO } from "./helpers.ts";
+import { apiJson, BASE, createAndPublish, getPublic, login } from "./helpers.ts";
 
 const OURS = "https://example.com/blyg/";
 const THEIRS = "https://friend.example/blyg/";
@@ -59,6 +71,21 @@ async function importFrom(origin: string, doc: Parameters<typeof itemDocBody>[0]
   return sub.id;
 }
 
+/**
+ * Wait for the publish route's own background drain to stop writing to an
+ * item's outbound rows. The route calls `drainOutbound` inside `waitUntil`
+ * against the real network; in this runtime that fetch fails, so the row ends
+ * `no_endpoint` — but *when* it lands is not ordered against the test body, and
+ * a late write will overwrite a status the test set on purpose.
+ */
+async function settleOutbound(itemId: string, tries = 40): Promise<void> {
+  for (let i = 0; i < tries; i++) {
+    const rows = (await listOutbound(env.DB)).filter((r) => r.item_id === itemId);
+    if (rows.length && rows.every((r) => r.status !== "pending")) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
 describe("endpoint discovery (§2.3.4)", () => {
   it("reads a Link header, resolving it against the page", () => {
     expect(endpointFromLinkHeader('</wm>; rel="webmention"', "https://a.example/p/")).toBe("https://a.example/wm");
@@ -94,7 +121,7 @@ describe("endpoint discovery (§2.3.4)", () => {
 describe("sending (§2.3.3)", () => {
   it("enqueues one mention per remote reference on publish, and delivers source + target", async () => {
     const cookie = await login();
-    await apiJson(cookie, "PUT", "/api/settings", { site_url: OURS });
+    await apiJson(cookie, "PATCH", "/api/settings", { site_url: OURS });
     const remoteId = newId();
     await importFrom(THEIRS, { id: remoteId, kind: "fragment", version: 2, content_md: "their post", page: `f/${remoteId}/` });
 
@@ -125,9 +152,98 @@ describe("sending (§2.3.3)", () => {
     expect((await listOutbound(env.DB)).find((r) => r.id === queued[0].id)?.status).toBe("sent");
   });
 
+  it("a republish re-sends only when the target's version changed (§15.2)", async () => {
+    const cookie = await login();
+    await apiJson(cookie, "PATCH", "/api/settings", { site_url: OURS });
+    const remoteId = newId();
+    await importFrom(THEIRS, { id: remoteId, kind: "fragment", version: 2, content_md: "their post", page: `f/${remoteId}/` });
+    const thread = (await apiJson(cookie, "POST", "/api/items", { kind: "thread", content_md: `![[${remoteId}]]\n\nMine.` })).json.id as string;
+    expect((await apiJson(cookie, "POST", `/api/items/${thread}/publish`, {})).status).toBe(200);
+
+    const row = () => listOutbound(env.DB).then((rows) => rows.find((r) => r.item_id === thread)!);
+    expect((await row()).target_version).toBe(2);
+
+    // The publish route hands its own drain to waitUntil against the real
+    // network, which fails in this runtime and writes the row's status at an
+    // arbitrary later moment. Let that land first, then set the state this test
+    // is actually about: a delivered mention. Otherwise the background write
+    // clobbers whatever we assert.
+    await settleOutbound(thread);
+    await markOutbound(env.DB, (await row()).id, { status: "sent" });
+
+    // Republish with the reference untouched: an edit to our own prose. Until
+    // migration 0011 this reset the row to `pending` and re-notified an origin
+    // that had nothing new to hear.
+    await apiJson(cookie, "PATCH", `/api/items/${thread}`, { content_md: `![[${remoteId}]]\n\nMine, with a typo fixed.` });
+    expect((await apiJson(cookie, "POST", `/api/items/${thread}/publish`, {})).status).toBe(200);
+    expect((await row()).status).toBe("sent");
+    // Our own version moved; the target's did not, and the target's is the test.
+    expect((await row()).version).toBe(2);
+    expect((await row()).target_version).toBe(2);
+
+    // Now the target moves. A poll would write this row; writing it directly is
+    // the same input to resolution with less machinery.
+    await env.DB.prepare("UPDATE imported_items SET version = 3, content_html = ? WHERE remote_id = ?")
+      .bind("<p>their post, revised</p>", remoteId)
+      .run();
+    expect((await apiJson(cookie, "POST", `/api/items/${thread}/publish`, {})).status).toBe(200);
+    expect((await row()).status).toBe("pending");
+    expect((await row()).target_version).toBe(3);
+
+    // And it really does go out again, once.
+    const net = fixtureNet({
+      [`${THEIRS}blyg.json`]: { body: JSON.stringify({ blyg: "0.3", site: THEIRS, webmention: "webmention" }) },
+      [`${THEIRS}webmention`]: { status: 202 },
+    });
+    await drainOutbound(env.DB, net.fetch, { origin: OURS });
+    expect(net.calls.filter((c) => c.init?.method === "POST")).toHaveLength(1);
+  });
+
+  it("withdrawal re-sends although nothing about the target changed (§15.7)", async () => {
+    const cookie = await login();
+    await apiJson(cookie, "PATCH", "/api/settings", { site_url: OURS });
+    const remoteId = newId();
+    await importFrom(THEIRS, { id: remoteId, kind: "fragment", version: 2, content_md: "their post", page: `f/${remoteId}/` });
+    const stub = (await apiJson(cookie, "POST", "/api/items", {
+      kind: "thread",
+      content_md: `![[${remoteId}]]`,
+      stub_of: { origin: THEIRS, id: remoteId, version: 2 },
+    })).json.id as string;
+    await apiJson(cookie, "POST", `/api/items/${stub}/publish`, {});
+    const row = () => listOutbound(env.DB).then((rows) => rows.find((r) => r.item_id === stub)!);
+    await settleOutbound(stub);
+    await markOutbound(env.DB, (await row()).id, { status: "sent" });
+
+    // The one notification owed precisely *because* nothing changed: the
+    // receiver has to re-verify and find a withdrawn document. It is the only
+    // caller that overrides the re-send test.
+    expect((await apiJson(cookie, "POST", `/api/items/${stub}/withdraw`, {})).status).toBe(200);
+    expect((await row()).status).toBe("pending");
+  });
+
+  it("a {url} stub is sent once and never re-sent — a web page has no version", async () => {
+    const cookie = await login();
+    await apiJson(cookie, "PATCH", "/api/settings", { site_url: OURS });
+    const url = "https://example.org/some/essay";
+    const stub = (await apiJson(cookie, "POST", "/api/items", { kind: "thread", content_md: "Answering this.", stub_of: { url } })).json.id as string;
+    await apiJson(cookie, "POST", `/api/items/${stub}/publish`, {});
+    const row = () => listOutbound(env.DB).then((rows) => rows.find((r) => r.item_id === stub)!);
+    expect((await row()).target).toBe(url);
+    expect((await row()).target_version).toBeNull();
+    await settleOutbound(stub);
+    await markOutbound(env.DB, (await row()).id, { status: "sent" });
+
+    // Two null target versions must read as unchanged, which is why the
+    // comparison is `IS NOT` and not `<>` — under `<>` this would re-send on
+    // every republish forever.
+    await apiJson(cookie, "PATCH", `/api/items/${stub}`, { content_md: "Answering this, at more length." });
+    await apiJson(cookie, "POST", `/api/items/${stub}/publish`, {});
+    expect((await row()).status).toBe("sent");
+  });
+
   it("never sends for an own-origin reference", async () => {
     const cookie = await login();
-    await apiJson(cookie, "PUT", "/api/settings", { site_url: OURS });
+    await apiJson(cookie, "PATCH", "/api/settings", { site_url: OURS });
     const mine = await createAndPublish(cookie, "my own fragment");
     const stub = await apiJson(cookie, "POST", "/api/items", {
       kind: "thread",
@@ -140,7 +256,7 @@ describe("sending (§2.3.3)", () => {
 
   it("records no_endpoint without retrying, and backs off on a 5xx", async () => {
     const cookie = await login();
-    await apiJson(cookie, "PUT", "/api/settings", { site_url: OURS });
+    await apiJson(cookie, "PATCH", "/api/settings", { site_url: OURS });
     const silent = newId();
     await importFrom("https://static.example/", { id: silent, kind: "fragment", version: 1, content_md: "static blyg" }, "Static");
     const a = await apiJson(cookie, "POST", "/api/items", {
@@ -183,7 +299,7 @@ describe("sending (§2.3.3)", () => {
 describe("receiving and structural verification (§2.3.5)", () => {
   async function ourItem(): Promise<{ id: string; target: string; cookie: string }> {
     const cookie = await login();
-    await apiJson(cookie, "PUT", "/api/settings", { site_url: OURS });
+    await apiJson(cookie, "PATCH", "/api/settings", { site_url: OURS });
     const id = await createAndPublish(cookie, "a fragment worth responding to");
     return { id, target: `${OURS}f/${id}/`, cookie };
   }
@@ -195,6 +311,8 @@ describe("receiving and structural verification (§2.3.5)", () => {
     id?: string;
     stubTargetId?: string | null;
     transcludeId?: string | null;
+    /** §16.4: make the transclusion a partial one, carrying a `selector`. */
+    partial?: boolean;
     withdrawn?: boolean;
     pageHtml?: string;
   }) {
@@ -214,7 +332,18 @@ describe("receiving and structural verification (§2.3.5)", () => {
       content_html: "<p>their response</p>",
       content_hash: "sha256:x",
       media: [],
-      transclusions: opts.transcludeId ? [{ id: opts.transcludeId, version: 1, origin: OURS }] : [],
+      transclusions: opts.transcludeId
+        ? [
+            {
+              id: opts.transcludeId,
+              version: 1,
+              origin: OURS,
+              ...(opts.partial
+                ? { selector: { exact: "a fragment worth", prefix: "", suffix: " responding to" } }
+                : {}),
+            },
+          ]
+        : [],
       ...(opts.stubTargetId ? { stub_of: { origin: OURS, id: opts.stubTargetId, version: 1 } } : {}),
     };
     return {
@@ -259,6 +388,40 @@ describe("receiving and structural verification (§2.3.5)", () => {
     const net = fixtureNet(src.map);
     const outcome = await receiveMention(env.DB, { source: src.page, target }, OURS);
     const result = await verifyMention(env.DB, (outcome as { mentionId: string }).mentionId, src.page, id, OURS, net.fetch);
+    expect(result.relation).toBe("transclusion");
+  });
+
+  // §16.4 / plan §7.3 P5: a partial transclusion is the same construct with a
+  // selector, so verification must reach the same verdict — and must reach it
+  // *without* looking at the selector, which is why this is asserted rather
+  // than assumed. A receiver that started treating `selector` as verification
+  // input would be checking a claim about our text against their copy of it.
+  it("verifies a PARTIAL transclusion as `transclusion` too, ignoring the selector", async () => {
+    const { id, target } = await ourItem();
+    const src = sourceFixture({ transcludeId: id, partial: true });
+    const net = fixtureNet(src.map);
+    const outcome = await receiveMention(env.DB, { source: src.page, target }, OURS);
+    const result = await verifyMention(env.DB, (outcome as { mentionId: string }).mentionId, src.page, id, OURS, net.fetch);
+    expect(result.status).toBe("verified");
+    expect(result.relation).toBe("transclusion");
+  });
+
+  it("verifies a partial whose selector quotes text we never wrote", async () => {
+    // The selector is self-asserted and is NOT a claim verification tests. It
+    // describes what they took from us, checked at *their* publish time
+    // against the snapshot they held; re-checking it here would make delivery
+    // depend on our current text, and §16.4 keeps it out of §15.4 for exactly
+    // that reason. A reader MAY re-check, separately, and display the result.
+    const { id, target } = await ourItem();
+    const src = sourceFixture({ transcludeId: id, partial: true });
+    const doc = JSON.parse(src.map[`${THEIRS}items/${src.id}.json`].body);
+    doc.transclusions[0].selector = { exact: "words we never published anywhere" };
+    src.map[`${THEIRS}items/${src.id}.json`] = { body: JSON.stringify(doc) };
+
+    const net = fixtureNet(src.map);
+    const outcome = await receiveMention(env.DB, { source: src.page, target }, OURS);
+    const result = await verifyMention(env.DB, (outcome as { mentionId: string }).mentionId, src.page, id, OURS, net.fetch);
+    expect(result.status).toBe("verified");
     expect(result.relation).toBe("transclusion");
   });
 
@@ -328,7 +491,7 @@ describe("receiving and structural verification (§2.3.5)", () => {
 
   it("accepts a mention that targets a withdrawn item — people may respond to a withdrawal", async () => {
     const cookie = await login();
-    await apiJson(cookie, "PUT", "/api/settings", { site_url: OURS });
+    await apiJson(cookie, "PATCH", "/api/settings", { site_url: OURS });
     const id = await createAndPublish(cookie, "soon withdrawn");
     await apiJson(cookie, "POST", `/api/items/${id}/withdraw`, {});
     const res = await receiveMention(env.DB, { source: `${THEIRS}t/x/`, target: `${OURS}f/${id}/` }, OURS);
@@ -345,6 +508,66 @@ describe("receiving and structural verification (§2.3.5)", () => {
     expect(res.status).toBe(429);
     // A different host is unaffected — the limit is per source host.
     expect((await receiveMention(env.DB, { source: `${THEIRS}t/x/`, target }, OURS, now)).status).toBe(202);
+  });
+
+  it("rate-limits a wildcard-DNS flood at the registrable domain, which the per-host cap misses", async () => {
+    const { id, target } = await ourItem();
+    const now = Date.parse("2026-09-28T12:00:00Z");
+    // One host per claim: every one of these is inside the per-host cap of 60,
+    // which is exactly the hole §9.1 gap 1 names — a DNS wildcard costs the
+    // flooder nothing.
+    for (let i = 0; i < INBOUND_DOMAIN_HOURLY_LIMIT; i++) {
+      await upsertInbound(env.DB, `https://h${i}.spam.example/t/x/`, target, id, new Date(now).toISOString());
+    }
+    const res = await receiveMention(env.DB, { source: "https://h999.spam.example/t/x/", target }, OURS, now);
+    expect(res.status).toBe(429);
+    expect((res as { error: string }).error).toMatch(/domain/);
+    // A different registrable domain is unaffected, and so is a different
+    // operator under a hosting suffix — `spam.example` groups, `pages.dev` does not.
+    expect((await receiveMention(env.DB, { source: `${THEIRS}t/x/`, target }, OURS, now)).status).toBe(202);
+  });
+
+  it("caps the endpoint as a whole, which no per-source limit does", async () => {
+    const { id, target } = await ourItem();
+    const now = Date.parse("2026-09-28T12:00:00Z");
+    // Spread across distinct registrable domains, each well inside both
+    // per-source caps: the aggregate is the only thing that bounds this.
+    for (let i = 0; i < INBOUND_GLOBAL_HOURLY_LIMIT; i++) {
+      await upsertInbound(env.DB, `https://d${i}.example/t/x/`, target, id, new Date(now).toISOString());
+    }
+    const res = await receiveMention(env.DB, { source: "https://newcomer.example/t/x/", target }, OURS, now);
+    expect(res.status).toBe(429);
+    expect((res as { error: string }).error).toMatch(/hourly limit/);
+    // An hour later the window has rolled and the endpoint accepts again.
+    const later = now + 61 * 60_000;
+    expect((await receiveMention(env.DB, { source: "https://newcomer.example/t/x/", target }, OURS, later)).status).toBe(202);
+  });
+
+  it("prunes failed claims past retention and keeps verified, gone and pending ones", async () => {
+    const { id, target } = await ourItem();
+    const now = Date.parse("2026-09-28T12:00:00Z");
+    const old = new Date(now - FAILED_INBOUND_RETENTION_MS - 1000).toISOString();
+    const rows: Record<string, "failed" | "gone" | "verified" | "pending"> = {
+      "https://old-fail.example/t/x/": "failed",
+      "https://old-gone.example/t/x/": "gone",
+      "https://old-pending.example/t/x/": "pending",
+    };
+    for (const [source, status] of Object.entries(rows)) {
+      const row = await upsertInbound(env.DB, source, target, id, old);
+      if (status === "failed" || status === "gone") await markInboundUnverified(env.DB, row.id, status, "fixture");
+    }
+    const recent = await upsertInbound(env.DB, "https://recent-fail.example/t/x/", target, id, new Date(now - 1000).toISOString());
+    await markInboundUnverified(env.DB, recent.id, "failed", "fixture");
+
+    expect(await pruneFailedInbound(env.DB, now)).toBe(1);
+    const left = await env.DB.prepare("SELECT source FROM mentions_in WHERE target_item_id = ?").bind(id).all<{ source: string }>();
+    const sources = left.results.map((r) => r.source);
+    expect(sources).not.toContain("https://old-fail.example/t/x/");
+    // `gone` is a relationship we deliberately remember; a fresh failure is
+    // still legible to whoever is watching a spam wave.
+    expect(sources).toContain("https://old-gone.example/t/x/");
+    expect(sources).toContain("https://old-pending.example/t/x/");
+    expect(sources).toContain("https://recent-fail.example/t/x/");
   });
 
   it("re-verification of a source that stopped referencing us marks it gone, keeping the row", async () => {
@@ -406,9 +629,9 @@ describe("the endpoint route (§2.3.1)", () => {
 });
 
 describe("detect stubs — /studio/mentions (§3.3)", () => {
-  it("groups verified mentions by target, badges the relation, and offers stub-back only when we hold their item", async () => {
+  it("returns verified relations and identifies imported sources for stub-back", async () => {
     const cookie = await login();
-    await apiJson(cookie, "PUT", "/api/settings", { site_url: OURS });
+    await apiJson(cookie, "PATCH", "/api/settings", { site_url: OURS });
     const mine = await createAndPublish(cookie, "something people respond to");
 
     // Someone we subscribe to and have imported: stub-back is possible.
@@ -448,26 +671,22 @@ describe("detect stubs — /studio/mentions (§3.3)", () => {
     });
     await verifyMention(env.DB, stranger.id, `https://stranger.example/t/${strangerId}/`, mine, OURS, strangerNet.fetch);
 
-    const html = await (await SELF.fetch(`${BASE}${STUDIO}/mentions`, { headers: { cookie } })).text();
-    // The group names the item by its opening words, not by its id.
-    expect(html).toContain("something people respond to");
-    expect(html).toContain("2 responses");
-    expect(html).toContain(">stub<");
-    expect(html).toContain(">transclusion<");
-    expect(html).toContain("Friend Author");
-    expect(html).toContain(`data-remote="${knownId}"`);
-    expect(html).toContain("subscribe to https://stranger.example/");
-    // A pointer, not a copy: none of their text is on this page.
-    expect(html).not.toContain("their stub");
+    const result = await apiJson(cookie, "GET", "/api/mentions?direction=inbound");
+    const rows = result.json.items.filter((row: { target_item_id: string }) => row.target_item_id === mine);
+    expect(rows).toHaveLength(2);
+    expect(rows.find((row: { id: string }) => row.id === known.id)).toMatchObject({ relation: "stub", status: "verified" });
+    expect(JSON.parse(rows.find((row: { id: string }) => row.id === known.id).source_author_json).name).toBe("Friend Author");
+    expect(rows.find((row: { id: string }) => row.id === stranger.id)).toMatchObject({ relation: "transclusion", status: "verified" });
+    expect((await apiJson(cookie, "GET", `/api/mentions/${known.id}/source`)).json.holder).toBeTruthy();
+    expect((await apiJson(cookie, "GET", `/api/mentions/${stranger.id}/source`)).json.holder).toBeNull();
   });
 
-  it("shows the outbound queue, and warns when no site URL is set", async () => {
+  it("exposes the outbound queue and canonical site preference", async () => {
     const cookie = await login();
-    await apiJson(cookie, "PUT", "/api/settings", { site_url: "" });
-    const html = await (await SELF.fetch(`${BASE}${STUDIO}/mentions`, { headers: { cookie } })).text();
-    expect(html).toContain("No <strong>site URL</strong> is set");
+    await apiJson(cookie, "PATCH", "/api/settings", { site_url: "" });
+    expect((await apiJson(cookie, "GET", "/api/settings")).json.site_url).toBe("");
 
-    await apiJson(cookie, "PUT", "/api/settings", { site_url: OURS });
+    await apiJson(cookie, "PATCH", "/api/settings", { site_url: OURS });
     const remoteId = newId();
     await importFrom(THEIRS, { id: remoteId, kind: "fragment", version: 1, content_md: "theirs" });
     const stub = await apiJson(cookie, "POST", "/api/items", {
@@ -477,17 +696,16 @@ describe("detect stubs — /studio/mentions (§3.3)", () => {
     });
     await apiJson(cookie, "POST", `/api/items/${stub.json.id}/publish`, {});
 
-    const after = await (await SELF.fetch(`${BASE}${STUDIO}/mentions`, { headers: { cookie } })).text();
-    expect(after).not.toContain("No <strong>site URL</strong> is set");
-    expect(after).toContain(`${THEIRS}f/${remoteId}/`);
-    expect(after).toContain(stub.json.id.slice(0, 8));
+    expect((await apiJson(cookie, "GET", "/api/settings")).json.site_url).toBe(OURS);
+    const after = await apiJson(cookie, "GET", "/api/mentions?direction=outbound");
+    expect(after.json.items).toEqual(expect.arrayContaining([expect.objectContaining({ target: `${THEIRS}f/${remoteId}/`, item_id: stub.json.id })]));
   });
 });
 
 describe("the stub stack (§4.3)", () => {
   it("A's fragment → B's stub → A's stub of the stub, nested two deep and verified", async () => {
     const cookie = await login();
-    await apiJson(cookie, "PUT", "/api/settings", { site_url: OURS });
+    await apiJson(cookie, "PATCH", "/api/settings", { site_url: OURS });
 
     // A (us) publishes F.
     const f = await createAndPublish(cookie, "the original claim");
@@ -515,14 +733,14 @@ describe("the stub stack (§4.3)", () => {
     expect((await verifyMention(env.DB, inbound.id, `${THEIRS}t/${s1}/`, f, OURS, net.fetch)).relation).toBe("stub");
 
     // A stubs the stub back, from the studio's own gesture.
-    const created = await apiJson(cookie, "POST", "/api/stubs", { subscription_id: subId, remote_id: s1 });
+    const created = await apiJson(cookie, "POST", "/api/items", { mode: "response", source: { subscription_id: subId, remote_id: s1 } });
     expect(created.status).toBe(201);
     const s2 = created.json.id as string;
     expect((await apiJson(cookie, "POST", `/api/items/${s2}/publish`, {})).status).toBe(200);
 
     const doc = await (await getPublic(`/blyg/items/${s2}.json`)).json<any>();
-    expect(doc.stub_of).toEqual({ origin: THEIRS, id: s1, version: 1 });
-    expect(doc.transclusions).toEqual([{ id: s1, version: 1, origin: THEIRS }]);
+    expect(doc.stub_of).toMatchObject({ origin: THEIRS, id: s1, version: 1 });
+    expect(doc.transclusions).toMatchObject([{ id: s1, version: 1, origin: THEIRS }]);
     // Two levels of blockquote: their thread, and our fragment inside it.
     expect((doc.content_html.match(/<blockquote class="blyg-transclusion"/g) ?? []).length).toBe(2);
     expect(doc.content_html).toContain(`data-blyg-id="${s1}"`);
@@ -533,5 +751,115 @@ describe("the stub stack (§4.3)", () => {
     const queued = (await listOutbound(env.DB)).filter((r) => r.item_id === s2);
     expect(queued).toHaveLength(1);
     expect(queued[0].target).toBe(`${THEIRS}t/${s1}/`);
+  });
+});
+
+describe("registrableDomain — the rate-limit grouping heuristic (§9.1 gap 1)", () => {
+  it("groups subdomains of one real domain and separates operators under a hosting suffix", () => {
+    const cases: [string, string | null][] = [
+      ["https://spam.example/x", "spam.example"],
+      ["https://a.spam.example/x", "spam.example"],
+      ["https://a.b.c.spam.example/x", "spam.example"],
+      // Registry suffix: three labels, not two.
+      ["https://blog.someone.co.uk/x", "someone.co.uk"],
+      ["https://someone.co.uk/x", "someone.co.uk"],
+      // Hosting suffixes, where a subdomain is a whole different operator —
+      // including exe.xyz, where one of the live third-party nodes runs.
+      ["https://jd-blyg.exe.xyz/blyg/", "jd-blyg.exe.xyz"],
+      ["https://someones-blyg.pages.dev/x", "someones-blyg.pages.dev"],
+      ["https://a.b.workers.dev/x", "b.workers.dev"],
+      // The suffix itself, with nothing in front of it.
+      ["https://pages.dev/x", "pages.dev"],
+      // No suffix arithmetic applies to a literal address.
+      ["http://192.168.0.9:8787/x", "192.168.0.9"],
+      ["http://[::1]:8787/x", "[::1]"],
+      // A trailing root dot is the same name.
+      ["https://a.spam.example./x", "spam.example"],
+      ["not a url", null],
+    ];
+    for (const [url, expected] of cases) {
+      expect(registrableDomain(url), url).toBe(expected);
+    }
+  });
+});
+
+// An operator who never chose to run an unauthenticated public endpoint can
+// switch it off — 0.3 §15 is OPTIONAL at every level, and §15.1 says the
+// advertisement exists only when mentions are accepted. Until session 27 the
+// client had no way to express that: `buildManifest` took a `webmention: false`
+// option no caller ever passed.
+describe("declining to receive mentions (§15 is optional)", () => {
+  async function setAccept(cookie: string, accept: boolean) {
+    const res = await apiJson(cookie, "PATCH", "/api/settings", { accept_mentions: accept });
+    expect(res.status).toBe(200);
+  }
+
+  it("withdraws the endpoint from the manifest, the pages and the network", async () => {
+    const cookie = await login();
+    await apiJson(cookie, "PATCH", "/api/settings", { site_url: OURS });
+    const id = await createAndPublish(cookie, "an item someone might respond to");
+    const target = `${OURS}f/${id}/`;
+
+    // On by default — an existing deployment's behaviour does not change.
+    let manifest = await (await getPublic("/blyg/blyg.json")).json<{ webmention?: string }>();
+    expect(manifest.webmention).toBe("webmention");
+    let page = await getPublic(`/blyg/f/${id}/`);
+    expect(await page.text()).toContain('rel="webmention"');
+    expect(page.headers.get("link")).toContain('rel="webmention"');
+
+    await setAccept(cookie, false);
+
+    // Not advertised: no manifest key, no link element, no Link header.
+    manifest = await (await getPublic("/blyg/blyg.json")).json<{ webmention?: string }>();
+    expect(manifest.webmention).toBeUndefined();
+    page = await getPublic(`/blyg/f/${id}/`);
+    expect(await page.text()).not.toContain('rel="webmention"');
+    expect(page.headers.get("link")).toBeNull();
+
+    // And not there: 404, the same answer a static export gives, rather than a
+    // 403 that would imply an endpoint with a policy.
+    const res = await SELF.fetch(`${BASE}/blyg/webmention`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: `source=${encodeURIComponent(`${THEIRS}t/x/`)}&target=${encodeURIComponent(target)}`,
+    });
+    expect(res.status).toBe(404);
+
+    expect((await apiJson(cookie, "GET", "/api/settings")).json.accept_mentions).toBe(false);
+
+    // Reversible, and the item is untouched by any of it.
+    await setAccept(cookie, true);
+    manifest = await (await getPublic("/blyg/blyg.json")).json<{ webmention?: string }>();
+    expect(manifest.webmention).toBe("webmention");
+  });
+
+  it("still sends mentions — the two halves are independent", async () => {
+    const cookie = await login();
+    await apiJson(cookie, "PATCH", "/api/settings", { site_url: OURS });
+    await setAccept(cookie, false);
+
+    const remoteId = newId();
+    await importFrom(THEIRS, { id: remoteId, kind: "fragment", version: 2, content_md: "their post", page: `f/${remoteId}/` });
+    const stub = await apiJson(cookie, "POST", "/api/items", {
+      kind: "thread",
+      content_md: `![[${remoteId}]]\n\nMy response.`,
+      stub_of: { origin: THEIRS, id: remoteId, version: 2 },
+    });
+    expect((await apiJson(cookie, "POST", `/api/items/${stub.json.id}/publish`, {})).status).toBe(200);
+
+    const queued = (await listOutbound(env.DB)).filter((r) => r.item_id === stub.json.id);
+    expect(queued).toHaveLength(1);
+    expect(queued[0].target).toBe(`${THEIRS}f/${remoteId}/`);
+  });
+
+  it("refuses a value that is neither true nor false, rather than reading it as on", async () => {
+    const cookie = await login();
+    const res = await apiJson(cookie, "PATCH", "/api/settings", { accept_mentions: "no" });
+    expect(res.status).toBe(400);
+    // `getSettings` treats anything but "off" as on, so a typo that was stored
+    // would silently re-open the endpoint the operator meant to close.
+    expect((await apiJson(cookie, "PATCH", "/api/settings", { accept_mentions: false })).status).toBe(200);
+    const manifest = await (await getPublic("/blyg/blyg.json")).json<{ webmention?: string }>();
+    expect(manifest.webmention).toBeUndefined();
   });
 });

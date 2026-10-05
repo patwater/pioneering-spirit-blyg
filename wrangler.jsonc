@@ -1,7 +1,7 @@
 {
   // Deployment config for the Pioneering Spirit blyg at the root of
   // pioneeringspirit.xyz. The code in worker/ is a pristine copy of the
-  // Blygger reference client (see upstream.json) and is never edited here;
+  // Blygger Studio release (see upstream.json) and is never edited here;
   // everything specific to this deployment lives in this file and in the
   // studio settings pushed by `npm run blyg -- settings`.
   //

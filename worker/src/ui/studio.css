@@ -1,0 +1,340 @@
+/* Blyg Studio — design system (PWA redesign, phase 1).
+ *
+ * Layout and component vocabulary follow the approved prototype
+ * (design/pwa-prototype), itself copied from the Thicket Console PWA: a sticky
+ * accent top bar, a bottom tab bar that becomes a left rail at ≥900px,
+ * rounded cards with a soft shadow, pill segmented controls, uppercase
+ * micro-badges and bottom sheets. Type is the studio's own sans throughout —
+ * no serif anywhere.
+ *
+ * Colours come only from this repo. The studio wears the reading theme
+ * (settings.theme): theme.ts writes the tokens below onto <html> from THEMES
+ * (src/themes.ts). For `auto` nothing is written inline and the two blocks
+ * below — the studio's long-standing light/dark pair — decide. --pencil plays
+ * Thicket's green: the top bar, the active tab, primary buttons.
+ *
+ * Screen-specific CSS belongs to later phases (authoring.css, reading.css).
+ * The legacy screen rules at the bottom of this file keep the screens that
+ * have not been redesigned yet working on the new tokens. */
+
+:root {
+  /* auto (light) — the page sits one step below the card so cards read as cards. */
+  --page: #eef1f3; --card: #fafbfb; --sunk: #eef1f3;
+  --ink: #1b2426; --ink-soft: #5c686b; --page-ink: #1b2426; --page-ink-soft: #5c686b;
+  --rule: #dde3e5; --rule-strong: #c3cdd0;
+  --pencil: #23608c; --on-pencil: #fafbfb;
+  --alert: #b3261e; --ok: #1c7a52; --warn: #a35a00;
+  --radius: 14px;
+  --shadow: 0 1px 2px rgba(20,30,35,.06), 0 6px 20px rgba(20,30,35,.06);
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --rail: 92px;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="auto"] {
+    --page: #0f1314; --card: #14191a; --sunk: #1d2426;
+    --ink: #e3e7e7; --ink-soft: #95a2a5; --page-ink: #e3e7e7; --page-ink-soft: #95a2a5;
+    --rule: #2b3436; --rule-strong: #3d494c;
+    --pencil: #8cc0e4; --on-pencil: #0f1314;
+    --alert: #f0a19a; --ok: #74c79c; --warn: #e0a75c;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 6px 20px rgba(0,0,0,.25);
+    color-scheme: dark;
+  }
+}
+:root {
+  --ok-bg: color-mix(in srgb, var(--ok) 13%, var(--card));
+  --warn-bg: color-mix(in srgb, var(--warn) 13%, var(--card));
+  --alert-bg: color-mix(in srgb, var(--alert) 10%, var(--card));
+  --pencil-bg: color-mix(in srgb, var(--pencil) 12%, var(--card));
+  --tk-bg: color-mix(in srgb, var(--warn) 16%, transparent);
+  /* Legacy names, still used by the screens not yet redesigned. */
+  --paper: var(--card);
+  --paper-sunk: var(--sunk);
+  --alert-wash: color-mix(in srgb, var(--alert) 10%, transparent);
+}
+
+/* ---------- BASE ---------- */
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; }
+/* Reserve the scrollbar track always, so short and long pages share a width. */
+html { -webkit-text-size-adjust: 100%; }
+/* Reserve the scrollbar track on wide screens only, so pages don't jump
+   sideways between short and long screens; on a phone it is a dead strip. */
+@media (min-width: 900px) { html { scrollbar-gutter: stable; } }
+body {
+  font-family: var(--sans); color: var(--ink); background: var(--page);
+  -webkit-font-smoothing: antialiased; line-height: 1.5; min-height: 100vh;
+}
+h1, h2, h3, h4 { font-family: var(--sans); font-weight: 600; letter-spacing: .1px; }
+code, pre, kbd, .mono { font-family: var(--mono); }
+code { background: var(--sunk); padding: 1px 5px; border-radius: 5px; font-size: .85em; }
+a { color: var(--pencil); }
+.muted { color: var(--ink-soft); }
+.small { font-size: .82rem; }
+.tiny { font-size: .74rem; }
+.prose { max-width: 68ch; }
+:focus-visible { outline: 2px solid var(--pencil); outline-offset: 2px; }
+
+/* ---------- TOP BAR ---------- */
+.topbar {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px; padding-top: max(12px, env(safe-area-inset-top));
+  background: var(--pencil); color: var(--on-pencil);
+  box-shadow: 0 2px 10px rgba(0,0,0,.12);
+}
+.topbar-title { margin: 0; font-size: 1.08rem; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.topbar-title small { font-weight: 400; font-size: .78rem; opacity: .8; margin-left: 6px; }
+.topbar-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.tb-btn {
+  background: transparent; color: var(--on-pencil); border: 1px solid color-mix(in srgb, var(--on-pencil) 45%, transparent);
+  border-radius: 10px; padding: 6px 10px; font-size: .8rem; font-weight: 600; cursor: pointer; text-decoration: none; line-height: 1.2;
+}
+.tb-back { border: none; font-size: 1.3rem; padding: 2px 6px 2px 0; line-height: 1; }
+.tb-badge { text-decoration: none; font-size: .66rem; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; padding: 3px 8px; border-radius: 999px;
+  background: color-mix(in srgb, var(--on-pencil) 88%, var(--pencil)); color: var(--pencil); }
+.tb-badge.warn { background: var(--warn-bg); color: var(--warn); }
+@media (max-width: 440px) { .tb-btn .lbl { display: none; } }
+
+/* ---------- VIEWS ---------- */
+.views { padding: 16px 16px 104px; max-width: 760px; margin: 0 auto; }
+.views.wide { max-width: 1240px; }
+/* A screen not yet redesigned sits on one card ("framed"), so its text reads
+   against the card — on Slate the page itself is dark. Redesigned screens opt
+   out with useChrome({ framed: false }) and lay out their own cards. */
+.screen.framed {
+  background: var(--card); border: 1px solid var(--rule); border-radius: var(--radius);
+  box-shadow: var(--shadow); padding: 16px;
+}
+.screen.framed > :first-child { margin-top: 0; }
+.view-h { margin: 4px 2px 4px; font-size: 1.45rem; color: var(--page-ink); }
+.view-sub { margin: 0 2px 14px; color: var(--page-ink-soft); font-size: .86rem; }
+.section-h { font-weight: 600; font-size: 1.05rem; color: var(--page-ink); margin: 22px 2px 10px; display: flex; align-items: baseline; gap: 8px; }
+.section-h .muted { font-weight: 400; font-size: .8rem; color: var(--page-ink-soft); }
+.list-h { font-size: .74rem; font-weight: 700; text-transform: uppercase; letter-spacing: .6px; color: var(--page-ink-soft); margin: 18px 4px 6px; display: flex; justify-content: space-between; }
+.page-hint { text-align: center; color: var(--page-ink-soft); font-size: .78rem; margin: 6px 2px 0; }
+.empty { text-align: center; padding: 40px 20px; color: var(--page-ink-soft); }
+.empty .em { display: block; font-size: 30px; margin-bottom: 10px; opacity: .7; }
+
+/* ---------- CARDS ---------- */
+.card {
+  background: var(--card); border: 1px solid var(--rule); border-radius: var(--radius);
+  box-shadow: var(--shadow); padding: 16px; margin-bottom: 14px;
+}
+.card > :first-child { margin-top: 0; }
+.card > :last-child { margin-bottom: 0; }
+.card-h { font-weight: 600; font-size: 1rem; margin: 0 0 10px; display: flex; align-items: baseline; gap: 8px; }
+details.card > summary { font-weight: 600; cursor: pointer; color: var(--pencil); list-style: none; display: flex; align-items: center; gap: 8px; }
+details.card > summary::-webkit-details-marker { display: none; }
+details.card > summary::before { content: "▸"; font-size: .8rem; transition: transform .15s; color: var(--ink-soft); }
+details.card[open] > summary::before { transform: rotate(90deg); }
+details.card > summary .muted { font-weight: 400; font-size: .8rem; margin-left: auto; }
+details.card[open] > summary { margin-bottom: 12px; }
+
+/* ---------- FORM PRIMITIVES ----------
+   Zero-specificity (:where) so a screen's own rule always wins. */
+.field { display: block; margin-bottom: 14px; }
+.field > span { display: block; font-size: .82rem; color: var(--ink-soft); margin-bottom: 6px; }
+.hint { font-size: .78rem; color: var(--ink-soft); margin: 6px 2px 0; }
+:where(input:not([type]), input[type=text], input[type=url], input[type=search], input[type=password], input[type=email], textarea, select) {
+  font: inherit; color: var(--ink); background: var(--sunk);
+  border: 1px solid var(--rule); border-radius: 10px; padding: 9px 11px; outline: none; max-width: 100%;
+}
+:where(input, textarea, select):focus { border-color: var(--pencil); box-shadow: 0 0 0 3px color-mix(in srgb, var(--pencil) 18%, transparent); }
+/* The field's own ring replaces the generic outline (no doubled ring). */
+:where(input, textarea, select):focus-visible { outline: none; }
+:where(.field, .card, .sheet) :where(input:not([type]), input[type=text], input[type=url], input[type=search], input[type=password], textarea, select) { width: 100%; }
+:where(textarea) { resize: vertical; line-height: 1.55; }
+.check { display: flex; gap: 10px; align-items: flex-start; font-size: .9rem; margin: 6px 0 12px; }
+.check input { margin-top: 4px; accent-color: var(--pencil); }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.row > input { flex: 1; min-width: 0; }
+.spacer { flex: 1; }
+
+/* ---------- BUTTONS ----------
+   .btn is the system. Bare <button>s on screens not yet redesigned keep a
+   quiet outlined look through the zero-specificity rule below, so any class
+   rule overrides it. */
+:where(button) {
+  font: inherit; font-size: .85rem; color: inherit; cursor: pointer;
+  padding: .3rem .75rem; border-radius: 8px; border: 1px solid var(--rule-strong); background: transparent;
+}
+:where(button.primary) { background: var(--pencil); color: var(--on-pencil); border-color: var(--pencil); font-weight: 600; }
+:where(button.danger) { color: var(--alert); border-color: var(--alert); }
+:where(button:disabled) { opacity: .5; cursor: not-allowed; }
+button.link { background: none; border: none; padding: 0; font: inherit; color: inherit; text-decoration: underline; cursor: pointer; border-radius: 0; }
+.btn { font: inherit; font-weight: 600; font-size: .92rem; border-radius: 10px; padding: 10px 15px; border: 1px solid transparent; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 6px; line-height: 1.2; background: transparent; color: inherit; }
+.btn-primary { background: var(--pencil); color: var(--on-pencil); border-color: var(--pencil); }
+.btn-primary:active { transform: translateY(1px); }
+.btn-ghost { background: transparent; color: var(--ink-soft); border-color: var(--rule); }
+.btn-ghost:hover { color: var(--ink); border-color: var(--rule-strong); }
+.btn-danger { background: transparent; color: var(--alert); border-color: var(--alert); }
+.btn-mini { padding: 6px 10px; font-size: .8rem; border-radius: 8px; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn.is-on { background: var(--pencil-bg); color: var(--pencil); border-color: var(--pencil); }
+.icon-btn { background: none; border: 1px solid transparent; border-radius: 8px; padding: 5px 8px; cursor: pointer; color: var(--ink-soft); font-size: .95rem; line-height: 1; }
+.icon-btn:hover { border-color: var(--rule); color: var(--ink); }
+.icon-btn[aria-pressed=true] { background: var(--pencil-bg); color: var(--pencil); border-color: var(--pencil); }
+
+/* ---------- SEGMENTED / CHIPS ---------- */
+.segmented { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; margin-bottom: 12px; scrollbar-width: none; }
+.segmented::-webkit-scrollbar { display: none; }
+.seg { flex: 0 0 auto; font: inherit; font-size: .85rem; padding: 7px 14px; border-radius: 999px;
+  border: 1px solid var(--rule); background: var(--card); color: var(--ink-soft); cursor: pointer; white-space: nowrap; text-decoration: none; }
+.seg.is-active, .seg[aria-pressed=true], .seg[aria-current=page] { background: var(--pencil); color: var(--on-pencil); border-color: var(--pencil); }
+.seg .n { font-size: .72rem; opacity: .75; margin-left: 4px; font-variant-numeric: tabular-nums; }
+.seg-dashed { border-style: dashed; }
+
+/* ---------- BADGES / DOTS ---------- */
+.badge { display: inline-block; font-size: .66rem; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; padding: 2px 7px; border-radius: 999px; background: var(--sunk); color: var(--ink-soft); white-space: nowrap; vertical-align: middle; }
+.badge-ok { background: var(--ok-bg); color: var(--ok); }
+.badge-warn { background: var(--warn-bg); color: var(--warn); }
+.badge-alert { background: var(--alert-bg); color: var(--alert); }
+.badge-pencil { background: var(--pencil-bg); color: var(--pencil); }
+.badge-line { background: transparent; border: 1px solid var(--rule-strong); }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 999px; background: var(--rule-strong); flex: 0 0 auto; }
+.dot.public { background: var(--ok); }
+.dot.draft { background: transparent; border: 1.5px solid var(--ink-soft); }
+.dot.dirty { background: var(--warn); }
+.dot.withdrawn { background: var(--alert); }
+.dot.unread { background: var(--pencil); }
+
+/* ---------- BANNERS ---------- */
+.banner { display: flex; gap: 10px; align-items: flex-start; border-radius: 12px; padding: 11px 13px; font-size: .86rem; margin: 0 0 14px; border: 1px solid transparent; color: var(--ink); }
+.banner .mark { flex: 0 0 auto; width: 22px; height: 22px; border-radius: 999px; display: grid; place-items: center; font-size: .8rem; font-weight: 700; }
+.banner .body { flex: 1; min-width: 0; }
+.banner .body > p { margin: 0 0 4px; }
+.banner-warn { background: var(--warn-bg); border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
+.banner-warn .mark { background: var(--warn); color: var(--card); }
+.banner-ok { background: var(--ok-bg); border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
+.banner-ok .mark { background: var(--ok); color: var(--card); }
+.banner-alert { background: var(--alert-bg); border-color: color-mix(in srgb, var(--alert) 40%, transparent); }
+.banner-alert .mark { background: var(--alert); color: var(--card); }
+.banner-info { background: var(--pencil-bg); border-color: color-mix(in srgb, var(--pencil) 35%, transparent); }
+.banner-info .mark { background: var(--pencil); color: var(--on-pencil); }
+.banner a { font-weight: 600; }
+.error-banner { border: 1px solid color-mix(in srgb, var(--alert) 40%, transparent); background: var(--alert-bg); color: var(--alert); border-radius: 12px; padding: 10px 13px; font-size: .86rem; margin: 0 0 12px; overflow-wrap: anywhere; }
+.error-banner code { color: inherit; }
+.read-error { margin-bottom: 14px; }
+
+/* ---------- NAV LIST (more) ---------- */
+.nav-list { list-style: none; margin: 0 0 14px; padding: 0; background: var(--card); border: 1px solid var(--rule); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
+.nav-list form { margin: 0; }
+.nav-list a, .nav-list button { display: flex; align-items: center; gap: 12px; padding: 14px 16px; text-decoration: none; color: var(--ink); border: none; border-radius: 0; background: none; width: 100%; text-align: left; cursor: pointer; border-top: 1px solid var(--rule); font: inherit; }
+.nav-list li:first-child a, .nav-list li:first-child button { border-top: none; }
+.nav-list .mi { width: 24px; text-align: center; color: var(--pencil); font-size: 1.1rem; flex: 0 0 auto; }
+.nav-list .ml { flex: 1; min-width: 0; }
+.nav-list .md { display: block; font-size: .76rem; color: var(--ink-soft); overflow-wrap: anywhere; }
+.nav-list .chev { margin-left: auto; color: var(--ink-soft); }
+/* Non-link rows (signals page): same box as a nav-list link. */
+.nav-list .signal-row { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-top: 1px solid var(--rule); }
+.nav-list li:first-child .signal-row { border-top: none; }
+.nav-list .signal-row a { display: inline; padding: 0; border: none; width: auto; color: var(--pencil); }
+
+/* ---------- TAB BAR → RAIL ---------- */
+.tabbar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
+  display: flex; background: var(--card); border-top: 1px solid var(--rule);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.tab { flex: 1; background: none; border: none; font-size: .7rem; color: var(--ink-soft); text-decoration: none;
+  padding: 9px 4px 8px; display: flex; flex-direction: column; align-items: center; gap: 3px; cursor: pointer; position: relative; min-height: 52px; }
+.tab .ti { font-size: 19px; line-height: 1; height: 20px; }
+.tab.is-active { color: var(--pencil); font-weight: 600; }
+.tab .count { position: absolute; top: 5px; left: 50%; margin-left: 6px; min-width: 16px; height: 16px; background: var(--alert); color: #fff; border-radius: 999px; font-size: .6rem; display: grid; place-items: center; padding: 0 4px; font-weight: 700; }
+.tab .flag { position: absolute; top: 7px; left: 50%; margin-left: 8px; width: 8px; height: 8px; border-radius: 999px; background: var(--warn); }
+/* The editor hides the tab bar (useChrome({ tabs: false })) and shows its own. */
+.actionbar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; display: flex; align-items: center; gap: 8px;
+  background: var(--card); color: var(--ink); border-top: 1px solid var(--rule); padding: 10px 14px; padding-bottom: max(10px, env(safe-area-inset-bottom));
+}
+.actionbar .state { font-size: .78rem; color: var(--ink-soft); flex: 1; min-width: 0; }
+.actionbar .state b { color: var(--ok); font-weight: 600; }
+
+/* ---------- SHEETS (replace window.confirm / prompt / alert) ---------- */
+.backdrop { position: fixed; inset: 0; z-index: 60; background: rgba(10,15,18,.42); animation: fade .15s ease-out; }
+.sheet {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 61; max-height: 86vh; overflow-y: auto;
+  background: var(--card); color: var(--ink); border-radius: 18px 18px 0 0; padding: 8px 16px 18px; padding-bottom: max(18px, env(safe-area-inset-bottom));
+  box-shadow: 0 -10px 40px rgba(0,0,0,.25); animation: up .2s ease-out; outline: none;
+}
+.sheet::before { content: ""; display: block; width: 38px; height: 4px; border-radius: 999px; background: var(--rule-strong); margin: 0 auto 12px; }
+.sheet .sheet-title { margin: 0 0 6px; font-size: 1.15rem; overflow-wrap: anywhere; }
+.sheet .sheet-body { font-size: .9rem; color: var(--ink-soft); margin: 0 0 14px; white-space: pre-line; }
+.sheet .sheet-field { width: 100%; margin: 4px 0 14px; }
+.sheet textarea.sheet-field { min-height: 96px; }
+.sheet-actions { display: flex; flex-direction: column; gap: 8px; }
+.sheet-actions .btn { justify-content: center; padding: 13px; }
+.menu-list { list-style: none; margin: 0 -16px; padding: 0; }
+.menu-list li > button, .menu-list li > a { width: 100%; display: flex; align-items: center; gap: 12px; padding: 13px 18px; background: none; border: none; border-radius: 0; border-top: 1px solid var(--rule); cursor: pointer; text-align: left; color: var(--ink); text-decoration: none; font: inherit; font-size: .95rem; }
+.menu-list li:first-child > * { border-top: none; }
+.menu-list .mi { width: 22px; text-align: center; font-size: 1.05rem; color: var(--ink-soft); flex: 0 0 auto; }
+.menu-list .ml { flex: 1; min-width: 0; }
+.menu-list .md { display: block; font-size: .76rem; color: var(--ink-soft); }
+.menu-list .danger { color: var(--alert); }
+.menu-list .danger .mi { color: var(--alert); }
+.menu-list button:disabled { opacity: .45; cursor: not-allowed; }
+@keyframes up { from { transform: translateY(30px); opacity: .4; } to { transform: none; opacity: 1; } }
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .sheet, .backdrop, .toast { animation: none; } }
+
+.toast { position: fixed; left: 50%; bottom: calc(84px + env(safe-area-inset-bottom)); transform: translateX(-50%); z-index: 70;
+  background: var(--ink); color: var(--card); padding: 9px 16px; border-radius: 999px; font-size: .85rem; box-shadow: 0 6px 20px rgba(0,0,0,.25); animation: up .2s ease-out; max-width: calc(100vw - 32px); text-align: center; }
+
+/* ---------- LOGIN (server-rendered shell) ---------- */
+main.login { max-width: 360px; margin: 12vh auto 0; padding: 24px 20px; background: var(--card); border: 1px solid var(--rule); border-radius: var(--radius); box-shadow: var(--shadow); }
+main.login h1 { margin: 0 0 12px; font-size: 1.3rem; }
+main.login input { width: 100%; }
+main.login .btn { width: 100%; }
+
+/* ---------- WIDE SCREENS: the tab bar becomes a left rail ---------- */
+@media (min-width: 900px) {
+  body.has-tabs { padding-left: var(--rail); }
+  .tabbar { top: 0; right: auto; width: var(--rail); flex-direction: column; justify-content: flex-start; padding-top: 70px; border-top: none; border-right: 1px solid var(--rule); }
+  .tab { flex: 0 0 auto; padding: 14px 4px; }
+  /* The bar spans the rail too, above it; the rail's tabs start below it. */
+  body.has-tabs .topbar { margin-left: calc(-1 * var(--rail)); padding-left: 20px; z-index: 35; }
+  .actionbar { left: var(--rail); }
+  body.no-tabs .actionbar { left: 0; }
+  .sheet { left: 50%; right: auto; width: 520px; max-width: calc(100vw - 32px); transform: translateX(-50%); bottom: auto; top: 12vh; max-height: 76vh; border-radius: 18px; animation: fade .15s; }
+  .sheet::before { display: none; }
+  body.has-tabs .toast { margin-left: calc(var(--rail) / 2); }
+}
+
+/* ======================================================================
+ * LEGACY SCREEN RULES — the screens later phases redesign. Kept working on
+ * the new tokens; move or replace them with the screen's own stylesheet.
+ * ====================================================================== */
+.compose-help { font-size: 0.8rem; opacity: 0.65; margin: 0 0 0.5rem; }
+.compose-help code { font-size: 0.95em; }
+.tc-chip { font-size: 0.72rem; border: 1px solid var(--rule-strong); border-radius: 3px; padding: 0.02rem 0.28rem; margin-right: 0.35rem; opacity: 0.75; }
+.kind-chip { font-size: 0.8rem; font-style: italic; color: var(--pencil); margin-right: 0.35rem; }
+
+.h-row { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; padding: 0.35rem 0; border-top: 1px solid var(--rule); }
+
+
+
+
+
+.dialog-popup > button { margin-top: 0.75rem; }
+
+/* Phone width: overflow, tap targets, gutters (session 29, carried over). */
+@media (max-width: 640px) {
+  .item-row, .reading-entry, .mention-row, .out-row, .hopper-row, .preview, .stub-head { overflow-wrap: anywhere; }
+  .screen.framed { padding: 12px; }
+  /* ~44px tap targets on the legacy screens' bare buttons. */
+  :where(.screen) :where(button:not(.link):not(.btn):not(.tab):not(.entry-copy):not(.stub-btn):not(.vis-btn)) { min-height: 2.6rem; padding: 0.4rem 0.8rem; }
+  .item-row .actions, .qe-bar, .entry-actions, .edit-bar { gap: 0.5rem; }
+  .hopper-row, .hopper-head { flex-direction: column; gap: 0.5rem; }
+  .hopper-row .actions, .hopper-head .actions { flex-wrap: wrap; }
+}
+
+/* Settings → AI models (0.26.0) */
+.provider-keys { list-style: none; margin: 0 0 14px; padding: 0; font-size: .86rem; display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.provider-keys li[data-configured="true"] { color: var(--ok); }
+.provider-keys li[data-configured="false"] { color: var(--ink-soft); }
+.model-field select { width: 100%; }
+.model-field input { margin-top: 6px; }
+.model-hint code, .provider-keys code { font-size: .8em; }

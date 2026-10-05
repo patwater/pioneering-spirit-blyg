@@ -6,15 +6,18 @@
 // "Permalink" text link (dropping the ∞ glyph). Task 8 originally shipped
 // against the rev-1 mockup; this brings it forward together with threads.
 
-import { listBlogrollSubscriptions } from "./importer/store.ts";
+import { listBlogrollSubscriptions, listPublicHoppers } from "./importer/store.ts";
 import { listPublicResponses } from "./mentions/store.ts";
 import { blygItemUrl } from "./importer/util.ts";
 import { parseStoredCite, parseStoredFork, parseStoredStub } from "./stub.ts";
 import { excerptFromHtml } from "./markdown.ts";
-import { authoredKind, getMedia, listMediaForItem, listVersions, publishedVersion } from "./model.ts";
+import { clampText, leadingHeading, stripTransclusionQuotes } from "./preview.ts";
+import { authoredKind, getMedia, itemShowsResponses, listMediaForItem, publishedVersion } from "./model.ts";
 import type { ItemRow, MediaRow, Settings, SubscriptionRow, Transclusion, VersionRow } from "./types.ts";
+import { loadFeedData, sourceKey, type FeedCardData, type FeedProvenance, type FeedItem } from "./public-feed.ts";
 import { WEBMENTION_PATH } from "./types.ts";
-import { escapeHtml } from "./util.ts";
+import { escapeHtml, formatDateIn, unplacedMedia, visibleMedia } from "./util.ts";
+import { graphemePrefix } from "./text.ts";
 
 
 /**
@@ -36,63 +39,9 @@ import { escapeHtml } from "./util.ts";
  * a tool that repaints itself when you change your site's colours is a
  * surprise, not a feature.
  */
-export interface Theme {
-  label: string;
-  /** true when the palette is dark, so `color-scheme` can be pinned to match. */
-  dark: boolean;
-  page: string;
-  paper: string;
-  ink: string;
-  inkSoft: string;
-  rule: string;
-  pencil: string;
-}
+import { THEMES } from "./themes.ts";
+export { THEMES, type Theme } from "./themes.ts";
 
-export const THEMES: Record<string, Theme> = {
-  paper: {
-    label: "Paper",
-    dark: false,
-    page: "#fafbfb", paper: "#fafbfb",
-    ink: "#1b2426", inkSoft: "#5c686b", rule: "#dde3e5", pencil: "#23608c",
-  },
-  cream: {
-    label: "Cream",
-    dark: false,
-    page: "#e9e2d2", paper: "#f7f2e7",
-    ink: "#33312c", inkSoft: "#6d675c", rule: "#ddd5c4", pencil: "#8a5a2b",
-  },
-  slate: {
-    label: "Slate",
-    dark: false,
-    page: "#2f3538", paper: "#f5f7f7",
-    ink: "#1b2426", inkSoft: "#5c686b", rule: "#dde3e5", pencil: "#23608c",
-  },
-  "solarized-light": {
-    label: "Solarized Light",
-    dark: false,
-    page: "#eee8d5", paper: "#fdf6e3",
-    ink: "#073642", inkSoft: "#657b83", rule: "#e3dcc4", pencil: "#268bd2",
-  },
-  "solarized-dark": {
-    label: "Solarized Dark",
-    dark: true,
-    page: "#00212b", paper: "#002b36",
-    ink: "#eee8d5", inkSoft: "#93a1a1", rule: "#0c4553", pencil: "#6cb6e0",
-  },
-  nord: {
-    label: "Nord",
-    dark: true,
-    page: "#242933", paper: "#2e3440",
-    ink: "#e5e9f0", inkSoft: "#a5aec0", rule: "#3e4757", pencil: "#88c0d0",
-  },
-};
-
-/**
- * CSS appended to the stylesheet when the author picked a theme. It redefines
- * the tokens for BOTH schemes — the base block and the dark-preference block —
- * because an explicit choice by the author should not flip when the reader's
- * OS does. `auto` returns nothing, leaving the light/dark defaults in charge.
- */
 export function themeCss(name: string): string {
   const t = THEMES[name];
   if (!t) return "";
@@ -314,7 +263,19 @@ a.permalink:hover { color: var(--pencil); border-bottom-color: currentColor; }
 /* Kind marker. Was an ALL-CAPS bordered chip — the commonest template tell,
  * and heavier than the thing it labels. A blue lowercase word does the job. */
 .kind-chip { font: var(--apparatus); font-style: italic; color: var(--pencil); margin-right: 0.15rem; }
-.thread-card p:first-child { margin-bottom: 0.5rem; }
+/* A thread card's kind line: its own line, styled like the other apparatus
+   labels (.stub-cite .label), so it never runs into the author's first words. */
+.card-kind { font-family: var(--sans, inherit); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--pencil); margin: 0 0 0.5rem; }
+.card-kind .quote-count { text-transform: none; letter-spacing: 0; color: var(--ink-soft); }
+/* The top of the thread's own page, cut at a fixed height. A height clip,
+   not a line clamp: the card holds blockquotes, headings and lists, which
+   -webkit-line-clamp cannot count. The fade is added only when the content
+   overflows (VERSION_NAV_SCRIPT sets .clipped), so a short thread's last line
+   is never dimmed; without script the content is still clipped, just unfaded. */
+.card-clip { max-height: 24rem; overflow: hidden; position: relative; }
+.card-clip.clipped { -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 4rem), transparent); mask-image: linear-gradient(to bottom, #000 calc(100% - 4rem), transparent); }
+.card-clip h1 { font-size: 1.15rem; line-height: 1.25; margin: 0 0 0.35rem; }
+.thread-card .read-more { margin: 0.6rem 0 0; }
 
 /* A transcluded fragment is someone's words held verbatim, so it is set as a
  * quotation with the editorial blue beside it, not as a tinted card. */
@@ -384,15 +345,39 @@ article.showing-pin .item-content[aria-busy="true"] { opacity: 0.5; }
 .blogroll a:hover { border-bottom-color: currentColor; }
 .blogroll .blyg-mark { font-style: italic; color: var(--ink-soft); margin-right: 0.1rem; }
 .blogroll-foot { font: var(--apparatus); color: var(--ink-soft); margin: 0.8rem 0 0; }
+.collections { margin-top: 3.5rem; padding-top: 1.5rem; border-top: 1px solid var(--rule); }
+.collections h2 { font: var(--apparatus); font-weight: 600; color: var(--ink-soft); margin: 0 0 0.6rem; letter-spacing: 0; }
+.collections ul { list-style: none; padding: 0; margin: 0; }
+.collections li { font: var(--apparatus); margin: 0 0 0.45rem; overflow-wrap: anywhere; }
+.collections a { color: var(--pencil); text-decoration: none; border-bottom: 1px solid var(--rule); }
+.collections a:hover { border-bottom-color: currentColor; }
+.collections .meta, .collection-head .meta { color: var(--ink-soft); }
+.collection-desc { color: var(--ink-soft); }
+.collections .collection-desc { display: block; }
+.collection-head { margin: 0 0 2rem; }
+.collection-head h2 { margin-bottom: 0.3rem; }
+.collection-head p { font: var(--apparatus); margin: 0.2rem 0; overflow-wrap: anywhere; }
+.collection-head .collection-desc { font-style: italic; }
 
 ul.archive { list-style: none; padding: 0; margin: 0; }
 ul.archive li { padding: 0.55rem 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; }
 ul.archive .row-main a { text-decoration: none; }
+/* The body tail after a title. Apparatus type, so the row reads as a title
+   with a note under it rather than as one long sentence. */
+ul.archive .row-sub { font: var(--apparatus); color: var(--ink-soft); }
 ul.archive .row-main a:hover { text-decoration: underline; }
 ul.archive .meta { flex: none; white-space: nowrap; }
 footer.older { padding: 2rem 0 0; border-top: 1px solid var(--rule); margin-top: 2rem; }
 footer.older a { font: var(--apparatus); color: var(--pencil); text-decoration: none; }
 footer.older a:hover { text-decoration: underline; }
+
+/* A pasted URL is one unbroken token, and a 65ch measure on a 390px screen is
+   narrower than plenty of them. Without this, one link in one item sets the
+   page's minimum width and every page on the blyg scrolls sideways. Prose gets
+   break-word (breaks only where a word cannot fit); the apparatus, which is
+   where bare URLs and origins actually appear, gets anywhere. */
+article.fragment, article.thread, .thread-card { overflow-wrap: break-word; }
+.provenance, .responses li, .blogroll li, .pinned-banner { overflow-wrap: anywhere; }
 
 @media (max-width: 30rem) {
   body { padding: 1.5rem 1rem 3rem; }
@@ -400,6 +385,14 @@ footer.older a:hover { text-decoration: underline; }
      sheet with half of it. */
   .blyg { padding: calc(var(--block-pad) / 2); max-width: calc(65ch + var(--block-pad)); }
   ul.archive li { flex-direction: column; gap: 0.15rem; }
+  /* The masthead is the one row on a public page that pairs a fixed-size
+     image with text that has to wrap. */
+  .masthead { gap: 0.75rem; }
+  /* The version arrows are an apparatus-sized control — about 18px tall,
+     which is a fine mouse target and not a thumb target. They are also the
+     only buttons on a public page, so this is the whole tap-target problem. */
+  .version-line .vnav { gap: 0.3rem; }
+  .version-line .vstep { padding: 0.45rem 0.6rem; }
 }
 `;
 
@@ -441,6 +434,14 @@ export interface PageMeta {
    * finds us; a blyg sender reads the manifest key instead.
    */
   webmention?: string;
+  /**
+   * Absolute feed URL for RSS autodiscovery — `${origin}feed.xml`.
+   * When omitted, layout falls back to the mount-relative `${mount}/feed.xml`
+   * so pages without an origin (hopper) still advertise a feed.
+   */
+  feedUrl?: string;
+  /** Feed title for the autodiscovery link — the blyg's title. */
+  feedTitle?: string;
 }
 
 function metaTags(meta: PageMeta): string {
@@ -499,6 +500,14 @@ export const VERSION_NAV_SCRIPT = `
  * the item was actually written in.
  */
 (function () {
+  // Feed-page thread cards: fade the bottom edge only when the clip actually
+  // cuts something off, so a short thread is never dimmed (session 30). Runs
+  // before the version-line early return below, which a feed can trip.
+  var clips = document.querySelectorAll(".card-clip");
+  for (var c = 0; c < clips.length; c++) {
+    if (clips[c].scrollHeight > clips[c].clientHeight + 1) clips[c].classList.add("clipped");
+  }
+
   var lines = document.querySelectorAll(".version-line[data-item]");
   if (!lines.length || !window.fetch) return;
 
@@ -620,6 +629,11 @@ export const VERSION_NAV_SCRIPT = `
 `;
 
 export function layout(title: string, body: string, mount: string, meta: PageMeta = {}): string {
+  // RSS autodiscovery: absolute URL + title. A relative href without a title
+  // is valid HTML but several readers ignore it — pasting `<origin>/blyg/`
+  // then fails with "invalid link" while `<origin>/blyg/feed.xml` works.
+  const feedHref = meta.feedUrl ?? `${mount}/feed.xml`;
+  const feedTitle = meta.feedTitle ? ` title="${escapeHtml(meta.feedTitle)}"` : "";
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -627,7 +641,7 @@ export function layout(title: string, body: string, mount: string, meta: PageMet
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(title)}</title>
 ${metaTags({ ...meta, ogTitle: meta.ogTitle ?? title })}<link rel="stylesheet" href="${mount}/style.css">
-<link rel="alternate" type="application/rss+xml" href="${mount}/feed.xml">
+<link rel="alternate" type="application/rss+xml"${feedTitle} href="${escapeHtml(feedHref)}">
 ${meta.webmention ? `<link rel="webmention" href="${meta.webmention}">\n` : ""}${meta.alternateJson ? `<link rel="alternate" type="application/json" href="${meta.alternateJson}">\n` : ""}${meta.canonical ? `<link rel="canonical" href="${meta.canonical}">\n` : ""}${meta.hasBlogroll ? `<link rel="blogroll" href="${mount}/blogroll.opml">\n` : ""}</head>
 <body>
 ${body}
@@ -678,8 +692,8 @@ function pageHeader(mount: string): string {
  * just the same thing uniformly: hide `.blyg-header` and `.masthead` and every
  * page is a bare block.
  */
-async function pageTop(db: D1Database, settings: Settings, mount: string): Promise<string> {
-  return `${pageHeader(mount)}\n${await masthead(db, settings, mount)}`;
+export async function pageTop(db: D1Database, settings: Settings, mount: string, avatar?: MediaRow | null): Promise<string> {
+  return `${pageHeader(mount)}\n${await masthead(db, settings, mount, avatar)}`;
 }
 
 /**
@@ -702,12 +716,12 @@ async function pageTop(db: D1Database, settings: Settings, mount: string): Promi
  * Presentation only — reads settings that already exist, writes no new field,
  * and nothing here appears in any wire representation.
  */
-async function masthead(db: D1Database, settings: Settings, mount: string): Promise<string> {
+async function masthead(db: D1Database, settings: Settings, mount: string, loadedAvatar?: MediaRow | null): Promise<string> {
   const bits: string[] = [];
   // The avatar's URL is its `r2_key` (`media/{id}.{ext}`), not `media/{id}` —
   // the `/media/:file` route matches on the full key including the extension,
   // so an id alone 404s. Same lookup `mediaHtml` does for item images.
-  const avatar = settings.avatar_media_id ? await getMedia(db, settings.avatar_media_id) : null;
+  const avatar = loadedAvatar !== undefined ? loadedAvatar : settings.avatar_media_id ? await getMedia(db, settings.avatar_media_id) : null;
   if (avatar) {
     bits.push(`<img class="avatar" src="${mount}/${avatar.r2_key}" alt="" width="48" height="48">`);
   }
@@ -727,9 +741,8 @@ async function masthead(db: D1Database, settings: Settings, mount: string): Prom
   return `<div class="masthead">${bits.join("\n")}</div>`;
 }
 
-function formatDate(iso: string): string {
-  return new Date(iso).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
-}
+/** Local alias; `timeZone` is required so no call site can silently mean UTC. */
+const formatDate = (iso: string, timeZone: string): string => formatDateIn(iso, timeZone);
 
 /**
  * Version line + note + Created/Most-recent lines.
@@ -748,8 +761,8 @@ function formatDate(iso: string): string {
  * survives withdrawal of the live stream (§2.8), so the endcap page is
  * exactly where a reader needs to be told what remains citable.
  */
-function itemMeta(item: ItemRow, note: string | null, pins: number[], mount: string, isThread: boolean): string {
-  const created = formatDate(item.created);
+function itemMeta(item: FeedItem, note: string | null, pins: number[], mount: string, isThread: boolean, tz: string): string {
+  const created = formatDate(item.created, tz);
   // Citations link the HTML pages (session-18 route); each page links its
   // JSON twin, so the machine-citable file is one hop away, never hidden.
   // isThread comes from the caller, not item.kind — a withdrawn item's kind
@@ -775,7 +788,7 @@ function itemMeta(item: ItemRow, note: string | null, pins: number[], mount: str
     `<span class="vlabel">v${item.version}</span>${pinPart}</p>`;
   const noteHtml = note ? `<p class="version-note">&ldquo;${escapeHtml(note)}&rdquo;</p>` : "";
   const recent =
-    item.version > 1 ? `\n<span>Most recent: ${formatDate(item.updated)}, v${item.version}</span>` : "";
+    item.version > 1 ? `\n<span>Most recent: ${formatDate(item.updated, tz)}, v${item.version}</span>` : "";
   return `${versionLine}
 ${noteHtml}
 <p class="timestamps">
@@ -785,21 +798,21 @@ ${noteHtml}
 
 /** Pinned version numbers for an item, ascending — the citations §2.8 says the page should show. */
 async function pinnedVersions(db: D1Database, itemId: string): Promise<number[]> {
-  return (await listVersions(db, itemId)).filter((v) => v.pinned === 1).map((v) => v.version);
+  return (await db.prepare("SELECT version FROM versions WHERE item_id = ? AND pinned = 1 ORDER BY version ASC").bind(itemId).all<{ version: number }>()).results.map(v => v.version);
 }
 
 function permalinkLink(id: string, isThread: boolean, mount: string): string {
   return `<p><a class="permalink" href="${mount}/${isThread ? "t" : "f"}/${id}/">Permalink</a></p>`;
 }
 
-function mediaHtml(media: MediaRow[], mount: string): string {
-  return media
+function mediaHtml(media: MediaRow[], mount: string, contentHtml: string): string {
+  return unplacedMedia(media, contentHtml)
     .map((m) => `<p><img src="${mount}/${m.r2_key}" alt="${escapeHtml(m.alt ?? "")}" loading="lazy"></p>`)
     .join("\n");
 }
 
 export function renderFragment(
-  item: ItemRow,
+  item: FeedItem,
   contentHtml: string,
   media: MediaRow[],
   note: string | null,
@@ -809,14 +822,15 @@ export function renderFragment(
   // threadBlock already make: a feed card is a pointer to an item, and three
   // lines of apparatus over a one-line fragment inverts that.
   compactCitations = false,
+  tz: string,
 ): string {
   return `<article class="fragment">
-${forkLineage(item, { compact: compactCitations })}
+${forkLineage(item, tz, { compact: compactCitations })}
 <div class="item-content">
 ${contentHtml}
 </div>
-${mediaHtml(media, mount)}
-${itemMeta(item, note, pins, mount, false)}
+${mediaHtml(media, mount, contentHtml)}
+${itemMeta(item, note, pins, mount, false, tz)}
 ${permalinkLink(item.id, false, mount)}
 </article>`;
 }
@@ -825,9 +839,9 @@ ${permalinkLink(item.id, false, mount)}
  * `titleLink` is set on the feed page and unset on the permalink page: on the
  * item's own page the title would link to the page you are already reading.
  */
-async function fragmentBlock(db: D1Database, item: ItemRow, mount: string, titleLink = false): Promise<string> {
-  const latest = await publishedVersion(db, item);
-  const media = await listMediaForItem(db, item.id);
+async function fragmentBlock(db: D1Database, item: FeedItem, mount: string, tz: string, titleLink = false, loaded?: FeedCardData): Promise<string> {
+  const latest = loaded ? loaded.latest : await publishedVersion(db, item);
+  const media = loaded ? loaded.media : await listMediaForItem(db, item.id);
   const html = latest?.content_html ?? "";
   return renderFragment(
     item,
@@ -835,8 +849,9 @@ async function fragmentBlock(db: D1Database, item: ItemRow, mount: string, title
     media,
     latest?.note ?? null,
     mount,
-    await pinnedVersions(db, item.id),
+    loaded ? loaded.pins : await pinnedVersions(db, item.id),
     titleLink,
+    tz,
   );
 }
 
@@ -854,12 +869,20 @@ export interface ProvenanceLink {
  * `page` when we have one, the f/·t/ convention otherwise — and name the blyg
  * they came from, which is the byline §2.1 asks for.
  */
-export async function transclusionProvenance(db: D1Database, transclusions: Transclusion[], mount: string): Promise<string[]> {
+export async function transclusionProvenance(db: D1Database, transclusions: Transclusion[], mount: string, loaded?: FeedProvenance): Promise<string[]> {
   const out: string[] = [];
   for (const t of transclusions) {
     let link: ProvenanceLink;
-    if (t.origin) {
-      const row = await db
+    if (t.origin && t.cited) {
+      // The frozen citation, when the published entry carries one (§16.1,
+      // decision #30). This is the whole stale-byline fix: the branch below
+      // renders a *published* document's byline from a live join, so renaming
+      // or deleting a subscription silently rewrote what an already-published
+      // document said about its source. A citation that changes after
+      // publication was never a citation.
+      link = { href: t.cited.url, label: `from <em>${escapeHtml(clampForeign(t.cited.source))}</em> ↗` };
+    } else if (t.origin) {
+      const row = loaded ? loaded.remoteSources.get(sourceKey(t.origin, t.id)) : await db
         .prepare(
           `SELECT ii.kind AS kind, ii.page AS page, s.title AS title
            FROM imported_items ii JOIN subscriptions s ON s.id = ii.subscription_id
@@ -874,13 +897,18 @@ export async function transclusionProvenance(db: D1Database, transclusions: Tran
       const label = row?.title ? `from <em>${escapeHtml(row.title)}</em> ↗` : `from ${escapeHtml(new URL(t.origin).host)} ↗`;
       link = { href, label };
     } else {
-      const row = await db.prepare("SELECT * FROM items WHERE id = ?").bind(t.id).first<ItemRow>();
+      const row = loaded ? null : await db.prepare("SELECT * FROM items WHERE id = ?").bind(t.id).first<ItemRow>();
       // A withdrawn target keeps its permalink (the endcap is 200 forever), so
       // the link stands — it just has to name the authored kind, not "withdrawn".
-      const kind = row ? await authoredKind(db, row) : "fragment";
+      const kind = loaded ? loaded.localKinds.get(t.id) ?? "fragment" : row ? await authoredKind(db, row) : "fragment";
       link = { href: `${mount}/${kind === "thread" ? "t" : "f"}/${t.id}/`, label: `${kind} ↗` };
     }
-    out.push(`<p class="provenance"><a href="${link.href}">${link.label}</a> · snapshot of v${t.version}</p>`);
+    // A partial quote says so. §16.4 puts the disclosure on the second class,
+    // and this is the human half of it: without it an excerpt and a whole
+    // transclusion are the same blockquote to a reader, differing only in
+    // being shorter — which is indistinguishable from the source being short.
+    const what = t.selector ? "excerpt of" : "snapshot of";
+    out.push(`<p class="provenance"><a href="${link.href}">${link.label}</a> · ${what} v${t.version}</p>`);
   }
   return out;
 }
@@ -915,7 +943,14 @@ export function injectProvenance(html: string, provenance: string[]): string {
         inTransclusion = false;
       }
     } else {
-      if (depth === 0) inTransclusion = m[0].includes('class="blyg-transclusion"');
+      // Match the class **token**, not the literal attribute. A partial
+      // transclusion's class is `blyg-transclusion blyg-partial` (§16.4), so a
+      // substring test on the whole attribute misses it — and missing it does
+      // not merely drop one provenance line, it stops the index advancing and
+      // mis-pairs every following line in a thread that mixes the two forms,
+      // which is exactly the failure the depth-awareness above exists to
+      // prevent, arrived at from the other direction.
+      if (depth === 0) inTransclusion = /\bclass="[^"]*\bblyg-transclusion\b/.test(m[0]);
       depth++;
     }
   }
@@ -927,31 +962,62 @@ function parseTransclusions(json: string | null | undefined): Transclusion[] {
   return JSON.parse(json) as Transclusion[];
 }
 
-async function threadCard(db: D1Database, item: ItemRow, mount: string): Promise<string> {
-  const latest = await publishedVersion(db, item);
-  const html = latest?.content_html ?? "";
+/**
+ * A thread on the feed page shows the top of its own page: the same HTML the
+ * permalink renders, with the same provenance lines on its quotes, cut off at
+ * a fixed height and continued by "read the thread". Session 30, Venkat: the
+ * card should be "as much of the detail page view as will fit in the feed
+ * view, with the same formatting".
+ *
+ * **This reverses session 28's plain-text teaser, deliberately.** That teaser
+ * existed because long threads crowded a mixed stream, and its later fixes
+ * (author's prose only, heading split off) existed because flattening HTML to
+ * text welded a quoted sentence onto the author's own with no boundary. The
+ * fixed-height clip answers the first; rendering the real HTML answers the
+ * second, since a quote is then a blockquote with a provenance line naming
+ * whose it is, exactly as on the thread's own page.
+ *
+ * The title rule is unchanged (#46: presentation only, the wire keeps the bare
+ * heading): a leading heading is linked to the thread by `linkLeadingTitle`,
+ * the same helper the fragment card uses.
+ */
+async function threadCard(db: D1Database, item: FeedItem, mount: string, tz: string, loaded?: FeedCardData, provenance?: FeedProvenance): Promise<string> {
+  const latest = loaded ? loaded.latest : await publishedVersion(db, item);
+  const href = `${mount}/t/${item.id}/`;
+  const transclusions = parseTransclusions(latest?.transclusions);
+  const html = injectProvenance(latest?.content_html ?? "", await transclusionProvenance(db, transclusions, mount, provenance));
+  const media = loaded ? loaded.media : await listMediaForItem(db, item.id);
+  // The kind line is apparatus, on its own line above the item, never inline
+  // with the author's first sentence (session 30). The quote count says what
+  // the card may be cutting off.
+  const quoted = transclusions.length;
+  const kindLine = `<p class="card-kind">thread${quoted ? ` <span class="quote-count">· ${quoted} quoted</span>` : ""}</p>`;
   return `<article class="fragment thread-card">
-${stubCitation(latest, { compact: true })}
-${forkLineage(item, { compact: true })}
-<p><span class="kind-chip">thread</span> ${escapeHtml(excerptFromHtml(html, 300))}</p>
-<p><a href="${mount}/t/${item.id}/">read the thread →</a></p>
-${itemMeta(item, latest?.note ?? null, await pinnedVersions(db, item.id), mount, true)}
+${stubCitation(latest, tz, { compact: true })}
+${forkLineage(item, tz, { compact: true })}
+${kindLine}
+<div class="item-content card-clip">
+${linkLeadingTitle(html, href)}
+</div>
+${mediaHtml(media, mount, html)}
+<p class="read-more"><a href="${href}">read the thread →</a></p>
+${itemMeta(item, latest?.note ?? null, loaded ? loaded.pins : await pinnedVersions(db, item.id), mount, true, tz)}
 </article>`;
 }
 
-async function threadBlock(db: D1Database, item: ItemRow, mount: string): Promise<string> {
+async function threadBlock(db: D1Database, item: ItemRow, mount: string, tz: string): Promise<string> {
   const latest = await publishedVersion(db, item);
   const transclusions = parseTransclusions(latest?.transclusions);
   const html = injectProvenance(latest?.content_html ?? "", await transclusionProvenance(db, transclusions, mount));
   const media = await listMediaForItem(db, item.id);
   return `<article class="thread">
-${stubCitation(latest)}
-${forkLineage(item)}
+${stubCitation(latest, tz)}
+${forkLineage(item, tz)}
 <div class="item-content">
 ${html}
 </div>
-${mediaHtml(media, mount)}
-${itemMeta(item, latest?.note ?? null, await pinnedVersions(db, item.id), mount, true)}
+${mediaHtml(media, mount, html)}
+${itemMeta(item, latest?.note ?? null, await pinnedVersions(db, item.id), mount, true, tz)}
 ${permalinkLink(item.id, true, mount)}
 </article>`;
 }
@@ -967,7 +1033,7 @@ ${permalinkLink(item.id, true, mount)}
  * Versions published before migration 0008 have no frozen half and fall back
  * to the wire marker alone, which is always enough for identity.
  */
-export function stubCitation(row: VersionRow | null, opts: { compact?: boolean } = {}): string {
+export function stubCitation(row: Pick<VersionRow, "stub_of" | "stub_cite"> | null, tz: string, opts: { compact?: boolean } = {}): string {
   const stub = parseStoredStub(row?.stub_of ?? null);
   if (!stub) return "";
   const cite = parseStoredCite(row?.stub_cite ?? null);
@@ -984,7 +1050,7 @@ export function stubCitation(row: VersionRow | null, opts: { compact?: boolean }
   if (cite?.excerpt) parts.push(`&ldquo;${escapeHtml(cite.excerpt)}&rdquo;`);
   if ("id" in stub) parts.push(`item <code>${escapeHtml(stub.id)}</code>, v${stub.version}`);
   parts.push(`&lt;<a href="${escapeHtml(url)}">${escapeHtml(url)}</a>&gt;`);
-  if (cite?.retrieved) parts.push(`retrieved ${formatDate(cite.retrieved)}`);
+  if (cite?.retrieved) parts.push(`retrieved ${formatDate(cite.retrieved, tz)}`);
   return `<p class="stub-cite"><span class="label">In response to</span><br>${parts.join(" &middot; ")}</p>`;
 }
 
@@ -1002,7 +1068,7 @@ export function stubCitation(row: VersionRow | null, opts: { compact?: boolean }
  * which is the only kind of URL a lineage pointer is allowed to name, because
  * it is the only one somebody promised to keep serving.
  */
-export function forkLineage(item: ItemRow, opts: { compact?: boolean } = {}): string {
+export function forkLineage(item: Pick<ItemRow, "forked_from" | "fork_cite">, tz: string, opts: { compact?: boolean } = {}): string {
   const fork = parseStoredFork(item.forked_from);
   if (!fork) return "";
   const cite = parseStoredCite(item.fork_cite);
@@ -1017,14 +1083,14 @@ export function forkLineage(item: ItemRow, opts: { compact?: boolean } = {}): st
   if (cite?.excerpt) parts.push(`&ldquo;${escapeHtml(cite.excerpt)}&rdquo;`);
   parts.push(`item <code>${escapeHtml(fork.id)}</code>, pinned v${fork.version}`);
   parts.push(`&lt;<a href="${escapeHtml(url)}">${escapeHtml(url)}</a>&gt;`);
-  if (cite?.retrieved) parts.push(`retrieved ${formatDate(cite.retrieved)}`);
+  if (cite?.retrieved) parts.push(`retrieved ${formatDate(cite.retrieved, tz)}`);
   return `<p class="stub-cite"><span class="label">Forked from</span><br>${parts.join(" &middot; ")}</p>`;
 }
 
 /** Cap on any string an origin asserts about itself before it reaches our page. */
 function clampForeign(raw: string, max = 60): string {
   const flat = raw.replace(/\s+/g, " ").trim();
-  return flat.length > max ? flat.slice(0, max - 1) + "…" : flat;
+  return flat.length > max ? graphemePrefix(flat, max - 1) + "…" : flat;
 }
 
 /**
@@ -1044,8 +1110,11 @@ function clampForeign(raw: string, max = 60): string {
  * authenticated, the relation, and the date. The origin is rendered as the
  * load-bearing half, because it is the only part the protocol vouches for.
  */
-export async function responsesSection(db: D1Database, item: ItemRow, mount: string): Promise<string> {
-  if (item.show_responses !== 1) return "";
+export async function responsesSection(db: D1Database, item: ItemRow, settings: Settings, mount: string): Promise<string> {
+  const tz = settings.timezone;
+  // The item decides, or defers to the global default — one rule, in model.ts,
+  // shared with the studio control that reports what is published.
+  if (!itemShowsResponses(item, settings)) return "";
   const rows = await listPublicResponses(db, item.id);
   if (!rows.length) return "";
   const lines = rows.map((row) => {
@@ -1061,7 +1130,7 @@ export async function responsesSection(db: D1Database, item: ItemRow, mount: str
     }
     const label = who ? `<span class="who">${escapeHtml(who)}</span> <span class="at-origin">at ${escapeHtml(host)}</span>` : `<span class="who">${escapeHtml(host)}</span>`;
     const rel = row.relation === "transclusion" ? "quoted this" : row.relation === "fork" ? "forked this" : "stubbed this";
-    const when = row.verified_at ? ` <span class="when">&middot; ${formatDate(row.verified_at)}</span>` : "";
+    const when = row.verified_at ? ` <span class="when">&middot; ${formatDate(row.verified_at, tz)}</span>` : "";
     return `<li><a href="${escapeHtml(row.source_page ?? row.source)}">${label}</a> <span class="rel">&middot; ${rel}</span>${when}</li>`;
   });
   return `<section class="responses">
@@ -1072,11 +1141,11 @@ ${lines.join("\n")}
 </section>`;
 }
 
-async function withdrawnBlock(db: D1Database, item: ItemRow, mount: string): Promise<string> {
+async function withdrawnBlock(db: D1Database, item: ItemRow, mount: string, tz: string): Promise<string> {
   const isThread = (await authoredKind(db, item)) === "thread";
   return `<article class="fragment withdrawn"><p>This item was withdrawn.</p>
-${forkLineage(item)}
-${itemMeta(item, null, await pinnedVersions(db, item.id), mount, isThread)}
+${forkLineage(item, tz)}
+${itemMeta(item, null, await pinnedVersions(db, item.id), mount, isThread, tz)}
 </article>`;
 }
 
@@ -1102,6 +1171,84 @@ function itemTitle(excerptText: string, settings: Settings): string {
 }
 
 /**
+ * **The author's own text**, for every surface that has to *name* an item in
+ * one line — the page `<title>`, `og:title`, the meta description, the feed
+ * card's excerpt, the RSS headline, the archive row.
+ *
+ * A thread's `content_html` contains other people's writing, baked in verbatim
+ * as `blockquote.blyg-transclusion` (§10). That is correct for the thread's own
+ * page, where the quote is displayed as a quote with a provenance line under it
+ * and nobody can mistake whose words they are. It is **wrong for every derived
+ * one-liner**, because flattening the HTML to text drops exactly the structure
+ * that made the attribution legible.
+ *
+ * Measured on the live node before this was written: of 19 published threads,
+ * 5 *opened* with a transclusion — so their browser tab, their search-result
+ * heading, their social card, their RSS headline and their feed-page excerpt
+ * were all someone else's sentence presented as the author's. A sixth ran the
+ * author's prose straight into a quote mid-excerpt, with no boundary at all.
+ *
+ * The Studio index strips quotes and shows a count chip. The public surfaces
+ * did not. Same shape as the two title bugs before it: one derivation that
+ * several surfaces run, fixed in some of them.
+ *
+ * Returns HTML, not text, so callers can still split a leading heading off it.
+ * A no-op on anything with no baked quotes, so fragments are unaffected.
+ */
+export function authorOwnHtml(html: string): string {
+  return stripTransclusionQuotes(html);
+}
+
+/**
+ * What to call a thread that quoted someone and said nothing of its own.
+ *
+ * Rare but real (1 of 19 live). The honest answer is not the quoted sentence —
+ * that is the misattribution this whole helper exists to prevent — and not an
+ * empty string either. A stub knows what it answers, so it says that.
+ */
+export function respondsToLabel(latest: Pick<VersionRow, "stub_of" | "stub_cite"> | null): string {
+  const stub = parseStoredStub(latest?.stub_of ?? null);
+  if (!stub) return "";
+  const cite = parseStoredCite(latest?.stub_cite ?? null);
+  const who = cite?.source ?? ("url" in stub ? new URL(stub.url).host : new URL(stub.origin).host);
+  return `In response to ${who}`;
+}
+
+/**
+ * The three derived strings an item's head needs: `<title>`, `og:title`, and
+ * the description both the meta tag and the unfurled card use.
+ *
+ * Items stay titleless on the wire (§5.3) and nothing here changes that. But
+ * an item that opens with a heading has declared a title in the only way the
+ * protocol allows one to be declared, and #46 already makes that heading the
+ * item's title on three other surfaces — the feed page, the permalink, the
+ * studio reader. Reading it here is the same derivation a fourth time, not a
+ * new field: before this, a titled item's `og:title` was an excerpt that had
+ * swallowed its own heading ("On Protocols Protocols are the thin…"), which is
+ * the one thing an unfurled card must not look like.
+ *
+ * The description is taken from what follows the heading, so a card does not
+ * print the title twice. `og:title` carries no site suffix — `og:site_name`
+ * is the tag that says where this is, and repeating it makes a narrower card.
+ */
+function itemHead(
+  html: string,
+  settings: Settings,
+  fallback = "",
+): { title: string; ogTitle: string; description: string } {
+  // The author's own words, never a quoted one — see authorOwnHtml. A fragment
+  // has no baked quotes, so this changes nothing for one.
+  const own = authorOwnHtml(html);
+  const { title, rest } = leadingHeading(own);
+  const derived = title ? clampText(title, 70) : excerptFromHtml(own, 70) || clampText(fallback, 70);
+  return {
+    title: itemTitle(derived, settings),
+    ogTitle: derived || settings.site_title,
+    description: excerptFromHtml(title ? rest : own, 200) || fallback,
+  };
+}
+
+/**
  * A leading `<h1>` is the item's title, so on the feed page it becomes the
  * link to that item's own page — the affordance a reader expects from a
  * titled post, and one the feed previously lacked entirely (the only way in
@@ -1122,7 +1269,8 @@ export function linkLeadingTitle(html: string, href: string): string {
   // An <h1> that already contains a link is left alone — nesting anchors is
   // invalid HTML and the author's own link should win.
   if (/<a[\s>]/i.test(m[2])) return html;
-  return html.replace(m[0], `<h1${m[1]}><a class="item-title" href="${href}">${m[2]}</a></h1>`);
+  // Function replacement, so `$&` in a heading is text, not a pattern (studio#2).
+  return html.replace(m[0], () => `<h1${m[1]}><a class="item-title" href="${href}">${m[2]}</a></h1>`);
 }
 
 /**
@@ -1154,19 +1302,43 @@ ${rows}
 </section>`;
 }
 
-export async function feedPage(db: D1Database, settings: Settings, items: ItemRow[], hasMore: boolean, mount: string, origin: string): Promise<string> {
+/**
+ * Public hoppers, listed on the homepage and archive (0.24.0). A public hopper
+ * page existed since v0.2 (decision #12: curation display, never re-emitted on
+ * the feed), but nothing on the site linked to one, so a visitor could only
+ * find it from a pasted URL. Presentation only; nothing here is on the wire.
+ */
+export function collectionsSection(hoppers: { name: string; slug: string | null; description: string | null; count: number }[], mount: string): string {
+  const rows = hoppers
+    .filter((h) => h.slug)
+    .map((h) => {
+      const desc = h.description ? ` <span class="collection-desc">${escapeHtml(h.description)}</span>` : "";
+      return `<li><a href="${mount}/h/${encodeURIComponent(h.slug!)}/">${escapeHtml(h.name)}</a> <span class="meta">${h.count} ${h.count === 1 ? "item" : "items"}</span>${desc}</li>`;
+    })
+    .join("\n");
+  if (!rows) return "";
+  return `<section class="collections">
+<h2>Collections</h2>
+<ul>
+${rows}
+</ul>
+</section>`;
+}
+
+export async function feedPage(db: D1Database, settings: Settings, items: FeedItem[], hasMore: boolean, mount: string, origin: string): Promise<string> {
+  const [data, blogrollSubs, collections] = await Promise.all([loadFeedData(db, items, settings.avatar_media_id || ""), listBlogrollSubscriptions(db), listPublicHoppers(db)]);
   const blocks: string[] = [];
   for (const item of items) {
     // Withdrawn items don't appear on the feed page (rev-3 wireframe note) —
     // they still live in the archive listing and their permanent endcap URLs.
-    if (item.kind === "fragment") blocks.push(await fragmentBlock(db, item, mount, true));
-    else if (item.kind === "thread") blocks.push(await threadCard(db, item, mount));
+    if (item.kind === "fragment") blocks.push(await fragmentBlock(db, item, mount, settings.timezone, true, data.cards.get(item.id)));
+    else if (item.kind === "thread") blocks.push(await threadCard(db, item, mount, settings.timezone, data.cards.get(item.id), data.provenance));
   }
-  const blogrollSubs = await listBlogrollSubscriptions(db);
   const body = `<div class="blyg">
-${await pageTop(db, settings, mount)}
+${await pageTop(db, settings, mount, data.avatar)}
 ${blocks.join("\n") || '<p class="withdrawn">Nothing published yet.</p>'}
 ${hasMore ? `<footer class="older"><a href="${mount}/archive/">older items →</a></footer>` : ""}
+${collectionsSection(collections, mount)}
 ${blogrollSection(blogrollSubs, mount)}
 </div>
 <script>${VERSION_NAV_SCRIPT}</script>`;
@@ -1178,15 +1350,27 @@ ${blogrollSection(blogrollSubs, mount)}
   const newest = items[0];
   const description =
     settings.author_bio ||
-    (newest ? excerptFromHtml((await publishedVersion(db, newest))?.content_html ?? "", 200) : "");
+    (newest ? excerptFromHtml(data.cards.get(newest.id)?.latest?.content_html ?? "", 200) : "");
   return layout(settings.site_title, body, mount, {
     hasBlogroll,
     description,
     url: origin,
-    webmention: origin + WEBMENTION_PATH,
-    image: await socialImage(db, settings, [], origin),
+    webmention: webmentionHref(settings, origin),
+    image: data.avatar ? origin + data.avatar.r2_key : undefined,
     siteName: settings.site_title,
+    feedUrl: `${origin}feed.xml`,
+    feedTitle: settings.site_title,
   });
+}
+
+/**
+ * The endpoint a page advertises, or `undefined` when this blyg does not accept
+ * mentions — §15.1 again: the `rel="webmention"` link, like the manifest key,
+ * exists only when there is something behind it. Advertising a 404 would send
+ * every conformant sender on a wasted round trip.
+ */
+function webmentionHref(settings: Settings, origin: string): string | undefined {
+  return settings.accept_mentions ? origin + WEBMENTION_PATH : undefined;
 }
 
 /**
@@ -1194,7 +1378,7 @@ ${blogrollSection(blogrollSubs, mount)}
  * nothing to summarize and nothing to unfurl — the tags say what the page *is*,
  * and deliberately carry no image.
  */
-function withdrawnMeta(settings: Settings, url: string, alternateJson?: string, webmention?: string): PageMeta {
+function withdrawnMeta(settings: Settings, url: string, alternateJson?: string, webmention?: string, origin?: string): PageMeta {
   return {
     description: `A withdrawn item on ${settings.site_title}.`,
     url,
@@ -1202,6 +1386,7 @@ function withdrawnMeta(settings: Settings, url: string, alternateJson?: string, 
     siteName: settings.site_title,
     alternateJson,
     webmention,
+    ...(origin ? { feedUrl: `${origin}feed.xml`, feedTitle: settings.site_title } : {}),
   };
 }
 
@@ -1218,32 +1403,35 @@ function withdrawnMeta(settings: Settings, url: string, alternateJson?: string, 
 export async function permalinkPage(db: D1Database, settings: Settings, item: ItemRow, mount: string, origin: string): Promise<string> {
   const url = `${origin}f/${item.id}/`;
   const alternateJson = `${origin}items/${item.id}.json`;
-  const webmention = origin + WEBMENTION_PATH;
+  const webmention = webmentionHref(settings, origin);
   if (item.kind === "withdrawn") {
     return layout(
       `withdrawn — ${settings.site_title}`,
-      `<div class="blyg">\n${await pageTop(db, settings, mount)}\n${await withdrawnBlock(db, item, mount)}\n</div>`,
+      `<div class="blyg">\n${await pageTop(db, settings, mount)}\n${await withdrawnBlock(db, item, mount, settings.timezone)}\n</div>`,
       mount,
-      withdrawnMeta(settings, url, alternateJson, webmention),
+      withdrawnMeta(settings, url, alternateJson, webmention, origin),
     );
   }
   const latest = await publishedVersion(db, item);
   const media = await listMediaForItem(db, item.id);
-  const text = excerptFromHtml(latest?.content_html ?? "", 200);
+  const head = itemHead(latest?.content_html ?? "", settings);
   const body = `<div class="blyg">
 ${await pageTop(db, settings, mount)}
-${await fragmentBlock(db, item, mount)}
-${await responsesSection(db, item, mount)}
+${await fragmentBlock(db, item, mount, settings.timezone)}
+${await responsesSection(db, item, settings, mount)}
 </div>
 <script>${VERSION_NAV_SCRIPT}</script>`;
-  return layout(itemTitle(excerptFromHtml(latest?.content_html ?? "", 70), settings), body, mount, {
-    description: text,
+  return layout(head.title, body, mount, {
+    description: head.description,
+    ogTitle: head.ogTitle,
     url,
     alternateJson,
     webmention,
     type: "article",
-    image: await socialImage(db, settings, media, origin),
+    image: await socialImage(db, settings, visibleMedia(media, latest?.content_html ?? ""), origin),
     siteName: settings.site_title,
+    feedUrl: `${origin}feed.xml`,
+    feedTitle: settings.site_title,
   });
 }
 
@@ -1251,31 +1439,35 @@ ${await responsesSection(db, item, mount)}
 export async function threadPage(db: D1Database, settings: Settings, item: ItemRow, mount: string, origin: string): Promise<string> {
   const url = `${origin}t/${item.id}/`;
   const alternateJson = `${origin}items/${item.id}.json`;
-  const webmention = origin + WEBMENTION_PATH;
+  const webmention = webmentionHref(settings, origin);
   if (item.kind === "withdrawn") {
     return layout(
       `withdrawn — ${settings.site_title}`,
-      `<div class="blyg">\n${await pageTop(db, settings, mount)}\n${await withdrawnBlock(db, item, mount)}\n</div>`,
+      `<div class="blyg">\n${await pageTop(db, settings, mount)}\n${await withdrawnBlock(db, item, mount, settings.timezone)}\n</div>`,
       mount,
-      withdrawnMeta(settings, url, alternateJson, webmention),
+      withdrawnMeta(settings, url, alternateJson, webmention, origin),
     );
   }
   const latest = await publishedVersion(db, item);
   const media = await listMediaForItem(db, item.id);
+  const head = itemHead(latest?.content_html ?? "", settings, respondsToLabel(latest));
   const body = `<div class="blyg">
 ${await pageTop(db, settings, mount)}
-${await threadBlock(db, item, mount)}
-${await responsesSection(db, item, mount)}
+${await threadBlock(db, item, mount, settings.timezone)}
+${await responsesSection(db, item, settings, mount)}
 </div>
 <script>${VERSION_NAV_SCRIPT}</script>`;
-  return layout(itemTitle(excerptFromHtml(latest?.content_html ?? "", 70), settings), body, mount, {
-    description: excerptFromHtml(latest?.content_html ?? "", 200),
+  return layout(head.title, body, mount, {
+    description: head.description,
+    ogTitle: head.ogTitle,
     url,
     alternateJson,
     webmention,
     type: "article",
-    image: await socialImage(db, settings, media, origin),
+    image: await socialImage(db, settings, visibleMedia(media, latest?.content_html ?? ""), origin),
     siteName: settings.site_title,
+    feedUrl: `${origin}feed.xml`,
+    feedTitle: settings.site_title,
   });
 }
 
@@ -1305,6 +1497,7 @@ export async function pinnedVersionPage(
   mount: string,
   origin: string,
 ): Promise<string> {
+  const tz = settings.timezone;
   const live = `${mount}/${isThread ? "t" : "f"}/${item.id}/`;
   const html = isThread
     ? injectProvenance(row.content_html, await transclusionProvenance(db, parseTransclusions(row.transclusions), mount))
@@ -1312,17 +1505,17 @@ export async function pinnedVersionPage(
   const noteHtml = row.note ? `<p class="version-note">&ldquo;${escapeHtml(row.note)}&rdquo;</p>` : "";
   // A pin is a frozen artifact of a response, so it carries the citation that
   // was true when it froze — not whatever the live item cites now.
-  const cite = isThread ? stubCitation(row) : "";
+  const cite = isThread ? stubCitation(row, tz) : "";
   const body = `<div class="blyg">
 ${await pageTop(db, settings, mount)}
-<p class="pinned-banner">📌 Pinned v${row.version} — a frozen snapshot from ${formatDate(row.published_at)}.
+<p class="pinned-banner">📌 Pinned v${row.version} — a frozen snapshot from ${formatDate(row.published_at, tz)}.
 <a href="${live}">latest version</a> &middot; <a href="${mount}/items/${item.id}/v${row.version}.json">citable JSON</a></p>
 <article class="${isThread ? "thread" : "fragment"}">
 ${cite}
-${forkLineage(item)}
+${forkLineage(item, tz)}
 ${html}
 ${noteHtml}
-<p class="timestamps"><span>Published: ${formatDate(row.published_at)}</span></p>
+<p class="timestamps"><span>Published: ${formatDate(row.published_at, tz)}</span></p>
 </article>
 </div>`;
   // Canonical points at the live permalink (absolute — origin is the blyg
@@ -1331,22 +1524,33 @@ ${noteHtml}
   const canonical = `${origin}${isThread ? "t" : "f"}/${item.id}/`;
   // `{excerpt} (v1) — {site}`, not `v1 — {excerpt} — {site}`: the version is a
   // qualifier on the item, and three em-dash-separated segments is one too many.
-  const pinnedExcerpt = excerptFromHtml(row.content_html, 70);
-  const pinnedTitle = pinnedExcerpt
-    ? `${pinnedExcerpt} (v${row.version}) — ${settings.site_title}`
+  // The name is derived from the pinned bytes by the same rule as a live item's
+  // (a declared heading, else an excerpt) — a title is part of what froze.
+  const pinnedHead = itemHead(row.content_html, settings, respondsToLabel(row));
+  const pinnedName = pinnedHead.ogTitle === settings.site_title ? "" : pinnedHead.ogTitle;
+  const pinnedTitle = pinnedName
+    ? `${pinnedName} (v${row.version}) — ${settings.site_title}`
     : `v${row.version} — ${settings.site_title}`;
   return layout(pinnedTitle, body, mount, {
     canonical,
     // The excerpt comes from the *pinned* version's own bytes, so a citation
     // unfurls as the text that was actually frozen, not the live text.
-    description: excerptFromHtml(row.content_html, 200),
+    description: pinnedHead.description,
+    ogTitle: pinnedName ? `${pinnedName} (v${row.version})` : `v${row.version}`,
     url: `${origin}${isThread ? "t" : "f"}/${item.id}/v${row.version}/`,
     type: "article",
+    // The blyg's avatar, never the item's attachments: a live lookup of the
+    // item's media would put today's image on a page whose whole promise is
+    // that it shows the bytes from then. Site identity is true either way.
+    image: await socialImage(db, settings, [], origin),
     siteName: settings.site_title,
+    feedUrl: `${origin}feed.xml`,
+    feedTitle: settings.site_title,
   });
 }
 
 export async function archivePage(db: D1Database, settings: Settings, items: ItemRow[], mount: string, origin: string): Promise<string> {
+  const tz = settings.timezone;
   const rows: string[] = [];
   for (const item of items) {
     // A withdrawn row is a link like any other: the endcap page is a real,
@@ -1356,16 +1560,29 @@ export async function archivePage(db: D1Database, settings: Settings, items: Ite
     if (item.kind === "withdrawn") {
       const href = `${mount}/${(await authoredKind(db, item)) === "thread" ? "t" : "f"}/${item.id}/`;
       rows.push(
-        `<li class="withdrawn"><span class="row-main"><a href="${href}">withdrawn</a></span><span class="meta">${formatDate(item.updated)}</span></li>`,
+        `<li class="withdrawn"><span class="row-main"><a href="${href}">withdrawn</a></span><span class="meta">${formatDate(item.updated, tz)}</span></li>`,
       );
       continue;
     }
     const isThread = item.kind === "thread";
     const latest = await publishedVersion(db, item);
-    const text = excerptFromHtml(latest?.content_html ?? "", 80);
+    // The archive was the fourth surface that names an item and the one #46
+    // did not reach, so a titled item listed as "On Protocols Protocols are
+    // the thin layer where…" — the heading, then the heading again as the
+    // first words of the body, because an 80-character excerpt of the whole
+    // rendered HTML cannot see that the first block was a title. Split it the
+    // way every other surface does: the link is the title, the dimmed tail is
+    // what follows it. An untitled item is unchanged.
+    // Same rule as the card and the head: an archive row names the item, so it
+    // names it in the author's own words.
+    const own = authorOwnHtml(latest?.content_html ?? "");
+    const { title, rest } = leadingHeading(own);
+    const linkText =
+      (title ? clampText(title, 80) : excerptFromHtml(own, 80)) || clampText(respondsToLabel(latest), 80);
+    const tail = title ? excerptFromHtml(rest, 60) : "";
     const href = `${mount}/${isThread ? "t" : "f"}/${item.id}/`;
     rows.push(
-      `<li><span class="row-main">${isThread ? '<span class="kind-chip">thread</span> ' : ""}<a href="${href}">${escapeHtml(text)}</a></span><span class="meta">${formatDate(item.updated)} · v${item.version}</span></li>`,
+      `<li><span class="row-main">${isThread ? '<span class="kind-chip">thread</span> ' : ""}<a href="${href}">${escapeHtml(linkText)}</a>${tail ? ` <span class="row-sub">${escapeHtml(tail)}</span>` : ""}</span><span class="meta">${formatDate(item.updated, tz)} · v${item.version}</span></li>`,
     );
   }
   const body = `<div class="blyg">
@@ -1374,10 +1591,15 @@ ${await pageTop(db, settings, mount)}
 <ul class="archive">
 ${rows.join("\n")}
 </ul>
+${collectionsSection(await listPublicHoppers(db), mount)}
 </div>`;
   return layout(`archive — ${settings.site_title}`, body, mount, {
     description: `Every item published on ${settings.site_title}.`,
+    ogTitle: `Archive — ${settings.site_title}`,
     url: `${origin}archive/`,
+    image: await socialImage(db, settings, [], origin),
     siteName: settings.site_title,
+    feedUrl: `${origin}feed.xml`,
+    feedTitle: settings.site_title,
   });
 }

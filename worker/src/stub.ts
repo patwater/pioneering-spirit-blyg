@@ -6,6 +6,7 @@
 import { blygItemUrl } from "./importer/util.ts";
 import { excerptFromHtml } from "./markdown.ts";
 import type { ForkedFrom, StubCite, StubOf, Transclusion } from "./types.ts";
+import { graphemePrefix } from "./text.ts";
 
 /**
  * A citation names *another origin's* item id, so it is deliberately not
@@ -86,11 +87,38 @@ export function parseStubOf(raw: unknown): { ok: true; stub: StubOf } | { ok: fa
       return { ok: false, reason: "stub_of.url must be an absolute URL" };
     }
     if (url.protocol !== "http:" && url.protocol !== "https:") return { ok: false, reason: "stub_of.url must be http(s)" };
-    return { ok: true, stub: { url: url.toString() } };
+    if (r.cited === undefined) return { ok: true, stub: { url: url.toString() } };
+    const cited = parseCited(r.cited);
+    return cited.ok ? { ok: true, stub: { url: url.toString(), cited: cited.cite } } : cited;
   }
   const parsed = parseBlygRef(r, "stub_of");
   return parsed.ok ? { ok: true, stub: parsed.ref } : parsed;
 }
+
+/**
+ * A `{url}` stub's frozen citation (§5.9 rules, decision #55): `retrieved`
+ * required, `source`/`author`/`excerpt`/`url` optional strings, the excerpt a
+ * caption near 200 characters — clamped, not refused, since the cap exists to
+ * keep `cited` from becoming a quotation channel, not to fail a draft.
+ */
+function parseCited(raw: unknown): { ok: true; cite: StubCite } | { ok: false; reason: string } {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, reason: "stub_of.cited must be an object" };
+  const c = raw as Record<string, unknown>;
+  if (typeof c.retrieved !== "string" || Number.isNaN(Date.parse(c.retrieved))) return { ok: false, reason: "stub_of.cited.retrieved is required (an ISO 8601 time)" };
+  const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+  const excerpt = str(c.excerpt);
+  return {
+    ok: true,
+    cite: {
+      source: str(c.source) ?? "",
+      ...(str(c.author) ? { author: str(c.author) } : {}),
+      ...(excerpt ? { excerpt: excerpt.length > CITED_EXCERPT_MAX ? graphemePrefix(excerpt, CITED_EXCERPT_MAX - 1) + "…" : excerpt } : {}),
+      url: str(c.url) ?? "",
+      retrieved: c.retrieved,
+    },
+  };
+}
+const CITED_EXCERPT_MAX = 200;
 
 export function isBlygStub(stub: StubOf): stub is { origin: string; id: string; version: number } {
   return "id" in stub;
@@ -102,16 +130,22 @@ export function isBlygStub(stub: StubOf): stub is { origin: string; id: string; 
  * the value the author saw when the stub was created. The two can never
  * disagree on a published document.
  *
- * Matching is on **id alone**, deliberately: decision #26's rule is that a
- * directive names an identity, not an origin — so an id that resolved is the
- * same item the citation names, and a resolution that was ambiguous never
- * reaches publish (it is an error).
+ * Matching is on **origin and id** (studio#28). Decision #26 says a
+ * directive names an identity, and an ambiguous *imported* match is a publish
+ * error, but resolution tries the local blyg first: a local item whose id
+ * equals a remote target's id shadows it, and the body then quotes a different
+ * item from the one the citation names. §10.6 rule 3 applies only when "the
+ * body transcludes the stub's target", so the origins must agree too. A
+ * transclusion with no `origin` is our own; `ownOrigin` says what that is.
  */
-export function applyVersionAgreement(stub: StubOf, transclusions: Transclusion[]): StubOf {
+export function applyVersionAgreement(stub: StubOf, transclusions: Transclusion[], ownOrigin: string): StubOf {
   if (!isBlygStub(stub)) return stub;
-  const baked = transclusions.find((t) => t.id === stub.id);
+  const target = withSlash(stub.origin);
+  const baked = transclusions.find((t) => t.id === stub.id && withSlash(t.origin ?? ownOrigin) === target);
   return baked ? { ...stub, version: baked.version } : stub;
 }
+
+const withSlash = (origin: string) => (origin.endsWith("/") ? origin : origin + "/");
 
 export function parseStoredStub(json: string | null): StubOf | null {
   if (!json) return null;
@@ -140,7 +174,12 @@ export async function composeStubCite(
   now: string,
 ): Promise<StubCite> {
   if (!isBlygStub(stub)) {
-    return { source: safeHost(stub.url), url: stub.url, retrieved: now };
+    // Frozen when the stub was made, when the studio knew more than the host
+    // (§5.9: "creation time for stub_of"); otherwise the host, as before.
+    const c = stub.cited;
+    return c
+      ? { ...c, source: c.source || safeHost(stub.url), url: c.url || stub.url }
+      : { source: safeHost(stub.url), url: stub.url, retrieved: now };
   }
   const url = await citedUrl(db, stub, ourOrigin);
   if (stub.origin === ourOrigin) {
@@ -182,6 +221,27 @@ export async function composeStubCite(
     url,
     retrieved: now,
   };
+}
+
+/**
+ * The frozen human half of one **remote** transclusion entry (§16.1, decision
+ * #30) — the same composition as a stub's, from the same local knowledge, for
+ * the reference type that never had one.
+ *
+ * This is also the stale-byline fix: the provenance line under a baked remote
+ * quote used to be rendered from a live join against the subscription, so
+ * renaming or deleting a subscription silently rewrote the byline of an
+ * already-published document. A citation that changes after publication was
+ * never a citation.
+ */
+export async function composeTransclusionCite(
+  db: D1Database,
+  entry: { id: string; version: number; origin: string },
+  ourOrigin: string,
+  ourTitle: string,
+  now: string,
+): Promise<StubCite> {
+  return composeStubCite(db, { origin: entry.origin, id: entry.id, version: entry.version }, ourOrigin, ourTitle, now);
 }
 
 /** The cited item's URL: its origin's own declared `page` when we hold one, the convention otherwise. */

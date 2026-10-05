@@ -2,19 +2,19 @@
 // lists only as studio HTML; a native client needs them as JSON. Shapes
 // follow Blygger Desktop's `docs/SPEC.md` § API and `blyg-core` model types.
 
-import { authoredKind, getItem, getSettings } from "../../worker/src/model.ts";
+import { authoredKind, getItem, getSettings, itemShowsResponses } from "../../worker/src/model.ts";
 import { siteOrigin } from "../../worker/src/protocol.ts";
-import type { ItemRow } from "../../worker/src/types.ts";
+import type { ItemRow, Settings } from "../../worker/src/types.ts";
 import { normalizeMount } from "../../worker/src/util.ts";
 import { decodeCursor, encodeCursor, readingLimit } from "./cursor.ts";
 import { type Env, badRequest, json, notFound, parseJson } from "./http.ts";
 import { ensureReadState } from "./readstate.ts";
 
-async function origin(env: Env, req: Request): Promise<string> {
-  return siteOrigin(await getSettings(env.DB), req.url, normalizeMount(env.MOUNT));
+function origin(settings: Settings, env: Env, req: Request): string {
+  return siteOrigin(settings, req.url, normalizeMount(env.MOUNT));
 }
 
-async function wireItem(env: Env, item: ItemRow, base: string) {
+async function wireItem(env: Env, item: ItemRow, base: string, settings: Settings) {
   const kind = await authoredKind(env.DB, item);
   const row = item as ItemRow & { stub_of?: string | null; forked_from?: string | null };
   return {
@@ -31,15 +31,19 @@ async function wireItem(env: Env, item: ItemRow, base: string) {
     forked_from: parseJson(row.forked_from),
     // No trailing slash: the form Blygger Desktop expects (the Worker serves both).
     permalink: item.version > 0 ? `${base}${kind === "thread" ? "t" : "f"}/${item.id}` : null,
-    show_responses: item.show_responses === 1,
+    // The effective value (the item's own choice, else the global default),
+    // not the legacy `show_responses` column, which migration 0012 stopped
+    // maintaining.
+    show_responses: itemShowsResponses(item, settings),
   };
 }
 
 /** `GET /api/items` → `{items}`, newest-updated first: drafts, public and withdrawn. */
 export async function listItems(req: Request, env: Env): Promise<Response> {
-  const base = await origin(env, req);
+  const settings = await getSettings(env.DB);
+  const base = origin(settings, env, req);
   const rows = (await env.DB.prepare("SELECT * FROM items ORDER BY updated DESC").all<ItemRow>()).results;
-  return json({ items: await Promise.all(rows.map((r) => wireItem(env, r, base))) });
+  return json({ items: await Promise.all(rows.map((r) => wireItem(env, r, base, settings))) });
 }
 
 /** `GET /api/items/:id` → the item plus its `versions`. */
@@ -60,7 +64,8 @@ export async function oneItem(req: Request, env: Env, id: string): Promise<Respo
     // A withdrawal endcap is the only version with no content (spec §9).
     endcap: v.content_md === "",
   }));
-  return json({ ...(await wireItem(env, item, await origin(env, req))), versions });
+  const settings = await getSettings(env.DB);
+  return json({ ...(await wireItem(env, item, origin(settings, env, req), settings)), versions });
 }
 
 /** `GET /api/subscriptions` → `{subscriptions}`. */

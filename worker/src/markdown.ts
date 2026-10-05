@@ -1,7 +1,32 @@
 import MarkdownIt from "markdown-it";
+import { graphemePrefix } from "./text.ts";
 
 // Safe mode: raw HTML in markdown is escaped, never passed through (§3).
 const md = new MarkdownIt({ html: false, linkify: true, typographer: false });
+
+// Image alt text from every text-bearing child (studio#6). markdown-it 14
+// emits an escape (`\*`) or an entity as a `text_special` token, and the
+// default image rule's renderInlineAsText keeps only `text`, so `![a \* b](…)`
+// got `alt="a  b"` while the same words outside an image read `a * b`.
+type InlineToken = { type: string; content: string; children: InlineToken[] | null };
+function altText(children: InlineToken[]): string {
+  return children
+    .map((t) =>
+      t.type === "text" || t.type === "text_special" || t.type === "code_inline"
+        ? t.content
+        : t.type === "image"
+          ? altText(t.children ?? [])
+          : t.type === "softbreak" || t.type === "hardbreak"
+            ? "\n"
+            : "",
+    )
+    .join("");
+}
+md.renderer.rules.image = (tokens, idx, options, _env, self) => {
+  const token = tokens[idx];
+  token.attrSet("alt", altText((token.children ?? []) as unknown as InlineToken[]));
+  return self.renderToken(tokens, idx, options);
+};
 
 export function renderMarkdown(contentMd: string): string {
   return md.render(contentMd);
@@ -24,7 +49,7 @@ export function plainText(contentMd: string): string {
 /** First ~n chars of plain text, ellipsized. */
 export function excerpt(contentMd: string, n = 60): string {
   const text = plainText(contentMd);
-  return text.length <= n ? text : text.slice(0, n).trimEnd() + "…";
+  return text.length <= n ? text : graphemePrefix(text, n).trimEnd() + "…";
 }
 
 const BLOCK_BOUNDARY = /<\/(?:p|h[1-6]|li|blockquote|pre|div|tr|section|article)>|<br\s*\/?>/gi;
@@ -66,8 +91,66 @@ export function plainTextFromHtml(html: string): string {
     .trim();
 }
 
+/**
+ * The **selection normalizer** for partial transclusion (spec §16.4, decision
+ * #49, plan §7.3 P2). Written once and exported, because the publish-time check
+ * and any read-side re-check MUST agree exactly: two normalizers that differ by
+ * one space are a construct that verifies on one node and fails on another.
+ *
+ * Same tag-stripping as `plainTextFromHtml`, one difference: a block boundary
+ * becomes a **line break** rather than a space, so the shape of the target's
+ * blocks survives into the string being searched. That is what lets a quote
+ * spanning two paragraphs match — it is a line break on both sides — while a
+ * quote that welds the end of one paragraph to the start of the next does not.
+ *
+ * Whitespace *within* a block collapses to single spaces, including the raw
+ * newlines a markdown renderer leaves inside a `<p>` when the author soft-wrapped
+ * their source. That is the subtle half: splitting the HTML on literal newlines
+ * would make the match depend on where the *author* happened to press return,
+ * which is not a property of the text at all. Hence the sentinel — boundaries
+ * are marked before any whitespace collapsing, so only they survive as breaks.
+ *
+ * Empty segments are dropped, so `<p>a</p><p></p><p>b</p>` normalizes the same
+ * as `<p>a</p><p>b</p>`.
+ */
+const BLOCK_SEP = "\u0000";
+
+/** The line rule, shared by both entry points so they cannot drift apart. */
+function normalizeBlocks(segments: string[]): string {
+  return segments
+    .map((seg) => seg.replace(/\s+/g, " ").trim())
+    .filter((seg) => seg !== "")
+    .join("\n");
+}
+
+export function selectionText(html: string): string {
+  return normalizeBlocks(
+    decodeEntities(
+      html
+        .replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, " ")
+        .replace(BLOCK_BOUNDARY, BLOCK_SEP)
+        .replace(/<[^>]+>/g, ""),
+    ).split(BLOCK_SEP),
+  );
+}
+
+/**
+ * The same rule applied to text that is already text — a browser selection,
+ * where `Selection.toString()` has already put a newline at each block
+ * boundary. Studio-side only: it is how select-to-quote turns what the author
+ * highlighted into the string `selectionText` will later have to match.
+ *
+ * Separate entry point rather than a second implementation, because the two
+ * *must* agree: this produces the quote, that checks it at publish, and a
+ * disagreement between them would be an affordance that reliably produces
+ * unpublishable drafts.
+ */
+export function normalizeSelection(text: string): string {
+  return normalizeBlocks(text.split("\n"));
+}
+
 /** First ~n chars of already-rendered HTML's plain text, ellipsized. */
 export function excerptFromHtml(html: string, n = 60): string {
   const text = plainTextFromHtml(html);
-  return text.length <= n ? text : text.slice(0, n).trimEnd() + "…";
+  return text.length <= n ? text : graphemePrefix(text, n).trimEnd() + "…";
 }

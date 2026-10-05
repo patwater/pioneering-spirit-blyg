@@ -8,7 +8,7 @@
 // the same split the importer uses: route-level tests go over the local path
 // (where the database is the authority and no fetch happens at all), and the
 // network logic is tested where it can be injected.
-import { env, SELF } from "cloudflare:test";
+import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { checkForkTarget, resolveForkSource } from "../src/fork.ts";
 import type { FetchLike } from "../src/importer/http.ts";
@@ -16,7 +16,7 @@ import { createSubscription } from "../src/importer/store.ts";
 import { forkedVersion, relationTo, upsertAndVerify } from "./fork-helpers.ts";
 import { createFork } from "../src/model.ts";
 import { listOutbound } from "../src/mentions/store.ts";
-import { apiJson, BASE, createAndPublish, getPublic, login, STUDIO } from "./helpers.ts";
+import { apiJson, createAndPublish, getPublic, login } from "./helpers.ts";
 import { newId } from "../src/util.ts";
 
 const OURS = "https://example.com/blyg/";
@@ -59,7 +59,7 @@ async function itemJson(id: string): Promise<any> {
 /** Publish, pin v1, and hand back the item id — the only state a fork can start from. */
 async function publishAndPin(cookie: string, md: string): Promise<string> {
   const id = await createAndPublish(cookie, md);
-  expect((await apiJson(cookie, "POST", `/api/items/${id}/pin`, { version: 1 })).status).toBe(200);
+  expect((await apiJson(cookie, "PUT", `/api/items/${id}/versions/${1}/pin`)).status).toBe(200);
   return id;
 }
 
@@ -68,22 +68,23 @@ describe("forking a pinned version of our own (§2.4)", () => {
     const cookie = await login();
     const parent = await publishAndPin(cookie, "the original text");
 
-    const forked = await apiJson(cookie, "POST", "/api/fork", { origin: OURS, id: parent, version: 1 });
+    const forked = await apiJson(cookie, "POST", "/api/items", { mode: "fork", source: { origin: OURS, id: parent, version: 1 } });
     expect(forked.status).toBe(201);
     const id = forked.json.id as string;
 
-    const edit = await SELF.fetch(`${BASE}${STUDIO}/edit/${id}`, { headers: { cookie } });
-    expect(await edit.text()).toContain("the original text");
+    const draft = await apiJson(cookie, "GET", `/api/items/${id}`);
+    expect(draft.status).toBe(200);
+    expect(draft.json.content_md).toBe("the original text");
 
     expect((await apiJson(cookie, "POST", `/api/items/${id}/publish`, {})).status).toBe(200);
     const doc = await itemJson(id);
-    expect(doc.forked_from).toEqual({ origin: OURS, id: parent, version: 1 });
+    expect(doc.forked_from).toMatchObject({ origin: OURS, id: parent, version: 1 });
   });
 
   it("refuses a version that is not pinned — the whole basis of the claim", async () => {
     const cookie = await login();
     const parent = await createAndPublish(cookie, "never pinned");
-    const res = await apiJson(cookie, "POST", "/api/fork", { origin: OURS, id: parent, version: 1 });
+    const res = await apiJson(cookie, "POST", "/api/items", { mode: "fork", source: { origin: OURS, id: parent, version: 1 } });
     expect(res.status).toBe(400);
     expect(res.json.error).toContain("not pinned");
   });
@@ -91,25 +92,26 @@ describe("forking a pinned version of our own (§2.4)", () => {
   it("refuses a malformed reference rather than coercing one", async () => {
     const cookie = await login();
     // `origin` is REQUIRED even for our own item (#27: a citation is absolute).
-    expect((await apiJson(cookie, "POST", "/api/fork", { id: "x", version: 1 })).status).toBe(400);
-    expect((await apiJson(cookie, "POST", "/api/fork", { origin: OURS, id: "x", version: 0 })).status).toBe(400);
+    expect((await apiJson(cookie, "POST", "/api/items", { mode: "fork", source: { id: "x", version: 1 } })).status).toBe(400);
+    expect((await apiJson(cookie, "POST", "/api/items", { mode: "fork", source: { origin: OURS, id: "x", version: 0 } })).status).toBe(400);
   });
 
-  it("forks a thread as a thread, keeping the directives rather than the baked HTML", async () => {
+  it("forks a thread as a thread, flattening its quotes from the pinned document (#57)", async () => {
     const cookie = await login();
     const quoted = await createAndPublish(cookie, "a fragment to quote");
     const created = await apiJson(cookie, "POST", "/api/items", { content_md: `intro\n\n![[${quoted}]]`, kind: "thread" });
     const threadId = created.json.id as string;
     expect((await apiJson(cookie, "POST", `/api/items/${threadId}/publish`, {})).status).toBe(200);
-    expect((await apiJson(cookie, "POST", `/api/items/${threadId}/pin`, { version: 1 })).status).toBe(200);
+    expect((await apiJson(cookie, "PUT", `/api/items/${threadId}/versions/${1}/pin`)).status).toBe(200);
 
-    const forked = await apiJson(cookie, "POST", "/api/fork", { origin: OURS, id: threadId, version: 1 });
+    const forked = await apiJson(cookie, "POST", "/api/items", { mode: "fork", source: { origin: OURS, id: threadId, version: 1 } });
     expect(forked.status).toBe(201);
     expect(forked.json.kind).toBe("thread");
-    // content_md, not content_html: a fork is a working copy, so it inherits
-    // the source the author can edit, and re-resolves its own transclusions.
-    const edit = await SELF.fetch(`${BASE}${STUDIO}/edit/${forked.json.id}`, { headers: { cookie } });
-    expect(await edit.text()).toContain(`![[${quoted}]]`);
+    // Decision #57 overrules the session-24 call this test used to assert: the
+    // directive re-resolved in the forker's context, so the fork descended from
+    // a composition, not from the pinned bytes. The quote is now flattened.
+    const draft = await apiJson(cookie, "GET", `/api/items/${forked.json.id}`);
+    expect(draft.json.content_md).toBe(`intro\n\n> a fragment to quote\n>\n> — quoted from [example.com · v1](${OURS}f/${quoted}/)`);
   });
 });
 
@@ -117,19 +119,19 @@ describe("lineage on the wire and on the page", () => {
   it("rides the pinned version document too, and cannot drift from the live item", async () => {
     const cookie = await login();
     const parent = await publishAndPin(cookie, "ancestor");
-    const forked = await apiJson(cookie, "POST", "/api/fork", { origin: OURS, id: parent, version: 1 });
+    const forked = await apiJson(cookie, "POST", "/api/items", { mode: "fork", source: { origin: OURS, id: parent, version: 1 } });
     const id = forked.json.id as string;
     expect((await apiJson(cookie, "POST", `/api/items/${id}/publish`, {})).status).toBe(200);
-    expect((await apiJson(cookie, "POST", `/api/items/${id}/pin`, { version: 1 })).status).toBe(200);
+    expect((await apiJson(cookie, "PUT", `/api/items/${id}/versions/${1}/pin`)).status).toBe(200);
 
     const pinned = await (await getPublic(`/blyg/items/${id}/v1.json`)).json<any>();
-    expect(pinned.forked_from).toEqual({ origin: OURS, id: parent, version: 1 });
+    expect(pinned.forked_from).toMatchObject({ origin: OURS, id: parent, version: 1 });
   });
 
   it("survives withdrawal — the endcap empties the work, not where the work came from", async () => {
     const cookie = await login();
     const parent = await publishAndPin(cookie, "ancestor");
-    const forked = await apiJson(cookie, "POST", "/api/fork", { origin: OURS, id: parent, version: 1 });
+    const forked = await apiJson(cookie, "POST", "/api/items", { mode: "fork", source: { origin: OURS, id: parent, version: 1 } });
     const id = forked.json.id as string;
     expect((await apiJson(cookie, "POST", `/api/items/${id}/publish`, {})).status).toBe(200);
     expect((await apiJson(cookie, "POST", `/api/items/${id}/withdraw`, {})).status).toBe(200);
@@ -137,13 +139,13 @@ describe("lineage on the wire and on the page", () => {
     const doc = await itemJson(id);
     expect(doc.kind).toBe("withdrawn");
     expect(doc.content_md).toBe("");
-    expect(doc.forked_from).toEqual({ origin: OURS, id: parent, version: 1 });
+    expect(doc.forked_from).toMatchObject({ origin: OURS, id: parent, version: 1 });
   });
 
   it("states the lineage on the item's own page, citing the pinned version page", async () => {
     const cookie = await login();
     const parent = await publishAndPin(cookie, "ancestor text");
-    const forked = await apiJson(cookie, "POST", "/api/fork", { origin: OURS, id: parent, version: 1 });
+    const forked = await apiJson(cookie, "POST", "/api/items", { mode: "fork", source: { origin: OURS, id: parent, version: 1 } });
     const id = forked.json.id as string;
     expect((await apiJson(cookie, "POST", `/api/items/${id}/publish`, {})).status).toBe(200);
 
@@ -159,7 +161,7 @@ describe("the publish-time check (§2.4)", () => {
   it("blocks publishing when a local lineage target turns out not to be pinned", async () => {
     const cookie = await login();
     const parent = await publishAndPin(cookie, "ancestor");
-    const forked = await apiJson(cookie, "POST", "/api/fork", { origin: OURS, id: parent, version: 1 });
+    const forked = await apiJson(cookie, "POST", "/api/items", { mode: "fork", source: { origin: OURS, id: parent, version: 1 } });
     const id = forked.json.id as string;
     // Pins are irrevocable through every supported path, so the only way to
     // reach this state is to corrupt it directly — which is exactly the state
@@ -186,7 +188,7 @@ describe("the publish-time check (§2.4)", () => {
     const res = await apiJson(cookie, "POST", `/api/items/${item.id}/publish`, {});
     expect(res.status).toBe(200);
     expect(res.json.warning).toContain("not re-checked");
-    expect((await itemJson(item.id)).forked_from).toEqual({ origin: THEIRS, id: "remote-item", version: 2 });
+    expect((await itemJson(item.id)).forked_from).toMatchObject({ origin: THEIRS, id: "remote-item", version: 2 });
   });
 
   it("enqueues a mention to the remote origin, like any other remote reference (§2.3.3)", async () => {
@@ -218,13 +220,32 @@ describe("resolving a remote pinned version (fork.ts, fixture network)", () => {
     await createSubscription(env.DB, { kind: "blyg", origin: known, feedUrl: `${known}feed.xml`, title: "Friend's blyg" });
     const { fetch, calls } = net({ [knownUrl]: { body: pinnedDoc({ origin: known }) } });
     const res = await resolveForkSource(env.DB, { ...ref, origin: known }, OURS, "Mine", fetch, "2026-09-22T00:00:00Z");
-    expect(calls).toEqual([knownUrl]);
+    // The pinned page is probed and, absent here, the citation keeps the JSON.
+    expect(calls).toEqual([knownUrl, `${known}f/remote-item/v2/`]);
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     expect(res.source.kind).toBe("fragment");
     expect(res.source.contentMd).toBe("their pinned words");
     expect(res.source.cite).toMatchObject({ source: "Friend's blyg", author: "Friend", url: knownUrl, retrieved: "2026-09-22T00:00:00Z" });
     expect(res.source.cite.excerpt).toContain("their pinned words");
+  });
+
+  it("cites the pinned page when the origin serves one, at its declared page (studio#30)", async () => {
+    const origin = "https://pages.example/blyg/";
+    const json = `${origin}items/remote-item/v2.json`;
+    const page = `${origin}notes/my-slug/v2/`;
+    const { fetch } = net({ [json]: { body: pinnedDoc({ origin, page: "notes/my-slug/" }) }, [page]: { body: "<html></html>" } });
+    const res = await resolveForkSource(env.DB, { ...ref, origin }, OURS, "Mine", fetch, "now");
+    expect(res.ok && res.source.cite.url).toBe(page);
+  });
+
+  it("keeps the JSON citation when a declared page points off the origin", async () => {
+    const origin = "https://offsite.example/blyg/";
+    const json = `${origin}items/remote-item/v2.json`;
+    const { fetch, calls } = net({ [json]: { body: pinnedDoc({ origin, page: "https://elsewhere.example/x/" }) } });
+    const res = await resolveForkSource(env.DB, { ...ref, origin }, OURS, "Mine", fetch, "now");
+    expect(res.ok && res.source.cite.url).toBe(json);
+    expect(calls).toEqual([json]);
   });
 
   it("names the host when we hold no subscription — forking is not limited to what we follow", async () => {

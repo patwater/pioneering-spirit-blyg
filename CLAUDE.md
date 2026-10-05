@@ -4,7 +4,7 @@ This repo is two things at once. It deploys Patrick Atwater's blyg at the root o
 
 ## Ground rules
 
-- **Never edit `worker/`.** It is a verbatim copy of the Blygger reference client (pinned in `upstream.json`) and is replaced wholesale by `npm run upgrade-worker`. Anything deployment-specific belongs in `wrangler.jsonc`, `blyg.settings.json`, or `tools/`, and server behaviour the reference client lacks belongs in `server-ext/`, the Worker's entry point. After changing `server-ext/`, run `npm test` and Blygger Desktop's end-to-end suite from a checkout of [burrow-blyg-windows-](https://github.com/patwater/burrow-blyg-windows-) (`BLYG_WORKER_DIR=<path to this repo> bash scripts/e2e-local.sh`).
+- **Never edit `worker/`.** It is a verbatim copy of a Blygger Studio release (pinned in `upstream.json`) and is replaced wholesale by `npm run upgrade-worker`. Anything deployment-specific belongs in `wrangler.jsonc`, `blyg.settings.json`, or `tools/`, and server behaviour the reference client lacks belongs in `server-ext/`, the Worker's entry point. After changing `server-ext/`, run `npm test` and Blygger Desktop's end-to-end suite from a checkout of [burrow-blyg-windows-](https://github.com/patwater/burrow-blyg-windows-) (`BLYG_WORKER_DIR=<path to this repo> bash scripts/e2e-local.sh`).
 - **The Windows desktop app lives in its own repository,** [patwater/burrow-blyg-windows-](https://github.com/patwater/burrow-blyg-windows-). It is Aneesh Sathe's Blygger Desktop ported to Windows, and it talks to this blyg through `server-ext/`. Work on the app happens there, not here.
 - **Never publish without an explicit request.** Publishing is public and permanent in spirit: an item can be withdrawn but never deleted, and the feed notifies subscribers at once. `push` (saving a studio draft) is fine whenever it helps; `publish` and `quote --publish` need Patrick to say so in the current conversation.
 - **Commit and push directly to `main`.** Patrick has authorized this for this repo. Every push to `main` deploys to the live site through Cloudflare Workers Builds, so run `npm test` before pushing any change to `worker/`, `wrangler.jsonc`, or `tools/build-archive.mjs`.
@@ -62,7 +62,8 @@ A good fragment is a single idea, stated completely, that could be quoted on its
 ## Operations
 
 - `npm install` installs both the root tooling and `worker/`.
-- `npm test` runs the upstream suite; it must stay green after `npm run upgrade-worker`.
+- `npm test` runs the Studio suite and the `server-ext/` tests; it must stay green after `npm run upgrade-worker`. Studio's `/api` is a documented contract (`worker/openapi.json`), and releases can remove routes; `server-ext/src/compat.ts` translates the ones Blygger Desktop still calls.
+- Studio needs Node 22.18 or newer to build; `.node-version` pins it for Workers Builds.
 - `npm run dev` serves the blyg locally at http://localhost:8787 (put `OWNER_PASSWORD` and `COOKIE_SECRET` in `.dev.vars`, and run `npm run migrate:local` once).
 - `npm run deploy` builds `archive-site/` from `corpus/paragraph/` and deploys; `npm run migrate` applies new D1 migrations remotely.
 - The README has the full provisioning and domain-cutover runbook.
