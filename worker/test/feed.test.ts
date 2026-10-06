@@ -18,19 +18,51 @@ function parse(xml: string) {
 describe("feed.xml (§2.6)", () => {
   it("is valid RSS 2.0 with the blyg namespace and channel metadata", async () => {
     const cookie = await login();
-    await apiJson(cookie, "PUT", "/api/settings", { site_title: "Venkat's blyg", author_bio: "a bio" });
+    await apiJson(cookie, "PATCH", "/api/settings", { site_title: "A Test Blyg", author_bio: "a bio" });
     await createAndPublish(cookie, "a fragment");
 
     const doc = parse(await fetchFeed());
     expect(doc.rss["@_version"]).toBe("2.0");
     expect(doc.rss["@_xmlns:blyg"]).toBe("https://blygger.org/ns/0.1");
     const ch = doc.rss.channel;
-    expect(ch.title).toBe("Venkat's blyg");
+    expect(ch.title).toBe("A Test Blyg");
     expect(ch.link).toBe("https://example.com/blyg/");
     expect(ch.description).toBe("a bio");
     expect(new Date(ch.lastBuildDate).toString()).not.toBe("Invalid Date");
-    expect(ch["blyg:level"]).toBe(1);
+    expect(ch["blyg:level"]).toBe(2);
     expect(ch["blyg:manifest"]).toBe("https://example.com/blyg/blyg.json");
+  });
+
+  it("is subscribable in strict readers: self link, non-empty description, absolute titled discovery", async () => {
+    // studio#33: a relative, untitled <link rel=alternate> was ignored by
+    // several readers, and an empty <description> failed strict ones.
+    const cookie = await login();
+    await apiJson(cookie, "PATCH", "/api/settings", { site_title: "Strict Blyg", author_bio: "" });
+    const id = await createAndPublish(cookie, "a fragment");
+    const doc = parse(await fetchFeed());
+    expect(doc.rss["@_xmlns:atom"]).toBe("http://www.w3.org/2005/Atom");
+    expect(doc.rss.channel["atom:link"]["@_href"]).toBe("https://example.com/blyg/feed.xml");
+    expect(doc.rss.channel["atom:link"]["@_rel"]).toBe("self");
+    expect(doc.rss.channel.description).toBe("Strict Blyg");
+    for (const path of ["/blyg/", `/blyg/f/${id}/`]) {
+      const html = await (await getPublic(path)).text();
+      expect(html).toContain('<link rel="alternate" type="application/rss+xml" title="Strict Blyg" href="https://example.com/blyg/feed.xml">');
+    }
+  });
+
+  it("bylines each item with dc:creator when author.name is present, and only then (§7, C-7-08)", async () => {
+    const cookie = await login();
+    await apiJson(cookie, "PATCH", "/api/settings", { author_name: "" });
+    await createAndPublish(cookie, "no byline yet");
+    let xml = await fetchFeed();
+    expect(xml).not.toContain("dc:creator");
+    expect(xml).not.toContain("xmlns:dc");
+    await apiJson(cookie, "PATCH", "/api/settings", { author_name: "Ada & Co" });
+    xml = await fetchFeed();
+    const doc = parse(xml);
+    expect(doc.rss["@_xmlns:dc"]).toBe("http://purl.org/dc/elements/1.1/");
+    for (const item of doc.rss.channel.item) expect(item["dc:creator"]).toBe("Ada & Co");
+    expect(xml).toContain("<dc:creator>Ada &amp; Co</dc:creator>");
   });
 
   it("item entries carry guid, link, title, pubDate, and blyg extensions", async () => {
@@ -58,7 +90,7 @@ describe("feed.xml (§2.6)", () => {
     // Republish some items to exceed 50 events total: 12 + 4*10 = 52.
     for (let round = 0; round < 10; round++) {
       for (const id of ids.slice(0, 4)) {
-        await apiJson(cookie, "PUT", `/api/items/${id}`, { content_md: `round ${round}` });
+        await apiJson(cookie, "PATCH", `/api/items/${id}`, { content_md: `round ${round}` });
         await apiJson(cookie, "POST", `/api/items/${id}/publish`, {});
       }
     }

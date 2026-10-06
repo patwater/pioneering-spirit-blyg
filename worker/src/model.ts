@@ -1,12 +1,21 @@
 // Data access + publish-flow semantics — v0.1-plan §3.1.
 
 import { renderMarkdown } from "./markdown.ts";
+import { htmlCodeRanges } from "./code-ranges.ts";
 import { annotateGenerated, applyGeneratedWrappers, parseScopes, stripToOutput, TkPublishError, unresolvedScopes } from "./tk.ts";
-import { applyVersionAgreement, composeStubCite, parseStoredStub } from "./stub.ts";
-import { resolveTransclusions, TransclusionResolveError } from "./transclusion.ts";
+import { recordPublishInteractions } from "./interactions.ts";
+import { applyVersionAgreement, composeStubCite, composeTransclusionCite, parseStoredStub } from "./stub.ts";
+import {
+  applyInternalLinks,
+  type TransclusionRefError,
+  resolveBlockLinks,
+  resolveInternalLinks,
+  resolveTransclusions,
+  TransclusionResolveError,
+} from "./transclusion.ts";
 import type { ForkedFrom, ItemRow, MediaRow, ScopeProvenance, Settings, StubCite, StubOf, Transclusion, VersionRow } from "./types.ts";
 import { FRAGMENT_MAX_CHARS } from "./types.ts";
-import { contentHash, newId, nowIso } from "./util.ts";
+import { absolutizeHtml, authoredText, contentHash, newId, nowIso } from "./util.ts";
 
 export { TkPublishError, TransclusionResolveError };
 
@@ -17,6 +26,47 @@ export class FragmentTooLongError extends Error {
     public readonly max: number,
   ) {
     super(`fragment exceeds ${max} characters`);
+  }
+}
+
+/** The raw settings rows. The update check needs keys that are not on `Settings` (timestamps, the last version seen). */
+export async function getSettingsMap(db: D1Database): Promise<Record<string, string>> {
+  const rows = await db.prepare("SELECT key, value FROM settings").all<{ key: string; value: string }>();
+  return Object.fromEntries(rows.results.map((r) => [r.key, r.value]));
+}
+
+/**
+ * The title a blyg publishes when its operator has not set one.
+ *
+ * This used to be the literal string `"blyg"`, and that default leaked into the
+ * world: by session 29, two independent live nodes were publishing
+ * `"title": "blyg"` in their manifests, and blygger.com listed both under that
+ * name because neither operator had opened Settings. A generic default is a
+ * collision generator — every deployment that skips the step lands on the same
+ * name, and a directory then has to tell them apart by something else.
+ *
+ * Derived from the deployment's own `site_url` instead, which makes it unique
+ * wherever the domain is: `blyg.thoughtfolio.xyz` publishes as
+ * `thoughtfolio.xyz`, not as `blyg`. A leading `blyg.` or `www.` is dropped
+ * because neither says anything about whose blyg it is.
+ *
+ * Deliberately **not** a made-up human name. The honest default is the address,
+ * which is true on day one and obviously a placeholder to its owner; inventing
+ * "Thoughtfolio's Blyg" would be the client asserting something the operator
+ * never said. Venkat's session-29 framing: two people may legitimately both
+ * call their blyg the same thing, so the fix is not to forbid collisions but to
+ * stop manufacturing them.
+ *
+ * Falls back to `"blyg"` only when there is no `site_url` at all — a deployment
+ * that has published nothing and been configured with nothing.
+ */
+export function defaultSiteTitle(siteUrl: string | undefined): string {
+  if (!siteUrl) return "blyg";
+  try {
+    const host = new URL(siteUrl).hostname.replace(/^blyg\./i, "").replace(/^www\./i, "");
+    return host || "blyg";
+  } catch {
+    return "blyg";
   }
 }
 
@@ -31,15 +81,38 @@ export async function getSettings(db: D1Database): Promise<Settings> {
     // ignore malformed settings JSON; treat as no links
   }
   return {
-    site_title: map.site_title ?? "blyg",
+    // `||` not `??`: an empty string is an unset title, not a chosen one.
+    site_title: map.site_title || defaultSiteTitle(map.site_url),
     theme: map.theme ?? "auto",
     author_name: map.author_name ?? "",
     author_bio: map.author_bio ?? "",
     author_links: links,
     site_url: map.site_url ?? "",
     avatar_media_id: map.avatar_media_id ?? "",
-    ai_model: map.ai_model ?? "",
+    // One model per AI function since 0.26.0; the single pre-0.26 model
+    // setting is the fallback for the two functions that existed then.
+    ai_model: map.ai_model_tk ?? map.ai_model ?? "",
+    ai_model_tk: map.ai_model_tk ?? map.ai_model ?? "",
+    ai_model_changelog: map.ai_model_changelog ?? map.ai_model ?? "",
+    ai_model_feed: map.ai_model_feed ?? "",
+    feed_prompt: map.feed_prompt ?? "",
     ai_style_prompt: map.ai_style_prompt ?? "",
+    // Default on: an existing deployment's behaviour must not change under it.
+    accept_mentions: map.accept_mentions !== "off",
+    // On by default (Venkat, session 28). The argument for off was that a
+    // client which phones home unasked is the wrong shape for this medium; the
+    // argument that won is that the operators who most need the alert are
+    // exactly the ones who will never find a setting to enable it — five live
+    // nodes sat three releases behind while the mechanism to tell them did not
+    // exist. Default-on plus a visible notice and a one-click off is informed
+    // rather than silent, which is the property that actually matters.
+    timezone: map.timezone ?? "",
+    show_responses_default: map.show_responses_default === "on",
+    auto_change_notes: map.auto_change_notes === "on",
+    update_check: map.update_check !== "off",
+    update_feed_url: map.update_feed_url ?? "",
+    /** Cleared until the operator has seen the "alerts are on" notice once. */
+    update_notice_ack: map.update_notice_ack === "on",
   };
 }
 
@@ -59,12 +132,13 @@ export async function createDraft(
   db: D1Database,
   contentMd: string,
   kind: "fragment" | "thread" = "fragment",
+  stub: StubOf | null = null,
 ): Promise<ItemRow> {
   const id = newId();
   const now = nowIso();
   await db
-    .prepare("INSERT INTO items (id, kind, status, created, updated, version, content_md, dirty) VALUES (?, ?, 'draft', ?, ?, 0, ?, 1)")
-    .bind(id, kind, now, now, contentMd)
+    .prepare("INSERT INTO items (id, kind, status, created, updated, version, content_md, dirty, stub_of) VALUES (?, ?, 'draft', ?, ?, 0, ?, 1, ?)")
+    .bind(id, kind, now, now, contentMd, stub ? JSON.stringify(stub) : null)
     .run();
   return (await getItem(db, id))!;
 }
@@ -109,6 +183,37 @@ export async function authoredKind(db: D1Database, item: ItemRow): Promise<"frag
     .bind(item.id, item.version - 1)
     .first<{ transclusions: string | null }>();
   return prev?.transclusions ? "thread" : "fragment";
+}
+
+/**
+ * Change a never-published draft's kind. Guarded by `version = 0` in the SQL
+ * as well as by the caller, because this is the one field that stops being
+ * editable the moment an item is published: from then on it is a wire field
+ * readers already have, and a row of history that must keep agreeing with the
+ * documents it describes.
+ */
+export async function setDraftKind(db: D1Database, id: string, kind: "fragment" | "thread"): Promise<void> {
+  await db
+    .prepare("UPDATE items SET kind = ?, dirty = 1, updated = ? WHERE id = ? AND version = 0")
+    .bind(kind, nowIso(), id)
+    .run();
+}
+
+/**
+ * Does this item show its verified responses?
+ *
+ * One function, because the rule is a fallback chain and a second copy of a
+ * fallback chain is how the public page and the studio's own control end up
+ * disagreeing about what is published — the worst possible place for a
+ * disagreement, since only one of them is what readers actually see.
+ *
+ * `responses_override` is the item's own decision; `null` means it has none
+ * and the global default applies (migration 0012).
+ */
+export function itemShowsResponses(item: ItemRow, settings: Settings): boolean {
+  return item.responses_override === null || item.responses_override === undefined
+    ? settings.show_responses_default
+    : item.responses_override === 1;
 }
 
 /** Save the working copy. Does not touch `updated` for ever-published items — that field is publish-facing. */
@@ -185,12 +290,15 @@ export async function setTkProvenance(
  * if the published fragment exceeds the studio cap, or TransclusionResolveError
  * if a thread directive fails to resolve — nothing is written in any case.
  */
-export async function publish(db: D1Database, item: ItemRow, note: string | null, ourOrigin?: string): Promise<number> {
+export async function publish(db: D1Database, item: ItemRow, note: string | null, ourOrigin?: string, noteGenerated = false): Promise<number> {
   const now = nowIso();
   const version = item.version + 1;
   const kind = await authoredKind(db, item);
 
-  const { scopes, errors: parseErrors } = parseScopes(item.content_md);
+  // What gets published is authored text: XML-safe, no internal sentinels
+  // (studio#15). The working copy keeps whatever was typed.
+  const source = authoredText(item.content_md);
+  const { scopes, errors: parseErrors } = parseScopes(source);
   const unresolved = unresolvedScopes(scopes);
   if (parseErrors.length || unresolved.length) {
     throw new TkPublishError([
@@ -199,25 +307,81 @@ export async function publish(db: D1Database, item: ItemRow, note: string | null
     ]);
   }
 
-  const { text: strippedMd, spans } = stripToOutput(item.content_md, scopes);
+  const { text: strippedMd, spans } = stripToOutput(source, scopes);
   if (kind === "fragment" && strippedMd.length > FRAGMENT_MAX_CHARS) {
     throw new FragmentTooLongError(strippedMd.length, FRAGMENT_MAX_CHARS);
   }
 
-  const provenanceCache = getTkProvenance(item);
+  // An `impyrt` scope carries its provenance in the grammar (decision #37):
+  // generated elsewhere, so no sources are declared and `model` appears only if
+  // the author wrote it. Never `at` — when it was generated is not known here.
+  const cache = getTkProvenance(item);
+  const provenanceCache: (ScopeProvenance | null)[] = scopes.map((s, i) =>
+    s.imported ? { sources: [], ...(s.imported.model ? { model: s.imported.model } : {}) } : cache[i] ?? null,
+  );
   const hasProvenance = scopes.map((_, i) => provenanceCache[i] != null);
   const annotated = annotateGenerated(strippedMd, spans, hasProvenance);
+
+  // The absolute base for any `[[id]]` anchor, needed before the HTML is built:
+  // `content_html` travels to subscribers, so a relative href in it would
+  // resolve against *their* origin.
+  const settings = await getSettings(db);
+  const origin = ourOrigin ?? settings.site_url;
+
+  // `[[id]]` plain internal links (§16.2, decision #32) — substituted to
+  // sentinels here and spliced back after rendering, like TK's inline spans.
+  //
+  // Run over the body *and* over each independently-rendered generated block,
+  // because annotateGenerated has already lifted those blocks out of the body
+  // text: a link inside one would otherwise stay literal. Their raw text is
+  // gone by now, but the rendered HTML still contains the un-substituted
+  // `[[id]]` verbatim — no character of the grammar is HTML-special — so the
+  // same resolver works on either input. Token sequence is global, so the maps
+  // merge.
+  const linkErrors: TransclusionRefError[] = [];
+  const links = await resolveInternalLinks(db, annotated.text, normalizedOrigin(origin));
+  linkErrors.push(...links.errors);
+  const { docs: blockLinks, errors: blockErrors } = await resolveBlockLinks(annotated.blockReplacements, (html) =>
+    resolveInternalLinks(db, html, normalizedOrigin(origin), undefined, htmlCodeRanges),
+  );
+  linkErrors.push(...blockErrors);
+  if (linkErrors.length) throw new TransclusionResolveError(linkErrors);
+  const spliceLinks = (html: string): string =>
+    [links, ...blockLinks].reduce((acc, doc) => applyInternalLinks(acc, doc), html);
 
   let contentHtml: string;
   let transclusionsJson: string | null = null;
   if (kind === "thread") {
-    const resolved = await resolveTransclusions(db, annotated.text, item.id);
+    const resolved = await resolveTransclusions(db, links.text, item.id);
     if (resolved.errors.length) throw new TransclusionResolveError(resolved.errors);
-    contentHtml = applyGeneratedWrappers(resolved.html, annotated);
-    transclusionsJson = JSON.stringify(resolved.transclusions);
+    contentHtml = spliceLinks(applyGeneratedWrappers(resolved.html, annotated));
+    // §16.1 / decision #30: every **remote** entry carries its frozen human
+    // half. Stored inside the entry rather than in a column of its own, which
+    // is where a per-reference fact belongs in an array of references — and it
+    // makes the wire emission the stored object, so a published citation and
+    // the document that carries it cannot drift apart.
+    const withCites = [];
+    for (const entry of resolved.transclusions) {
+      withCites.push(
+        entry.origin
+          ? { ...entry, cited: await composeTransclusionCite(db, { ...entry, origin: entry.origin }, normalizedOrigin(origin), settings.site_title, now) }
+          : entry,
+      );
+    }
+    transclusionsJson = JSON.stringify(withCites);
   } else {
-    contentHtml = applyGeneratedWrappers(renderMarkdown(annotated.text), annotated);
+    contentHtml = spliceLinks(applyGeneratedWrappers(renderMarkdown(links.text), annotated));
   }
+
+  // Every URL in `content_html` is made absolute against our own origin, for
+  // the same reason `[[id]]` anchors are (§16.2): the HTML travels to
+  // subscribers, and a host-rooted `/blyg/media/x.png` resolves against *their*
+  // host there — a 404, or someone else's file (session 30, found on a live
+  // import). Remote snapshots baked into a thread are already absolute against
+  // their own origin by now (resolveTarget), and absolutizeHtml leaves absolute
+  // URLs alone, so this cannot re-point them at us. The RSS description was
+  // already absolutized at feed time (§7); this makes the item document match.
+  if (origin) contentHtml = absolutizeHtml(contentHtml, normalizedOrigin(origin));
 
   const generated: ScopeProvenance[] = scopes.map((_, i) => provenanceCache[i]).filter((p): p is ScopeProvenance => p != null);
   const generatedJson = generated.length ? JSON.stringify(generated) : null;
@@ -227,24 +391,25 @@ export async function publish(db: D1Database, item: ItemRow, note: string | null
   // never disagree on a published document. Threads only — the working copy
   // of a fragment never carries a stub (the API refuses to set one).
   const stub = kind === "thread" ? parseStoredStub(item.stub_of) : null;
-  const agreed = stub ? applyVersionAgreement(stub, transclusionsJson ? (JSON.parse(transclusionsJson) as Transclusion[]) : []) : null;
+  const agreed = stub ? applyVersionAgreement(stub, transclusionsJson ? (JSON.parse(transclusionsJson) as Transclusion[]) : [], normalizedOrigin(origin)) : null;
   const stubJson = agreed ? JSON.stringify(agreed) : null;
   // The citation's human half is resolved once and frozen (migration 0008):
   // the subscription that supplies the source's name can be renamed or
   // deleted, and the target can withdraw, but a published citation must keep
   // reading correctly. Not on the wire — see StubCite.
-  const settings = await getSettings(db);
-  const origin = ourOrigin ?? settings.site_url;
   const citeJson = agreed ? JSON.stringify(await composeStubCite(db, agreed, normalizedOrigin(origin), settings.site_title, now)) : null;
 
   const hash = await contentHash(strippedMd);
   await db.batch([
     db.prepare(
-      "INSERT INTO versions (item_id, version, content_md, content_html, content_hash, published_at, note, transclusions, generated_json, stub_of, stub_cite) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    ).bind(item.id, version, strippedMd, contentHtml, hash, now, note, transclusionsJson, generatedJson, stubJson, citeJson),
+      "INSERT INTO versions (item_id, version, content_md, content_html, content_hash, published_at, note, transclusions, generated_json, stub_of, stub_cite, note_generated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind(item.id, version, strippedMd, contentHtml, hash, now, note, transclusionsJson, generatedJson, stubJson, citeJson, note && noteGenerated ? 1 : 0),
     db.prepare("UPDATE items SET status = 'public', kind = ?, version = ?, dirty = 0, updated = ? WHERE id = ?")
       .bind(kind, version, now, item.id),
   ]);
+  // The owner's private interaction log (src/interactions.ts): stubs, forks and
+  // quotes of other blygs' items that this version newly makes.
+  await recordPublishInteractions(db, item.id, version, normalizedOrigin(origin));
   return version;
 }
 
@@ -352,7 +517,7 @@ export async function listVersions(db: D1Database, itemId: string): Promise<Vers
 }
 
 /** The published (latest-version) content of an item; the empty endcap row for withdrawn items. */
-export async function publishedVersion(db: D1Database, item: ItemRow): Promise<VersionRow | null> {
+export async function publishedVersion(db: D1Database, item: Pick<ItemRow, "id" | "version">): Promise<VersionRow | null> {
   return db
     .prepare("SELECT * FROM versions WHERE item_id = ? AND version = ?")
     .bind(item.id, item.version)
@@ -385,9 +550,21 @@ export async function feedEvents(db: D1Database, limit: number): Promise<FeedEve
     .bind(limit)
     .all<VersionRow>();
   const items = new Map<string, ItemRow>();
+  // One query for every distinct item, not one per event: the feed window
+  // holds up to 50 publish events and the old per-event getItem turned one
+  // feed render into dozens of sequential D1 roundtrips (~29s observed on
+  // live nodes — past every reader's fetch timeout, so the feed read as
+  // "invalid"). Order of events is preserved; only the item lookup is batched.
+  if (rows.results.length) {
+    const ids = JSON.stringify([...new Set(rows.results.map((v) => v.item_id))]);
+    const found = await db
+      .prepare(`SELECT * FROM items WHERE id IN (SELECT value FROM json_each(?))`)
+      .bind(ids)
+      .all<ItemRow>();
+    for (const item of found.results) items.set(item.id, item);
+  }
   const events: FeedEvent[] = [];
   for (const v of rows.results) {
-    if (!items.has(v.item_id)) items.set(v.item_id, (await getItem(db, v.item_id))!);
     events.push({ item: items.get(v.item_id)!, version: v });
   }
   return events;
@@ -399,8 +576,8 @@ export async function insertMedia(
 ): Promise<MediaRow> {
   const created = nowIso();
   await db
-    .prepare("INSERT INTO media (id, item_id, r2_key, mime, alt, created) VALUES (?, ?, ?, ?, ?, ?)")
-    .bind(row.id, row.item_id, row.r2_key, row.mime, row.alt, created)
+    .prepare("INSERT INTO media (id, item_id, r2_key, mime, alt, created, inline) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .bind(row.id, row.item_id, row.r2_key, row.mime, row.alt, created, row.inline)
     .run();
   return { ...row, created };
 }

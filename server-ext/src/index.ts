@@ -8,6 +8,7 @@
 //   4. client-recorded TK provenance                       provenance.ts
 //   5. read-state sync (optional)                          readstate.ts
 //   +  media de-duplication and removal                   media.ts
+//   +  legacy write routes the studio removed in 0.9       compat.ts
 //
 // Everything else, including every public protocol surface, goes to the
 // reference Worker unchanged. The extensions only add owner-only /api
@@ -15,6 +16,7 @@
 
 import reference from "../../worker/src/index.ts";
 import { authenticate, withSession } from "./auth.ts";
+import { translateLegacy } from "./compat.ts";
 import { type Env, json } from "./http.ts";
 import { deleteMedia, duplicateUpload } from "./media.ts";
 import { getProvenance, putProvenance } from "./provenance.ts";
@@ -73,7 +75,8 @@ async function fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Res
   if (auth === "bearer" && !env.COOKIE_SECRET) {
     return json({ error: "COOKIE_SECRET is not set on this blyg; add it as a Secret in Cloudflare" }, 500);
   }
-  return reference.fetch(auth === "bearer" ? await withSession(req, env) : req, env, ctx);
+  const forwarded = await translateLegacy(auth === "bearer" ? await withSession(req, env) : req);
+  return reference.fetch(forwarded, env, ctx);
 }
 
 export default {

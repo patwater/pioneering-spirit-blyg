@@ -3,8 +3,9 @@
 
 import { listBlogrollSubscriptions } from "./importer/store.ts";
 import { excerpt, excerptFromHtml } from "./markdown.ts";
-import { forkLineage, injectProvenance, stubCitation, transclusionProvenance } from "./pages.ts";
-import { parseStoredFork, parseStoredStub } from "./stub.ts";
+import { loadProvenance } from "./public-feed.ts";
+import { authorOwnHtml, forkLineage, injectProvenance, respondsToLabel, stubCitation, transclusionProvenance } from "./pages.ts";
+import { parseStoredCite, parseStoredFork, parseStoredStub } from "./stub.ts";
 import {
   authoredKind,
   feedEvents,
@@ -16,8 +17,8 @@ import {
   publishedVersion,
 } from "./model.ts";
 import type { ItemRow, ScopeProvenance, Settings, Transclusion, VersionRow } from "./types.ts";
-import { BRAND, FEED_WINDOW, GENERATOR, PROTOCOL_LEVEL, PROTOCOL_VERSION, WEBMENTION_PATH } from "./types.ts";
-import { absolutizeHtml, cdata, escapeXml, rfc822 } from "./util.ts";
+import { BRAND, FEED_WINDOW, GENERATOR, GENERATOR_URL, PROTOCOL_LEVEL, PROTOCOL_VERSION, WEBMENTION_PATH } from "./types.ts";
+import { absolutizeHtml, cdata, escapeXml, rfc822, unplacedMedia, visibleMedia } from "./util.ts";
 
 /**
  * Canonical origin for this deployment — the blyg's base URL, always ending
@@ -27,6 +28,21 @@ import { absolutizeHtml, cdata, escapeXml, rfc822 } from "./util.ts";
 export function siteOrigin(settings: Settings, requestUrl: string, mount: string): string {
   if (settings.site_url) return settings.site_url.endsWith("/") ? settings.site_url : settings.site_url + "/";
   return new URL(requestUrl).origin + mount + "/";
+}
+
+/**
+ * Attach a reference's frozen human half for the wire (§16.1, decision #30).
+ *
+ * `stub_of` and `forked_from` keep their cites in the columns migrations 0008
+ * and 0010 gave them, and gain `cited` here at serialization; a remote
+ * `transclusions[]` entry carries its own, inside the entry, because that is
+ * where a per-reference fact belongs in an array. Both routes freeze at the
+ * moment the reference was made and neither is ever recomposed on read.
+ */
+function withCited<T extends object>(ref: T | null, citeJson: string | null): T | null {
+  if (!ref) return null;
+  const cite = parseStoredCite(citeJson);
+  return cite ? { ...ref, cited: cite } : ref;
 }
 
 function author(settings: Settings, origin: string) {
@@ -45,6 +61,8 @@ export async function buildItemJson(db: D1Database, settings: Settings, item: It
     at: v.published_at,
     note: v.note,
     ...(v.pinned === 1 ? { pinned: true } : {}),
+    // §16.6c / #40: the studio wrote this note. Only with a note to describe.
+    ...(v.note_generated === 1 && v.note ? { generated: true } : {}),
   }));
   // Thread items additionally carry transclusions provenance (§2.9); a
   // withdrawn thread's endcap empties it to [] alongside content_md/media.
@@ -62,7 +80,7 @@ export async function buildItemJson(db: D1Database, settings: Settings, item: It
   // §2.2 stub citation: published on the version, so a withdrawal endcap —
   // which stores none — simply stops carrying it, and a withdrawn stub
   // stops verifying on the far side (§2.3.6). Threads only.
-  const stubOf = isWithdrawn ? null : parseStoredStub(latest?.stub_of ?? null);
+  const stubOf = isWithdrawn ? null : withCited(parseStoredStub(latest?.stub_of ?? null), latest?.stub_cite ?? null);
   // §2.4 lineage. Unlike every field above it, this one survives withdrawal:
   // the endcap empties what the item *said* (content, media, transclusions,
   // its stub citation), because those are the published work and the work is
@@ -70,7 +88,7 @@ export async function buildItemJson(db: D1Database, settings: Settings, item: It
   // about the item's origin, in the same class as `created` and `page`, which
   // the endcap also keeps. It costs nothing to keep and a withdrawn fork that
   // denied its parentage would be the protocol telling a small lie.
-  const forkedFrom = parseStoredFork(item.forked_from);
+  const forkedFrom = withCited(parseStoredFork(item.forked_from), item.fork_cite);
   return {
     blyg: PROTOCOL_VERSION,
     id: item.id,
@@ -88,7 +106,7 @@ export async function buildItemJson(db: D1Database, settings: Settings, item: It
     content_md: contentMd,
     content_html: contentHtml,
     content_hash: latest?.content_hash ?? "",
-    media: media.map((m) => ({ url: m.r2_key, mime: m.mime, alt: m.alt ?? "" })),
+    media: visibleMedia(media, contentHtml).map((m) => ({ url: m.r2_key, mime: m.mime, alt: m.alt ?? "" })),
     ...(transclusions !== undefined ? { transclusions } : {}),
     ...(stubOf ? { stub_of: stubOf } : {}),
     ...(forkedFrom ? { forked_from: forkedFrom } : {}),
@@ -116,11 +134,11 @@ export function buildPinnedVersionJson(settings: Settings, item: ItemRow, row: V
     ...(isThread ? { transclusions: JSON.parse(row.transclusions as string) as Transclusion[] } : {}),
     // A pin carries its own citation (§2.2): the frozen artifact says what it
     // was responding to, at the version it was responding to.
-    ...(parseStoredStub(row.stub_of) ? { stub_of: parseStoredStub(row.stub_of) } : {}),
+    ...(parseStoredStub(row.stub_of) ? { stub_of: withCited(parseStoredStub(row.stub_of), row.stub_cite) } : {}),
     // Lineage travels with the pin too, and safely: `items.forked_from` is
     // written once at fork time and has no setter, so a frozen document can
     // never come to disagree with the live item about where it came from.
-    ...(parseStoredFork(item.forked_from) ? { forked_from: parseStoredFork(item.forked_from) } : {}),
+    ...(parseStoredFork(item.forked_from) ? { forked_from: withCited(parseStoredFork(item.forked_from), item.fork_cite) } : {}),
     ...(row.generated_json ? { generated: JSON.parse(row.generated_json) as ScopeProvenance[] } : {}),
   };
 }
@@ -137,6 +155,11 @@ export async function buildManifest(db: D1Database, settings: Settings, origin: 
     blyg: PROTOCOL_VERSION,
     level: PROTOCOL_LEVEL,
     generator: GENERATOR,
+    // §16.6a (decision #34): where this client's source lives. A directory can
+    // then reach a client's release page from a manifest alone, which is the
+    // only channel that exists for telling five of seven implementations'
+    // operators anything — most have no locatable repo.
+    generator_url: GENERATOR_URL,
     site: origin,
     title: settings.site_title,
     author: {
@@ -153,7 +176,10 @@ export async function buildManifest(db: D1Database, settings: Settings, origin: 
     // v0.3 §2.3.1: present only when this deployment can actually receive.
     // A static export omits it — the exported tree has no endpoint behind it,
     // and advertising one would promise delivery nothing could keep.
-    ...(opts.webmention === false ? {} : { webmention: WEBMENTION_PATH }),
+    // §15.1: advertised "only when mentions are accepted". `opts.webmention`
+    // is the caller's override (a static tree accepts none); the setting is the
+    // operator's, and either one is enough to withhold the key.
+    ...(opts.webmention === false || !settings.accept_mentions ? {} : { webmention: WEBMENTION_PATH }),
   };
 }
 
@@ -178,7 +204,7 @@ export function feedTitle(item: ItemRow, note: string | null, excerptText: strin
   return note ? `${note} — ${excerptText}` : excerptText;
 }
 
-function latestTransclusions(latest: VersionRow | null): Transclusion[] {
+function latestTransclusions(latest: Pick<VersionRow, "transclusions"> | null): Transclusion[] {
   if (!latest?.transclusions) return [];
   return JSON.parse(latest.transclusions) as Transclusion[];
 }
@@ -190,24 +216,65 @@ export async function buildFeedXml(db: D1Database, settings: Settings, origin: s
   // Root-relative path of the canonical origin ("" for a root mount) — keeps
   // injected provenance links consistent with `origin` after absolutizeHtml.
   const originPath = new URL(origin).pathname.replace(/\/$/, "");
+  // Batched loads: the old per-event publishedVersion / media / provenance
+  // queries turned one feed render into ~200 sequential D1 roundtrips
+  // (~29s on live nodes — past every reader's timeout, so SmartRSS and
+  // friends reported "invalid feed"). Same bytes out, fixed query count.
+  const liveItems = events.filter(({ item }) => item.kind !== "withdrawn");
+  const livePairs = JSON.stringify([...new Map(liveItems.map(({ item }) => [item.id, { id: item.id, version: item.version }])).values()]);
+  const allIds = JSON.stringify([...new Set(events.map(({ item }) => item.id))]);
+  const withdrawnIds = JSON.stringify([...new Map(events.filter(({ item }) => item.kind === "withdrawn").map(({ item }) => [item.id, { id: item.id, version: item.version }])).values()]);
+  const [latestRes, mediaRes, prevRes] = await db.batch([
+    db.prepare(`SELECT v.item_id, v.content_md, v.content_html, v.transclusions, v.stub_of, v.stub_cite FROM json_each(?) s JOIN versions v
+      ON v.item_id = json_extract(s.value, '$.id') AND v.version = json_extract(s.value, '$.version')`).bind(livePairs),
+    db.prepare(`SELECT m.* FROM json_each(?) s JOIN media m ON m.item_id = s.value ORDER BY m.created ASC`).bind(allIds),
+    db.prepare(`SELECT v.item_id, v.transclusions FROM json_each(?) s JOIN versions v
+      ON v.item_id = json_extract(s.value, '$.id') AND v.version = json_extract(s.value, '$.version') - 1`).bind(withdrawnIds),
+  ]);
+  const latestById = new Map<string, { content_md: string; content_html: string; transclusions: string | null; stub_of: string | null; stub_cite: string | null }>();
+  for (const v of latestRes.results as unknown as Array<{ item_id: string; content_md: string; content_html: string; transclusions: string | null; stub_of: string | null; stub_cite: string | null }>) {
+    latestById.set(v.item_id, v);
+  }
+  const mediaById = new Map<string, Array<{ r2_key: string; alt: string | null; inline?: number }>>();
+  for (const m of mediaRes.results as unknown as Array<{ item_id: string; r2_key: string; alt: string | null }>) {
+    const list = mediaById.get(m.item_id) ?? [];
+    list.push(m);
+    mediaById.set(m.item_id, list);
+  }
+  const withdrawnKind = new Map<string, boolean>();
+  for (const r of prevRes.results as unknown as Array<{ item_id: string; transclusions: string | null }>) {
+    withdrawnKind.set(r.item_id, Boolean(r.transclusions));
+  }
+  // Same loader as the public pages: the feed and the HTML page can never
+  // disagree about whose quote this is.
+  const provenance = await loadProvenance(
+    db,
+    liveItems
+      .filter(({ item }) => item.kind === "thread")
+      .map(({ item }) => latestTransclusions({ transclusions: latestById.get(item.id)?.transclusions ?? null })),
+  );
+  // §7 (C-7-08): the standard RSS byline, whenever the item's author.name is
+  // present. Every item carries the blyg's one author, so it is the same line
+  // on each entry; the opaque author object never appears in the XML.
+  const creator = settings.author_name ? `      <dc:creator>${escapeXml(settings.author_name)}</dc:creator>\n` : "";
   const itemsXml: string[] = [];
   // Per §2.3, only the latest version's content is published — feed entries
   // for older publish events carry the event's version/note but render the
   // item's *latest* content (see DEVLOG session 2).
   for (const { item, version } of events) {
     const isWithdrawn = item.kind === "withdrawn";
-    const latest = isWithdrawn ? null : await publishedVersion(db, item);
+    const latest = isWithdrawn ? null : latestById.get(item.id) ?? null;
     const latestMd = latest?.content_md ?? "";
-    const isThread = isWithdrawn ? (await authoredKind(db, item)) === "thread" : item.kind === "thread";
+    const isThread = isWithdrawn ? (withdrawnKind.get(item.id) ?? false) : item.kind === "thread";
     const rawHtml = latest?.content_html ?? "";
     let html = isWithdrawn
       ? ""
       : absolutizeHtml(
-          isThread ? injectProvenance(rawHtml, await transclusionProvenance(db, latestTransclusions(latest), originPath)) : rawHtml,
+          isThread ? injectProvenance(rawHtml, await transclusionProvenance(db, latestTransclusions(latest), originPath, provenance)) : rawHtml,
           origin,
         );
     if (!isWithdrawn) {
-      for (const m of await listMediaForItem(db, item.id)) {
+      for (const m of unplacedMedia(mediaById.get(item.id) ?? [], html)) {
         html += `<p><img src="${origin}${m.r2_key}" alt="${escapeXml(m.alt ?? "")}"></p>`;
       }
     }
@@ -215,14 +282,24 @@ export async function buildFeedXml(db: D1Database, settings: Settings, origin: s
     // show what it answers, in the same injected-presentation layer as
     // transclusion provenance (which has been in the description since 0.1).
     if (!isWithdrawn && isThread && latest?.stub_of) {
-      html = absolutizeHtml(stubCitation(latest, { compact: true }), origin) + html;
+      html = absolutizeHtml(stubCitation(latest, settings.timezone, { compact: true }), origin) + html;
     }
     // Lineage rides along for the same reason, and for both kinds — a fork is
     // a fragment as often as a thread.
     if (!isWithdrawn && item.forked_from) {
-      html = absolutizeHtml(forkLineage(item, { compact: true }), origin) + html;
+      html = absolutizeHtml(forkLineage(item, settings.timezone, { compact: true }), origin) + html;
     }
-    const excerptText = isWithdrawn ? "" : isThread ? excerptFromHtml(rawHtml, 60) : excerpt(latestMd, 60);
+    // A feed headline names the item, so it names it in the author's own words.
+    // `rawHtml` for a thread contains other people's text baked in as quotes
+    // (§10); flattening that to 60 characters is how a stub that opened with a
+    // quote got an RSS headline that was the quoted person's sentence. Same
+    // derivation as the page title and the feed card — see pages.ts
+    // authorOwnHtml for the measurement that prompted it.
+    const excerptText = isWithdrawn
+      ? ""
+      : isThread
+        ? excerptFromHtml(authorOwnHtml(rawHtml), 60) || respondsToLabel(latest)
+        : excerpt(latestMd, 60);
     itemsXml.push(
       `    <item>
       <guid isPermaLink="false">blyg:${item.id}:v${version.version}</guid>
@@ -230,7 +307,7 @@ export async function buildFeedXml(db: D1Database, settings: Settings, origin: s
       <title>${escapeXml(feedTitle(item, version.note, excerptText))}</title>
       <description>${isWithdrawn ? "" : cdata(html)}</description>
       <pubDate>${rfc822(version.published_at)}</pubDate>
-      <blyg:id>${item.id}</blyg:id>
+${creator}      <blyg:id>${item.id}</blyg:id>
       <blyg:kind>${item.kind}</blyg:kind>
       <blyg:version>${version.version}</blyg:version>
       <blyg:created>${item.created}</blyg:created>
@@ -239,11 +316,12 @@ export async function buildFeedXml(db: D1Database, settings: Settings, origin: s
     );
   }
   return `<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0" xmlns:blyg="${BRAND.nsUri}">
+<rss version="2.0" xmlns:blyg="${BRAND.nsUri}" xmlns:atom="http://www.w3.org/2005/Atom"${creator ? ' xmlns:dc="http://purl.org/dc/elements/1.1/"' : ""}>
   <channel>
     <title>${escapeXml(settings.site_title)}</title>
     <link>${origin}</link>
-    <description>${escapeXml(settings.author_bio)}</description>
+    <description>${escapeXml(settings.author_bio || settings.site_title)}</description>
+    <atom:link href="${escapeXml(`${origin}feed.xml`)}" rel="self" type="application/rss+xml" />
     <lastBuildDate>${rfc822(built)}</lastBuildDate>
     <blyg:level>${PROTOCOL_LEVEL}</blyg:level>
     <blyg:manifest>${origin}blyg.json</blyg:manifest>

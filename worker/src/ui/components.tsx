@@ -1,0 +1,255 @@
+import type { ReactNode } from 'react';
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useState,
+} from 'react';
+import { Button } from '@base-ui/react/button';
+import { Link, useLocation } from '@tanstack/react-router';
+import { useLiveQuery } from '@tanstack/react-db';
+import {
+  settings as settingsCollection,
+  polling,
+  queryClient,
+  updates,
+} from './data.ts';
+import { readState } from '../versions.ts';
+import { Sheet } from './sheets.tsx';
+import { applyTheme } from './theme.ts';
+export { Button };
+export const mount =
+  document.getElementById('studio-root')!.dataset.mount ?? '';
+export const basepath = `${mount}/studio`;
+export function usePoll(key: string, refresh: () => Promise<unknown>) {
+  useEffect(() => polling.watch(key, refresh), [key, refresh]);
+}
+export function useSettings() {
+  usePoll('settings', settingsCollection.utils.refetch);
+  return useLiveQuery({
+    query: (q) => q.from({ settings: settingsCollection }),
+  }).data?.[0];
+}
+/** The release check: `behind` when a newer release than this build exists. */
+export function useUpdateState() {
+  usePoll('updates', updates.utils.refetch);
+  const row = useLiveQuery({ query: (q) => q.from({ update: updates }) })
+    .data?.[0];
+  return row
+    ? readState({
+        update_latest_seen: row.update_latest_seen || '',
+        update_checked_at: row.update_checked_at || '',
+      })
+    : undefined;
+}
+export function Html({ html, id }: { html: string; id?: string }) {
+  return <div id={id} dangerouslySetInnerHTML={{ __html: html }} />;
+}
+export function Failure({ error }: { error: unknown }) {
+  return error ? (
+    <p className="error-banner" role="alert">
+      {error instanceof Error ? error.message : String(error)}
+    </p>
+  ) : null;
+}
+/** A titled sheet with arbitrary content. Kept for existing callers; new code
+ *  can use <Sheet> from sheets.tsx directly. */
+export function Modal({
+  open,
+  close,
+  title,
+  children,
+  closeButton = true,
+}: {
+  open: boolean;
+  close: () => void;
+  title: string;
+  children: ReactNode;
+  /** Off when the dialog's own actions already include a way out. */
+  closeButton?: boolean;
+}) {
+  return (
+    <Sheet open={open} onClose={close} title={title} className="dialog-popup">
+      {children}
+      {closeButton ? <Sheet.Close>close</Sheet.Close> : null}
+    </Sheet>
+  );
+}
+
+/* ---------------- CHROME ----------------
+ * A screen tells the Layout how to frame it with useChrome():
+ *   tabs   — show the bottom tab bar / left rail (default true). The editor
+ *            turns it off and renders its own <ActionBar>.
+ *   framed — sit the screen on one card (default true). Screens not yet
+ *            redesigned need it so their text reads against the card (Slate's
+ *            page is dark); redesigned screens turn it off and lay out cards.
+ *   wide   — the 1240px measure instead of 760px (default: reading, editor).
+ */
+export interface ChromeOptions {
+  tabs?: boolean;
+  framed?: boolean;
+  wide?: boolean;
+}
+const ChromeContext = createContext<(options: ChromeOptions) => void>(
+  () => {},
+);
+export function useChrome(options: ChromeOptions) {
+  const set = useContext(ChromeContext);
+  const { tabs, framed, wide } = options;
+  useLayoutEffect(() => {
+    set({ tabs, framed, wide });
+    return () => set({});
+  }, [set, tabs, framed, wide]);
+}
+/** A bottom action bar, for screens that hide the tab bar (the editor). */
+export function ActionBar({
+  children,
+  className,
+}: {
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div className={className ? `actionbar ${className}` : 'actionbar'}>
+      {children}
+    </div>
+  );
+}
+
+const tabs = [
+  { label: 'reading', to: '/reading', icon: '◫' },
+  { label: 'compose', to: '/', icon: '✎' },
+  { label: 'hoppers', to: '/hoppers', icon: '▤' },
+  { label: 'mentions', to: '/mentions', icon: '↩' },
+  { label: 'updates', to: '/updates', icon: '↻' },
+  { label: 'more', to: '/more', icon: '⋯' },
+] as const;
+type Tab = (typeof tabs)[number]['label'];
+/** Which tab owns a studio path (relative to the basepath). */
+export function tabFor(path: string): Tab | null {
+  const p = path.replace(/\/+$/, '') || '/';
+  if (p === '/' || p.startsWith('/edit/')) return 'compose';
+  if (p === '/reading' || p === '/subs' || p === '/fork') return 'reading';
+  if (p === '/hoppers' || p.startsWith('/hoppers/')) return 'hoppers';
+  if (p === '/mentions') return 'mentions';
+  if (p === '/updates') return 'updates';
+  if (p === '/more' || p === '/settings' || p === '/syntax' || p === '/signals') return 'more';
+  return null;
+}
+function relativePath(pathname: string) {
+  return pathname.startsWith(basepath)
+    ? pathname.slice(basepath.length) || '/'
+    : pathname;
+}
+
+export function Layout({ children }: { children: ReactNode }) {
+  const settings = useSettings();
+  const update = useUpdateState();
+  const path = relativePath(useLocation({ select: (l) => l.pathname }));
+  const active = tabFor(path);
+  const [chrome, setChrome] = useState<ChromeOptions>({});
+  const showTabs = chrome.tabs ?? true;
+  const framed = chrome.framed ?? true;
+  const wide = chrome.wide ?? (path === '/reading' || path.startsWith('/edit/'));
+  const [error, setError] = useState<unknown>();
+  useEffect(() => {
+    const failure = (event: Event) => setError((event as CustomEvent).detail);
+    window.addEventListener('studio-read-error', failure);
+    const unsubscribe = queryClient.getQueryCache().subscribe((event) => {
+      if (event.type === 'updated' && event.query.state.status === 'error')
+        setError(event.query.state.error);
+    });
+    return () => {
+      window.removeEventListener('studio-read-error', failure);
+      unsubscribe();
+    };
+  }, []);
+  // The studio wears the reading theme. Until settings load, the theme
+  // applied at startup (the last one seen on this device) stays.
+  const theme = settings?.theme;
+  useEffect(() => {
+    if (theme === undefined) return;
+    applyTheme(theme);
+    // `auto` follows the device; keep theme-color in step when it flips.
+    const media = matchMedia('(prefers-color-scheme: dark)');
+    const flip = () => applyTheme(theme);
+    media.addEventListener('change', flip);
+    return () => media.removeEventListener('change', flip);
+  }, [theme]);
+  useEffect(() => {
+    document.body.classList.toggle('has-tabs', showTabs);
+    document.body.classList.toggle('no-tabs', !showTabs);
+  }, [showTabs]);
+  const behind = !!(settings?.update_check && update?.behind);
+  const unacked = !!(settings?.update_check && !settings.update_notice_ack);
+  return (
+    <ChromeContext.Provider value={setChrome}>
+      <header className="topbar">
+        <h1 className="topbar-title">
+          <span aria-hidden="true">❝ </span>
+          {settings?.site_title ? `${settings.site_title} ` : ''}
+          <small>blygger studio</small>
+        </h1>
+        <div className="topbar-actions">
+          {behind ? (
+            <Link
+              to="/more"
+              className="tb-badge warn"
+              id="update-badge"
+              title="A newer release exists"
+            >
+              update
+            </Link>
+          ) : null}
+          <a
+            className="tb-btn"
+            href={`${mount}/`}
+            target="_blank"
+            rel="noreferrer"
+            aria-label="public page ↗"
+          >
+            <span className="lbl">public page </span>↗
+          </a>
+        </div>
+      </header>
+      <main className={wide ? 'views wide' : 'views'}>
+        {error ? (
+          <div className="read-error">
+            <Failure error={error} />
+            <Button
+              className="btn btn-ghost btn-mini"
+              onClick={() => {
+                setError(undefined);
+                void polling.refresh();
+              }}
+            >
+              retry reads
+            </Button>
+          </div>
+        ) : null}
+        <div className={framed ? 'screen framed' : 'screen'}>{children}</div>
+      </main>
+      {showTabs ? (
+        <nav className="tabbar" aria-label="studio">
+          {tabs.map((tab) => (
+            <Link
+              key={tab.label}
+              to={tab.to}
+              className={tab.label === active ? 'tab is-active' : 'tab'}
+              aria-current={tab.label === active ? 'page' : undefined}
+            >
+              <span className="ti" aria-hidden="true">
+                {tab.icon}
+              </span>
+              <span className="tl">{tab.label}</span>
+              {tab.label === 'more' && (behind || unacked) ? (
+                <span className="flag" aria-hidden="true" />
+              ) : null}
+            </Link>
+          ))}
+        </nav>
+      ) : null}
+    </ChromeContext.Provider>
+  );
+}

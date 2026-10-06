@@ -5,10 +5,12 @@
 // (see its header note); the real HTTP route only gets network-free coverage
 // in tk-generate-api.test.ts.
 import { env } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import type { ProviderFetchLike } from "../src/ai/provider.ts";
 import { createAndPublish, login } from "./helpers.ts";
-import { createDraft, getItem, getTkProvenance, publish, withdraw } from "../src/model.ts";
+import { putSettings, createDraft, getItem, getTkProvenance, publish, withdraw } from "../src/model.ts";
+
+beforeEach(() => putSettings(env.DB, { ai_model: "claude-opus-5" }));
 import { runGenerateScope } from "../src/tk-generate.ts";
 
 function fixture(text: string, model = "claude-opus-5") {
@@ -72,7 +74,7 @@ describe("runGenerateScope — error cases (§5/§6 task 4)", () => {
     const item = await createDraft(env.DB, `[TK]use ![[zzzzzzzzzzzzzzzzzzzzzzzzzz]][/TK]`);
     const { fetchImpl, calls } = fixture("unused");
     const result = await runGenerateScope({ ...env, AI_PROVIDER_KEY: "k" }, item, 0, fetchImpl);
-    expect(result).toMatchObject({ ok: false, status: 400, body: { error: "unresolvable source", id: "zzzzzzzzzzzzzzzzzzzzzzzzzz" } });
+    expect(result).toMatchObject({ ok: false, status: 400, body: { error: "unresolvable source: unknown item", id: "zzzzzzzzzzzzzzzzzzzzzzzzzz" } });
     expect(calls).toHaveLength(0); // never reaches the provider
   });
 
@@ -84,12 +86,19 @@ describe("runGenerateScope — error cases (§5/§6 task 4)", () => {
     const threadItem = await createDraft(env.DB, "some thread", "thread");
     await publish(env.DB, threadItem, null);
 
-    for (const badId of [draftFrag.id, withdrawnId, threadItem.id]) {
+    // A draft or withdrawn source is genuinely unusable and says why; a thread
+    // is a valid id the studio cannot use *yet* (G8), and says that instead.
+    const expected: [string, RegExp][] = [
+      [draftFrag.id, /^unresolvable source: item is a draft/],
+      [withdrawnId, /^unresolvable source: item is withdrawn/],
+      [threadItem.id, /^TK transcludes are not yet implemented/],
+    ];
+    for (const [badId, error] of expected) {
       const item = await createDraft(env.DB, `[TK]use ![[${badId}]][/TK]`);
       const { fetchImpl } = fixture("unused");
       const result = await runGenerateScope({ ...env, AI_PROVIDER_KEY: "k" }, item, 0, fetchImpl);
       expect(result.ok, badId).toBe(false);
-      if (!result.ok) expect(result.body.error).toBe("unresolvable source");
+      if (!result.ok) expect(result.body.error).toMatch(error);
     }
   });
 

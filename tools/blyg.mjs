@@ -157,7 +157,7 @@ async function push(file, { quiet = false } = {}) {
     if (!quiet) console.log(`Created ${kind} draft ${meta.id}.`);
   } else {
     if (!ID_RE.test(meta.id)) fail(`${file}: front-matter id "${meta.id}" is not a blyg id`);
-    await request("PUT", `/api/items/${meta.id}`, { content_md: body, ...(stub !== undefined ? { stub_of: stub } : {}) });
+    await request("PATCH", `/api/items/${meta.id}`, { content_md: body, ...(stub !== undefined ? { stub_of: stub } : {}) });
     if (!quiet) console.log(`Saved working copy of ${meta.id}.`);
   }
   return { meta, body, kind };
@@ -178,10 +178,9 @@ async function publish(file, note) {
 async function pull(file) {
   const { meta } = readDraft(file);
   if (!meta.id) fail(`${file} has no id yet; push it first`);
-  const html = await request("GET", `/studio/edit/${meta.id}`);
-  const m = typeof html === "string" && html.match(/<textarea id="md-input">([\s\S]*?)<\/textarea>/);
-  if (!m) fail(`could not find the working copy on /studio/edit/${meta.id}`);
-  writeDraft(file, meta, unescapeHtml(m[1]));
+  const item = await request("GET", `/api/items/${meta.id}`);
+  if (typeof item?.content_md !== "string") fail(`GET /api/items/${meta.id} returned no working copy`);
+  writeDraft(file, meta, item.content_md);
   console.log(`Pulled working copy of ${meta.id} into ${path.relative(process.cwd(), file)}.`);
 }
 
@@ -218,8 +217,8 @@ async function find(query) {
     const excerpt = body.replace(/^[>#\s]+/gm, "").replace(/\s+/g, " ").trim().slice(0, 70);
     console.log(`![[${meta.id}]]  v${meta.version}  [${meta.kind}, ${path.relative(ROOT, file)}]  ${excerpt}`);
   }
-  const data = await request("GET", `/studio/fragments/search?q=${encodeURIComponent(q)}`);
-  for (const r of data.results ?? []) {
+  const data = await request("GET", `/api/search?q=${encodeURIComponent(q)}`);
+  for (const r of data.items ?? []) {
     if (!seen.has(r.id)) console.log(`![[${r.id}]]  v${r.version}  [${r.badge}]  ${r.excerpt}`);
     seen.add(r.id);
   }
@@ -273,7 +272,7 @@ function newDraft(file, kind) {
 async function settings(file) {
   const data = JSON.parse(readFileSync(file, "utf8"));
   delete data.$note;
-  await request("PUT", "/api/settings", data);
+  await request("PATCH", "/api/settings", data);
   console.log(`Pushed ${Object.keys(data).length} settings from ${path.relative(process.cwd(), file)}.`);
 }
 
@@ -316,10 +315,6 @@ function stripTk(md) {
     const eq = inner.indexOf("[=]");
     return eq < 0 ? "" : inner.slice(eq + 3);
   });
-}
-
-function unescapeHtml(s) {
-  return s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&");
 }
 
 function walk(dir) {

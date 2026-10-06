@@ -16,19 +16,14 @@ export function normalizeMount(raw: string | undefined): string {
   return m.startsWith("/") ? m : "/" + m;
 }
 
-/**
- * Studio's base path for a given (already-normalized) mount — session 16:
- * studio is nested under the mount, not host-rooted. Single source of truth
- * for the "mount + /studio" convention so index.ts's route registration and
- * every studio.ts / importer/studio.ts link/redirect/embedded-script string
- * can't drift apart the way resolve.ts's duplicated feed-detection once did.
- */
+/** Shared mounted Studio path for routing and links. */
 export function studioPath(mount: string): string {
   return mount + "/studio";
 }
 
 /** Crockford base32, lowercase, no i/l/o/u. */
-export const ID_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz";
+import { ID_ALPHABET } from "./identity.ts";
+export { ID_ALPHABET } from "./identity.ts";
 
 /**
  * 128 random bits encoded as 26 chars of lowercase Crockford base32
@@ -100,8 +95,27 @@ export function escapeHtml(s: string): string {
     .replace(/'/g, "&#39;");
 }
 
+// ── Text that must survive the trip to other people's readers (studio#15) ──
+
+/**
+ * Characters XML 1.0 forbids: C0 controls other than tab, LF and CR,
+ * U+FFFE/U+FFFF, and unpaired surrogates. One of these in `feed.xml` is a
+ * well-formedness error that takes a subscriber's *whole* feed down in libxml2
+ * and most reader stacks — while `fast-xml-parser`, ours, tolerates it, so our
+ * own tests would never notice.
+ */
+const XML_INVALID = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+export const xmlSafe = (s: string) => s.replace(XML_INVALID, "");
+
+/**
+ * Authored text as publish keeps it: XML-safe, and without this client's
+ * internal sentinels (U+E000–U+E005, tk.ts and transclusion.ts), which are
+ * "never produced by normal authoring" only until someone pastes one.
+ */
+export const authoredText = (s: string) => xmlSafe(s).replace(/[\uE000-\uE005]/g, "");
+
 export function escapeXml(s: string): string {
-  return s
+  return xmlSafe(s)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -110,7 +124,7 @@ export function escapeXml(s: string): string {
 
 /** Wrap HTML for a CDATA section, splitting any `]]>` occurrences. */
 export function cdata(s: string): string {
-  return "<![CDATA[" + s.replaceAll("]]>", "]]]]><![CDATA[>") + "]]>";
+  return "<![CDATA[" + xmlSafe(s).replaceAll("]]>", "]]]]><![CDATA[>") + "]]>";
 }
 
 /**
@@ -137,4 +151,54 @@ export function relativeTime(iso: string, now = Date.now()): string {
   const d = Math.floor(h / 24);
   if (d < 365) return `${d}d ago`;
   return `${Math.floor(d / 365)}y ago`;
+}
+
+/**
+ * A date as the author's readers should see it (session 28).
+ *
+ * `timeZone` is **required**, not defaulted, and that is the point: every call
+ * site has to say which zone it means, so a new one cannot quietly inherit UTC
+ * the way all 28 of them did before. An empty string means UTC explicitly.
+ *
+ * Rendering only. Nothing on the wire is formatted through here — feed dates
+ * are RFC-822 and item documents are ISO-8601 UTC, both produced elsewhere and
+ * both unaffected by this setting.
+ *
+ * An invalid zone falls back to UTC rather than throwing: the setting is
+ * validated when it is saved, but a database row is not a type, and a blyg
+ * whose every page 500s because of a bad string in settings would be a worse
+ * failure than a date in the wrong zone.
+ */
+export { formatDateIn } from "./dates.ts";
+
+/** Is this a timezone the runtime actually knows? Used to validate the setting on save. */
+export function isValidTimeZone(tz: string): boolean {
+  if (!tz) return true; // empty means UTC
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Is this media row's key used as a path in the HTML, relative or absolute? Keys are random, so a full-key match cannot hit another file. */
+export function placedIn(html: string, key: string): boolean {
+  return html.includes(`/${key}`) || html.includes(`"${key}`);
+}
+
+/**
+ * Attachments to append after the content (studio#24). An image the studio
+ * placed in the text (`inline`) is shown only where its line is, so deleting
+ * the line removes it; appending it as well showed it twice. Only uploads that
+ * never touched the text — another tool's POST /api/media — are appended, and
+ * only when the text does not already show them.
+ */
+export function unplacedMedia<T extends { r2_key: string; inline?: number }>(media: T[], html: string): T[] {
+  return media.filter((m) => m.inline !== 1 && !placedIn(html, m.r2_key));
+}
+
+/** The item's media as published: what the text shows plus what is appended. Inline images whose line was deleted are gone. */
+export function visibleMedia<T extends { r2_key: string; inline?: number }>(media: T[], html: string): T[] {
+  return media.filter((m) => m.inline !== 1 || placedIn(html, m.r2_key));
 }

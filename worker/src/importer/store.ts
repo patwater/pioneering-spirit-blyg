@@ -153,6 +153,9 @@ export function toLocalState(row: ImportedItemRow | null): LocalState {
  * withdrawn version is confirmed pinned on the origin — the caller does
  * that pin check itself (a separate fetch) before calling this.
  */
+/** Lineage members are stored verbatim (studio#12): readers render them, nothing here interprets them. */
+const lineage = (v: Record<string, unknown> | undefined) => (v ? JSON.stringify(v) : null);
+
 export async function applyEffect(
   db: D1Database,
   subscriptionId: string,
@@ -168,15 +171,15 @@ export async function applyEffect(
       await db
         .prepare(
           `INSERT INTO imported_items
-           (subscription_id, remote_id, kind, state, version, created, updated, observed_at, content_md, content_html, content_hash, author_json, media_json, transclusions_json, l0, pinned_version_retained, page)
-           VALUES (?, ?, ?, 'current', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+           (subscription_id, remote_id, kind, state, version, created, updated, observed_at, content_md, content_html, content_hash, author_json, media_json, transclusions_json, l0, pinned_version_retained, page, stub_of_json, forked_from_json)
+           VALUES (?, ?, ?, 'current', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
         )
         .bind(
           subscriptionId, remoteId, d.kind, d.version, d.created, d.updated, observedAt,
           d.content_md, d.content_html, d.content_hash,
           JSON.stringify(d.author ?? null), JSON.stringify(d.media ?? []),
           d.transclusions ? JSON.stringify(d.transclusions) : null, l0,
-          d.page ?? null,
+          d.page ?? null, lineage(d.stub_of), lineage(d.forked_from),
         )
         .run();
       return;
@@ -194,7 +197,7 @@ export async function applyEffect(
            ON CONFLICT (subscription_id, remote_id) DO UPDATE SET
              state = 'tombstone', version = excluded.version, updated = excluded.updated, observed_at = excluded.observed_at,
              content_md = '', content_html = '', content_hash = NULL, author_json = NULL, media_json = NULL, transclusions_json = NULL,
-             pinned_version_retained = NULL`,
+             pinned_version_retained = NULL, stub_of_json = NULL, forked_from_json = NULL`,
         )
         .bind(subscriptionId, remoteId, effect.version, effect.updated, observedAt, l0)
         .run();
@@ -206,7 +209,7 @@ export async function applyEffect(
         .prepare(
           `UPDATE imported_items SET kind = ?, version = ?, updated = ?, observed_at = ?,
            content_md = ?, content_html = ?, content_hash = ?, author_json = ?, media_json = ?, transclusions_json = ?,
-           page = COALESCE(?, page)
+           page = COALESCE(?, page), stub_of_json = ?, forked_from_json = ?
            WHERE subscription_id = ? AND remote_id = ?`,
         )
         .bind(
@@ -214,7 +217,7 @@ export async function applyEffect(
           d.content_md, d.content_html, d.content_hash,
           JSON.stringify(d.author ?? null), JSON.stringify(d.media ?? []),
           d.transclusions ? JSON.stringify(d.transclusions) : null,
-          d.page ?? null,
+          d.page ?? null, lineage(d.stub_of), lineage(d.forked_from),
           subscriptionId, remoteId,
         )
         .run();
@@ -233,7 +236,8 @@ export async function applyEffect(
       await db
         .prepare(
           `UPDATE imported_items SET state = 'tombstone', version = ?, updated = ?, observed_at = ?,
-           content_md = '', content_html = '', content_hash = NULL, author_json = NULL, media_json = NULL, transclusions_json = NULL, pinned_version_retained = NULL
+           content_md = '', content_html = '', content_hash = NULL, author_json = NULL, media_json = NULL, transclusions_json = NULL, pinned_version_retained = NULL,
+           stub_of_json = NULL, forked_from_json = NULL
            WHERE subscription_id = ? AND remote_id = ?`,
         )
         .bind(effect.version, effect.updated, observedAt, subscriptionId, remoteId)
@@ -246,7 +250,7 @@ export async function applyEffect(
         .prepare(
           `UPDATE imported_items SET state = 'current', kind = ?, version = ?, updated = ?, observed_at = ?,
            content_md = ?, content_html = ?, content_hash = ?, author_json = ?, media_json = ?, transclusions_json = ?, pinned_version_retained = NULL,
-           page = COALESCE(?, page)
+           page = COALESCE(?, page), stub_of_json = ?, forked_from_json = ?
            WHERE subscription_id = ? AND remote_id = ?`,
         )
         .bind(
@@ -254,7 +258,7 @@ export async function applyEffect(
           d.content_md, d.content_html, d.content_hash,
           JSON.stringify(d.author ?? null), JSON.stringify(d.media ?? []),
           d.transclusions ? JSON.stringify(d.transclusions) : null,
-          d.page ?? null,
+          d.page ?? null, lineage(d.stub_of), lineage(d.forked_from),
           subscriptionId, remoteId,
         )
         .run();
@@ -265,14 +269,14 @@ export async function applyEffect(
       await db
         .prepare(
           `UPDATE imported_items SET content_md = ?, content_html = ?, content_hash = ?, author_json = ?, media_json = ?, transclusions_json = ?, observed_at = ?,
-           page = COALESCE(?, page)
+           page = COALESCE(?, page), stub_of_json = ?, forked_from_json = ?
            WHERE subscription_id = ? AND remote_id = ?`,
         )
         .bind(
           d.content_md, d.content_html, d.content_hash,
           JSON.stringify(d.author ?? null), JSON.stringify(d.media ?? []),
           d.transclusions ? JSON.stringify(d.transclusions) : null,
-          observedAt, d.page ?? null, subscriptionId, remoteId,
+          observedAt, d.page ?? null, lineage(d.stub_of), lineage(d.forked_from), subscriptionId, remoteId,
         )
         .run();
       return;
@@ -343,6 +347,18 @@ export async function listHoppers(db: D1Database): Promise<HopperRow[]> {
   return (await db.prepare("SELECT * FROM hoppers ORDER BY created ASC").all<HopperRow>()).results;
 }
 
+/** Public hoppers with their member counts, for the Collections list on public pages. */
+export async function listPublicHoppers(db: D1Database): Promise<(HopperRow & { count: number })[]> {
+  return (
+    await db
+      .prepare(
+        `SELECT h.*, COUNT(hi.remote_id) AS count FROM hoppers h LEFT JOIN hopper_items hi ON hi.hopper_id = h.id
+         WHERE h.public = 1 AND h.slug IS NOT NULL GROUP BY h.id ORDER BY h.name COLLATE NOCASE`,
+      )
+      .all<HopperRow & { count: number }>()
+  ).results;
+}
+
 export async function setHopperPublic(db: D1Database, id: string, isPublic: boolean): Promise<void> {
   // Publishing latches slug_frozen; un-publishing never clears it. Once a
   // /h/{slug}/ URL has existed, it stays the hopper's address (migration 0006).
@@ -357,25 +373,39 @@ export async function renameHopper(db: D1Database, id: string, name: string, slu
   await db.prepare("UPDATE hoppers SET name = ?, slug = ? WHERE id = ?").bind(name, slug, id).run();
 }
 
+// Interaction log (migration 0019): membership changes and thumb changes are
+// logged here, at the store, so every caller logs them. See src/interactions.ts.
+const LOG_HOPPER = `INSERT INTO interactions (at, kind, origin, remote_id, hopper_id, hopper_name)
+  SELECT ?, ?, s.origin, ?, h.id, h.name FROM hoppers h, subscriptions s WHERE h.id = ? AND s.id = ?`;
+const LOG_THUMB = `INSERT INTO interactions (at, kind, origin, remote_id) SELECT ?, ?, s.origin, ? FROM subscriptions s WHERE s.id = ?`;
+
 export async function deleteHopper(db: D1Database, id: string): Promise<void> {
   await db.batch([
+    // A deleted hopper's members leave it: logged as removals, so the history keeps the curation.
+    db.prepare(`INSERT INTO interactions (at, kind, origin, remote_id, hopper_id, hopper_name)
+      SELECT ?, 'hopper_remove', s.origin, hi.remote_id, h.id, h.name
+      FROM hopper_items hi JOIN hoppers h ON h.id = hi.hopper_id JOIN subscriptions s ON s.id = hi.subscription_id
+      WHERE hi.hopper_id = ?`).bind(nowIso(), id),
     db.prepare("DELETE FROM hopper_items WHERE hopper_id = ?").bind(id),
     db.prepare("DELETE FROM hoppers WHERE id = ?").bind(id),
   ]);
 }
 
 export async function addHopperItem(db: D1Database, hopperId: string, subscriptionId: string, remoteId: string): Promise<void> {
-  await db
+  const at = nowIso();
+  const res = await db
     .prepare("INSERT OR IGNORE INTO hopper_items (hopper_id, subscription_id, remote_id, added_at) VALUES (?, ?, ?, ?)")
-    .bind(hopperId, subscriptionId, remoteId, nowIso())
+    .bind(hopperId, subscriptionId, remoteId, at)
     .run();
+  if (res.meta.changes) await db.prepare(LOG_HOPPER).bind(at, "hopper_add", remoteId, hopperId, subscriptionId).run();
 }
 
 export async function removeHopperItem(db: D1Database, hopperId: string, subscriptionId: string, remoteId: string): Promise<void> {
-  await db
+  const res = await db
     .prepare("DELETE FROM hopper_items WHERE hopper_id = ? AND subscription_id = ? AND remote_id = ?")
     .bind(hopperId, subscriptionId, remoteId)
     .run();
+  if (res.meta.changes) await db.prepare(LOG_HOPPER).bind(nowIso(), "hopper_remove", remoteId, hopperId, subscriptionId).run();
 }
 
 export async function listHopperItems(db: D1Database, hopperId: string): Promise<HopperItemRow[]> {
@@ -399,11 +429,14 @@ export async function listHoppersForItem(db: D1Database, subscriptionId: string,
 }
 
 export async function setSignal(db: D1Database, subscriptionId: string, remoteId: string, thumb: 1 | -1): Promise<void> {
+  const before = await getSignal(db, subscriptionId, remoteId);
+  const at = nowIso();
+  if (before?.thumb !== thumb) await db.prepare(LOG_THUMB).bind(at, thumb === 1 ? "thumb_up" : "thumb_down", remoteId, subscriptionId).run();
   await db
     .prepare(
       "INSERT INTO signals (subscription_id, remote_id, thumb, at) VALUES (?, ?, ?, ?) ON CONFLICT(subscription_id, remote_id) DO UPDATE SET thumb = excluded.thumb, at = excluded.at",
     )
-    .bind(subscriptionId, remoteId, thumb, nowIso())
+    .bind(subscriptionId, remoteId, thumb, at)
     .run();
 }
 
@@ -415,5 +448,6 @@ export async function getSignal(db: D1Database, subscriptionId: string, remoteId
 }
 
 export async function deleteSignal(db: D1Database, subscriptionId: string, remoteId: string): Promise<void> {
-  await db.prepare("DELETE FROM signals WHERE subscription_id = ? AND remote_id = ?").bind(subscriptionId, remoteId).run();
+  const res = await db.prepare("DELETE FROM signals WHERE subscription_id = ? AND remote_id = ?").bind(subscriptionId, remoteId).run();
+  if (res.meta.changes) await db.prepare(LOG_THUMB).bind(nowIso(), "thumb_clear", remoteId, subscriptionId).run();
 }

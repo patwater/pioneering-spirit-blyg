@@ -16,8 +16,8 @@ This repository runs [Pioneering Spirit](https://pioneeringspirit.xyz) as a [Bly
         │ (posts, media)  │ or `npm run blyg`        │ at deploy time
 ```
 
-- `worker/` is a verbatim copy of the Blygger reference client (pinned in `upstream.json`). It provides the public blyg, the private **studio** editor at `/studio`, subscriptions to other blygs, transclusion, and TK (AI) generation. It is never edited here, so upgrades are a clean overwrite.
-- `server-ext/` is the Worker's entry point: a thin wrapper that adds the owner API Blygger Desktop needs (bearer-token auth, JSON reads, reading list, AI provenance, read-state sync) and hands everything else to `worker/` unchanged. See `server-ext/README.md`.
+- `worker/` is a verbatim copy of a [Blygger Studio](https://github.com/blygger/blygger-studio) release (pinned in `upstream.json`). It provides the public blyg, the private **studio** editor at `/studio` (a React app that is compiled when you install), the documented owner API at `/api`, subscriptions to other blygs, transclusion, and TK (AI) generation. It is never edited here, so upgrades are a clean overwrite.
+- `server-ext/` is the Worker's entry point: a thin wrapper that adds the owner API Blygger Desktop needs (bearer-token auth, JSON reads, reading list, AI provenance, read-state sync, and translation of the legacy write routes that Studio 0.9 removed) and hands everything else to `worker/` unchanged. See `server-ext/README.md`.
 - `wrangler.jsonc` holds everything specific to this deployment: the root mount, the custom domain, the database, the media bucket, and the static archive.
 - `blyg.settings.json` holds the site identity and the AI style prompt as code.
 - `corpus/` is the library you write in dialogue with: the Paragraph export, *A New California Dream*, Stag Hunt, and anything else.
@@ -31,8 +31,8 @@ You need Node 22 or newer, a Cloudflare account, and the `pioneeringspirit.xyz` 
 ### 1. Install
 
 ```bash
-npm install          # installs the root tooling and worker/
-npm test             # the upstream suite (500+ tests) should pass
+npm install          # installs the root tooling and worker/, and builds the studio app
+npm test             # the Studio suite (850+ tests) and the server-ext tests should pass
 ```
 
 ### 2. Provision Cloudflare
@@ -148,17 +148,19 @@ Blygger Desktop, Aneesh Sathe's native reading-and-writing app, is ported to Win
 cd burrow-blyg-windows- && BLYG_WORKER_DIR=../pioneering-spirit-blyg bash scripts/e2e-local.sh
 ```
 
-## Keeping the reference client current
+## Keeping Blygger Studio current
 
 ```bash
-npm run upgrade-worker          # or: npm run upgrade-worker -- <commit or tag>
+npm run upgrade-worker          # the newest vX.Y.Z release; or: npm run upgrade-worker -- <tag>
 git diff --stat worker          # read migration and config changes closely
-npm install && npm test
+npm install && npm test         # install rebuilds the studio app
 npm run migrate                 # only if worker/migrations gained files
 npm run deploy
 ```
 
-The protocol is pre-1.0, so upstream may change the wire format between versions. The upgrade script records the new commit in `upstream.json`.
+The script follows release tags rather than the tip of `main`, because Studio's own update notice compares against its releases. It checks the fetched release before it deletes anything in `worker/`, and it records the new tag and commit in `upstream.json`. Each release states its migrations and any `/api` changes in `worker/CHANGELOG.md`; read those before deploying, because `server-ext/compat.ts` only translates the routes that 0.9 removed.
+
+The studio app is compiled when `worker/` is installed, so a fresh `npm install` is what produces it. `npm run dev` and `npm run deploy` rebuild it first. A bare `wrangler deploy` does not, and with a stale `worker/build/` it would ship the old studio without any error.
 
 ## Local development
 

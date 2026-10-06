@@ -1,7 +1,10 @@
 {
-  "repo": "https://github.com/blygger/blygger-spec.git",
-  "path": "worker",
-  "commit": "c5884b9214b6972c3aed2fecf9aae68c9eab5267",
-  "date": "2026-09-25",
-  "note": "worker/ is a verbatim copy of this upstream path at this commit. Update it with `npm run upgrade-worker`, never by hand."
+  "repo": "https://github.com/blygger/blygger-studio.git",
+  "package": "@blygger/studio",
+  "path": ".",
+  "tag": "v0.26.0",
+  "version": "0.26.0",
+  "commit": "f69e7d78c6330a24979fcc0d0ba64fcd9639f406",
+  "date": "2026-10-04",
+  "note": "worker/ is a verbatim copy of this repository at this release (minus .git and .github). Update it with `npm run upgrade-worker`, never by hand."
 }

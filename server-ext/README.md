@@ -1,6 +1,6 @@
 # server-ext: owner-API extensions for Blygger Desktop
 
-This folder is the Worker entry point (`main` in `wrangler.jsonc`). It wraps the untouched reference client in `worker/` and adds the owner-only API that Blygger Desktop needs (`desktop/docs/SERVER.md`). Every public protocol surface and every existing studio and API route still goes to `worker/` unchanged, so nothing a reader or another blyg sees is different.
+This folder is the Worker entry point (`main` in `wrangler.jsonc`). It wraps the untouched Blygger Studio release in `worker/` and adds the owner-only API that Blygger Desktop needs (`desktop/docs/SERVER.md`). Every public protocol surface and every studio and API route that this folder does not extend still goes to `worker/` unchanged, so nothing a reader or another blyg sees is different.
 
 | # | Extension | Where |
 |---|---|---|
@@ -9,9 +9,10 @@ This folder is the Worker entry point (`main` in `wrangler.jsonc`). It wraps the
 | 3 | `GET /api/reading?limit&before` (opaque keyset cursor), `GET /api/mentions`, `GET /api/settings` (public-safe fields only), `GET /api/hoppers`, and `show_responses` on items | `reads.ts`, `cursor.ts` |
 | 4 | `GET`/`PUT /api/items/:id/tk-provenance`: text and position-keyed provenance written in one statement, validated first, never storing the instruction | `provenance.ts`, `provenance-check.ts` |
 | 5 | Read-state sync: `read_state`/`read_version` on the reading list, `PUT /api/reading/:sub/:remoteId/read`, `POST /api/reading/read` | `readstate.ts` |
+| 6 | Legacy writes that Studio 0.9 removed with no aliases (`PUT /api/items/:id`, `POST /api/fork`, `POST /api/items/:id/pin`, `PUT /api/settings`, and the rest of the table in `worker/docs/upgrading-to-0.11.md`) are rewritten into their replacements, so Blygger Desktop keeps working. | `compat.ts` |
 | + | `POST /api/media` de-duplicates identical bytes on the same item; `DELETE /api/media/:id` removes an attachment (409 for the avatar or a file a pinned version uses) | `media.ts` |
 
-Extension 5's table, `ext_read_state`, is created on first use rather than by a migration, because `worker/migrations` belongs to the reference Worker. The `ext_` prefix keeps it from colliding with a future upstream `read_state` table.
+Extension 5's table, `ext_read_state`, is created on first use rather than by a migration, because `worker/migrations` belongs to Blygger Studio. The `ext_` prefix keeps it from colliding with a future upstream `read_state` table.
 
 ## Turning it on
 
@@ -32,4 +33,9 @@ cd burrow-blyg-windows-
 BLYG_WORKER_DIR=../pioneering-spirit-blyg bash scripts/e2e-local.sh
 ```
 
-As of the import, 21 of its 22 tests pass. The one failure, `tk_output_with_dollar_patterns_publishes_verbatim`, is a bug in the reference Worker, not here: `worker/src/tk.ts` line 247 splices generated HTML with `out.replace(token, blockHtml)`, so `$&`, `` $` ``, `$'`, or `$$` inside AI-generated text are read as replacement patterns. The fix is `out.replace(token, () => blockHtml)`; it belongs upstream in `blygger/blygger-spec`, and arrives here through `npm run upgrade-worker`.
+As of Blygger Studio 0.26.0, 20 of its 22 tests pass. The two that fail encode image behaviour that Studio 0.11.0 changed on purpose (its changelog: items now publish absolute image URLs, and relative ones in imported items resolve against the source blyg), so they need updating in the Windows app's repository rather than fixing here:
+
+- `pasted_images_render_once_inline` asserts that a relative `media/…` image 404s on the published page, and it now resolves with a 200.
+- `reading_items_carry_the_published_html` expects relative `src` attributes in a reading item's HTML, and it now receives `src="http://…/media/….png"`.
+
+`tk_output_with_dollar_patterns_publishes_verbatim`, which failed against the old reference Worker, passes now that upstream splices TK output with a function replacement.

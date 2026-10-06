@@ -1,42 +1,25 @@
-// Blygger v0.1 "Seed" — route wiring. Public surface per v0.1-plan §3.3.
-//
-// Session 8 (locked decision #14): the public surface's mount path is
-// deployment config (Env.MOUNT, default /blyg), freely assignable including
-// "" = domain root. Routes are built per-mount by makeApp() and memoized.
-// /studio is client furniture, not protocol surface (decision #3) — nested
-// under the mount since session 16 (venkateshrao.com/blyg/studio, not
-// venkateshrao.com/studio) so a non-root deployment doesn't put studio at a
-// URL that looks unrelated to its own public page; a root-mount deployment
-// (mount="") is unaffected, since mount+"/studio" === "/studio" there. /api
-// stays host-rooted regardless of mount — it's invisible plumbing the
-// studio JS calls into, never a bookmarked/navigated URL, so nesting it
-// bought nothing and would have meant threading a mount-aware base through
-// every embedded fetch() call in studio.ts/importer/studio.ts instead of
-// just the human-facing links. Registration order matters at root mount:
-// studio/api handlers are registered before the public sub-app so its cache
-// middleware never wraps them — verified this still holds with studio
-// nested under a non-root mount too (no path collision: pub has no /studio
-// route, and studio/api are still registered on `app` before `pub` is
-// attached).
+import { listFeedItems } from "./public-feed.ts";
+import { studioSpa } from "./spa.ts";
+import { ownerApi } from "./owner-api.ts";
+// Studio is mounted at {mount}/studio and its assets share that range.
+// The owner API remains host-rooted at /api. Register both before the public
+// sub-app so public-page cache middleware cannot wrap private responses.
 
 import { type Context, Hono } from "hono";
-import { api } from "./api.ts";
-import { verifySession } from "./auth.ts";
-import { importerApi } from "./importer/api.ts";
+
+
 import { buildBlogrollOpml } from "./importer/opml.ts";
 import { publicHopperPage } from "./importer/pages.ts";
 import { runScheduledPoll } from "./importer/schedule.ts";
-import { importerStudio } from "./importer/studio.ts";
 import { getHopperBySlug, getImportedItem, getSubscription, listBlogrollSubscriptions, listHopperItems } from "./importer/store.ts";
 import { authoredKind, getItem, getMedia, getSettings, getVersion, listPublic } from "./model.ts";
 import { archivePage, feedPage, permalinkPage, pinnedVersionPage, STYLE_CSS, themeCss, threadPage } from "./pages.ts";
 import { buildArchiveIndex, buildFeedXml, buildItemJson, buildManifest, buildPinnedVersionJson, siteOrigin } from "./protocol.ts";
 import { mentionFetch } from "./mentions/http.ts";
 import { receiveMention, verifyMention } from "./mentions/receive.ts";
-import { mentionsApi } from "./mentions/api.ts";
+
 import { drainOutbound } from "./mentions/send.ts";
-import { mentionsStudio } from "./mentions/studio.ts";
-import { studio } from "./studio.ts";
+import { pruneFailedInbound } from "./mentions/store.ts";
 import type { Env, Settings } from "./types.ts";
 import { FEED_PAGE_SIZE, WEBMENTION_PATH } from "./types.ts";
 import { normalizeMount, studioPath } from "./util.ts";
@@ -50,32 +33,9 @@ export function makeApp(mount: string) {
 
   // --- Studio: cookie auth, mount-relative (see header note). API: cookie auth, host-rooted. Registered first. ---
 
-  const studioBase = studioPath(mount);
-  const studioLogin = studioBase + "/login";
+  app.route(studioPath(mount), studioSpa(mount));
 
-  app.use(studioBase + "/*", async (c, next) => {
-    const path = new URL(c.req.url).pathname;
-    if (path === studioLogin || path === studioBase + "/logout") return next();
-    if (!(await verifySession(c.env, c.req.header("cookie")))) return c.redirect(studioLogin);
-    return next();
-  });
-  app.use(studioBase, async (c, next) => {
-    if (!(await verifySession(c.env, c.req.header("cookie")))) return c.redirect(studioLogin);
-    return next();
-  });
-  app.route(studioBase, studio);
-  app.route(studioBase, importerStudio);
-  app.route(studioBase, mentionsStudio);
-
-  app.use("/api/*", async (c, next) => {
-    if (!(await verifySession(c.env, c.req.header("cookie")))) {
-      return c.json({ error: "unauthorized" }, 401);
-    }
-    return next();
-  });
-  app.route("/api", api);
-  app.route("/api", importerApi);
-  app.route("/api", mentionsApi);
+  app.route("/api", ownerApi);
 
   // --- Public surface: mount-relative — cache 60s; JSON/XML get permissive CORS. ---
 
@@ -90,8 +50,7 @@ export function makeApp(mount: string) {
 
   // strict:false: serves both {mount} and {mount}/ (and "/" at root mount).
   pub.get("/", async (c) => {
-    const settings = await getSettings(c.env.DB);
-    const items = await listPublic(c.env.DB, FEED_PAGE_SIZE + 1);
+    const [settings, items] = await Promise.all([getSettings(c.env.DB), listFeedItems(c.env.DB, FEED_PAGE_SIZE + 1)]);
     const hasMore = items.length > FEED_PAGE_SIZE;
     return c.html(await feedPage(c.env.DB, settings, items.slice(0, FEED_PAGE_SIZE), hasMore, mount, siteOrigin(settings, c.req.url, mount)));
   });
@@ -149,7 +108,8 @@ export function makeApp(mount: string) {
       if (!sub) continue;
       items.push({ row, sub });
     }
-    return c.html(await publicHopperPage(hopper, items, mount));
+    const settings = await getSettings(c.env.DB);
+    return c.html(await publicHopperPage(c.env.DB, settings, hopper, items, mount, siteOrigin(settings, c.req.url, mount)));
   });
 
   pub.get("/items/:file", async (c) => {
@@ -188,6 +148,11 @@ export function makeApp(mount: string) {
    */
   pub.post("/webmention", async (c) => {
     const settings = await getSettings(c.env.DB);
+    // §15 is OPTIONAL at every level, so a blyg may decline to receive. 404
+    // rather than 403: when mentions are off nothing here is advertised, so the
+    // honest answer to a sender is that this blyg has no endpoint — the same
+    // answer a static export gives.
+    if (!settings.accept_mentions) return c.notFound();
     const origin = siteOrigin(settings, c.req.url, mount);
     const form = await c.req.parseBody().catch(() => ({}) as Record<string, unknown>);
     const outcome = await receiveMention(
@@ -198,8 +163,12 @@ export function makeApp(mount: string) {
     // Never cacheable: the public sub-app stamps 60s on anything without a
     // Cache-Control, and a mention endpoint's answer is about one claim.
     c.header("Cache-Control", "no-store");
+    // A rate limit is a rolling hour, so an hour is the honest upper bound on
+    // when a slot frees — said in the header so a well-behaved sender waits
+    // instead of retrying into the cap.
+    if (outcome.status === 429) c.header("Retry-After", "3600");
     if (outcome.status !== 202) return c.json({ error: outcome.error }, outcome.status);
-    const { mentionId, source, target } = outcome;
+    const { mentionId, source } = outcome;
     const itemId = (await c.env.DB.prepare("SELECT target_item_id FROM mentions_in WHERE id = ?").bind(mentionId).first<{ target_item_id: string }>())!
       .target_item_id;
     // Verification runs after the response and can never fail the response:
@@ -210,6 +179,7 @@ export function makeApp(mount: string) {
 
   /** W3C discovery also allows the endpoint in a Link header, so item pages carry both. */
   const webmentionLink = (c: Context<{ Bindings: Env }>, settings: Settings) => {
+    if (!settings.accept_mentions) return;
     c.header("Link", `<${siteOrigin(settings, c.req.url, mount)}${WEBMENTION_PATH}>; rel="webmention"`);
   };
 
@@ -300,5 +270,9 @@ export default {
     // Outbound mentions retry here (§2.3.4): the publish path tries once
     // immediately, and a receiver that was down gets it on a later tick.
     ctx.waitUntil(drainOutbound(env.DB, mentionFetch).catch(() => {}));
+    // Housekeeping (§9.1 gap 3): `failed` inbound claims are kept for 30 days
+    // and then dropped. Here rather than on the endpoint, because the request
+    // path must not do work that a flood would multiply.
+    ctx.waitUntil(pruneFailedInbound(env.DB).catch(() => {}));
   },
 };
