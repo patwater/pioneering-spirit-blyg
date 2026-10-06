@@ -66,8 +66,16 @@ async function fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Res
   const route = match(req.method, path);
   if (route) {
     if (auth === "none") return json({ error: "unauthorized" }, 401);
-    const res = await route.handler(req, env, route.params);
-    if (res) return res;
+    // These shapes are Blygger Desktop's, and Desktop signs in with the bearer
+    // token. The browser studio uses a cookie and expects the studio's own
+    // shapes for the same paths (for example `GET /api/items` paged with
+    // `offset`, `limit` and `total`), so a cookie session must reach the
+    // studio untouched. Answering it here leaves the studio's item list
+    // paging forever and its page blank.
+    if (auth === "bearer") {
+      const res = await route.handler(req, env, route.params);
+      if (res) return res;
+    }
   }
   // The reference Worker's own /api routes, with a bearer turned into the
   // owner session it expects. That session is signed with COOKIE_SECRET; say

@@ -1,6 +1,6 @@
 # server-ext: owner-API extensions for Blygger Desktop
 
-This folder is the Worker entry point (`main` in `wrangler.jsonc`). It wraps the untouched Blygger Studio release in `worker/` and adds the owner-only API that Blygger Desktop needs (`desktop/docs/SERVER.md`). Every public protocol surface and every studio and API route that this folder does not extend still goes to `worker/` unchanged, so nothing a reader or another blyg sees is different.
+This folder is the Worker entry point (`main` in `wrangler.jsonc`). It wraps the untouched Blygger Studio release in `worker/` and adds the owner-only API that Blygger Desktop needs (`desktop/docs/SERVER.md`). Every public protocol surface and every studio and API route that this folder does not extend still goes to `worker/` unchanged, so nothing a reader or another blyg sees is different. The extensions below answer bearer-token callers only, which is Blygger Desktop. A cookie session, which is what the browser studio and the CLI use, always reaches the studio's own `/api`, because several of the extended paths (`GET /api/items`, `/api/settings`, `/api/reading`, and others) have different shapes there, and answering the studio in Desktop's shape leaves its item list paging forever.
 
 | # | Extension | Where |
 |---|---|---|
