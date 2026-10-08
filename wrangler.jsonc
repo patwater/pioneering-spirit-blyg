@@ -12,6 +12,19 @@
   "main": "server-ext/src/index.ts",
   "compatibility_date": "2026-07-01",
 
+  // Studio 0.28 needs Node compatibility (OAuth and MCP support).
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Public HTML pages (homepage, archive, item pages) are cached at the edge
+  // for 60 seconds through the PublicHtml entrypoint, which server-ext/
+  // re-exports from worker/. The router, studio, API, media, and wire files
+  // stay uncached. A publish or withdrawal can take up to a minute to reach
+  // readers. This is the same block Studio's own template carries.
+  "cache": { "enabled": false },
+  "exports": {
+    "PublicHtml": { "type": "worker", "cache": { "enabled": true } }
+  },
+
   // Pin the Cloudflare account so a deploy can never land somewhere else
   // (upstream incident 2026-09-12-01). Find it in the dashboard sidebar or
   // with `npx wrangler whoami`. It is an identifier, not a secret.
@@ -45,9 +58,11 @@
   // settings, so a dashboard-only toggle is reset by the next push.
   "observability": { "enabled": true },
 
-  // Poll subscriptions and retry outbound webmentions every 15 minutes.
+  // Every minute: refresh the saved feed. Every 15 minutes: poll subscriptions
+  // and retry outbound webmentions. Daily at midnight UTC: repair imported
+  // URLs and prune expired mentions.
   "triggers": {
-    "crons": ["*/15 * * * *"]
+    "crons": ["* * * * *", "*/15 * * * *", "0 0 * * *"]
   },
 
   "d1_databases": [

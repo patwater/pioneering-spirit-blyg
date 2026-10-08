@@ -19,10 +19,12 @@ const fields = [
   'site_title',
   'theme',
   'author_name',
+  'author_url',
   'author_bio',
   'author_links',
   'site_url',
   'timezone',
+  'picker_typing',
   'avatar_media_id',
   'ai_model_tk',
   'ai_model_changelog',
@@ -32,6 +34,7 @@ const fields = [
   'accept_mentions',
   'update_check',
   'show_responses_default',
+  'highlight_generated_default',
   'auto_change_notes',
   'update_feed_url',
 ] as const;
@@ -99,6 +102,7 @@ function SettingsForm({ initial }: { initial: Settings }) {
     key:
       | 'site_title'
       | 'author_name'
+      | 'author_url'
       | 'author_bio'
       | 'site_url'
       | 'ai_style_prompt'
@@ -135,6 +139,7 @@ function SettingsForm({ initial }: { initial: Settings }) {
     key:
       | 'update_check'
       | 'show_responses_default'
+      | 'highlight_generated_default'
       | 'accept_mentions'
       | 'auto_change_notes',
     label: string,
@@ -186,6 +191,7 @@ function SettingsForm({ initial }: { initial: Settings }) {
         <h3 className="card-h">profile</h3>
         {field('site_title', 'Site title')}
         {field('author_name', 'Author name')}
+        {field('author_url', 'Author URL', false, 'blank = this blyg\'s own address')}
         {field('author_bio', 'Bio', true)}
         <div className="field">
           <label htmlFor="author_links">
@@ -307,6 +313,43 @@ function SettingsForm({ initial }: { initial: Settings }) {
               );
             })}
           </div>
+        </div>
+        {toggle(
+          'highlight_generated_default',
+          'Highlight generated portions by default',
+          <>
+            Text written by <code>[TK]</code> generation shows on your public
+            pages in a lightly tinted, outlined box, in every theme. A post can
+            override this in its editor's TK card.
+          </>,
+        )}
+      </section>
+      <section className="card">
+        <h3 className="card-h">writing</h3>
+        <div className="field" role="radiogroup" aria-labelledby="picker_typing-label">
+          <span id="picker_typing-label">
+            When you type <code>[[</code> or <code>![[</code>, search by typing in
+          </span>
+          {(
+            [
+              ['auto', 'Automatic', 'the editor with a mouse, the picker on a touch screen, where it fills the screen'],
+              ['editor', 'The editor', 'keep typing after the brackets; arrow keys and Enter pick'],
+              ['panel', 'The picker', 'the picker opens with its own search box'],
+            ] as const
+          ).map(([value, label, hint]) => (
+            <label className="check" key={value}>
+              <input
+                type="radio"
+                name="picker_typing"
+                value={value}
+                checked={form.picker_typing === value}
+                onChange={() => change('picker_typing', value)}
+              />
+              <span>
+                {label} <span className="hint">{hint}</span>
+              </span>
+            </label>
+          ))}
         </div>
       </section>
       <section className="card">

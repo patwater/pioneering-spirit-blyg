@@ -234,6 +234,12 @@ const config = `{
   "name": "blyg-${marker.slug}",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-01",
+
+  // Only public HTML uses the shared 60-second cache. The router stays uncached.
+  "cache": { "enabled": false },
+  "exports": {
+    "PublicHtml": { "type": "worker", "cache": { "enabled": true } }
+  },
   "account_id": "${marker.accountId}",
 
   "vars": {
@@ -241,10 +247,10 @@ const config = `{
     "MOUNT": ""
   },
 
-  // Poll subscriptions. This is what makes other people's writing show up in
-  // your reading tab; without it your blyg publishes but never reads.
+  // Check saved XML every minute; poll due subscriptions every 15 minutes.
+  // Repair legacy imports and prune expired mentions daily at midnight UTC.
   "triggers": {
-    "crons": ["*/15 * * * *"]
+    "crons": ["* * * * *", "*/15 * * * *", "0 0 * * *"]
   },
 
   "routes": [

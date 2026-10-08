@@ -1,0 +1,106 @@
+name: Upgrade Blygger Studio
+
+# Checks for a newer Blygger Studio release every Monday. If there is one, it
+# runs `npm run upgrade-worker`, then the typecheck, the tests, and a smoke
+# test against a local copy of the Worker, and opens a pull request.
+#
+# It never merges. Merging deploys to the live site and applies any new
+# migrations to the live database first, and Studio releases have asked for
+# configuration changes by hand (for example `nodejs_compat` and extra cron
+# triggers in wrangler.jsonc). The pull request body lists the new migrations
+# and the releases that ask for something, so a person reads them first.
+#
+# Settings it needs: Settings > Actions > General > "Allow GitHub Actions to
+# create and approve pull requests".
+
+on:
+  schedule:
+    - cron: "23 15 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upgrade-studio
+  cancel-in-progress: false
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Stop if an upgrade pull request is already open
+        id: open
+        run: |
+          n=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --json headRefName \
+            --jq '[.[] | select(.headRefName | startswith("automation/studio-"))] | length')
+          echo "count=$n" >> "$GITHUB_OUTPUT"
+          if [ "$n" != "0" ]; then echo "A studio upgrade pull request is already open; nothing to do."; fi
+
+      - uses: actions/checkout@v4
+        if: steps.open.outputs.count == '0'
+
+      - uses: actions/setup-node@v4
+        if: steps.open.outputs.count == '0'
+        with:
+          node-version-file: .node-version
+
+      - name: Upgrade worker/ to the newest release
+        id: upgrade
+        if: steps.open.outputs.count == '0'
+        run: |
+          old=$(node -p "require('./upstream.json').version")
+          node tools/upgrade-worker.mjs
+          new=$(node -p "require('./upstream.json').version")
+          echo "old=$old" >> "$GITHUB_OUTPUT"
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+          if [ "$old" = "$new" ]; then echo "Already on Studio $new."; echo "changed=false" >> "$GITHUB_OUTPUT"; else echo "changed=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Install
+        if: steps.upgrade.outputs.changed == 'true'
+        run: npm install
+
+      - name: Typecheck
+        if: steps.upgrade.outputs.changed == 'true'
+        run: npm run typecheck
+
+      - name: Test
+        if: steps.upgrade.outputs.changed == 'true'
+        run: npm test
+
+      - name: Smoke test a local Worker
+        if: steps.upgrade.outputs.changed == 'true'
+        run: |
+          printf 'OWNER_PASSWORD=ci\nCOOKIE_SECRET=ci-cookie-secret-ci-cookie-secret\nBLYG_OWNER_TOKEN=ci-token\n' > "$RUNNER_TEMP/dev.vars"
+          npx wrangler d1 migrations apply pioneering-spirit-blyg --local --persist-to "$RUNNER_TEMP/state"
+          npx wrangler dev --port 8787 --persist-to "$RUNNER_TEMP/state" --env-file "$RUNNER_TEMP/dev.vars" > "$RUNNER_TEMP/dev.log" 2>&1 &
+          for i in $(seq 1 60); do grep -q "Ready on" "$RUNNER_TEMP/dev.log" && break; sleep 2; done
+          BLYG_URL=http://localhost:8787 BLYG_PASSWORD=ci BLYG_OWNER_TOKEN=ci-token npm run smoke || { cat "$RUNNER_TEMP/dev.log"; exit 1; }
+
+      - name: Open the pull request
+        if: steps.upgrade.outputs.changed == 'true'
+        env:
+          OLD: ${{ steps.upgrade.outputs.old }}
+          NEW: ${{ steps.upgrade.outputs.new }}
+        run: |
+          branch="automation/studio-$NEW"
+          node tools/upgrade-notes.mjs "$OLD" "$NEW" > "$RUNNER_TEMP/notes.md"
+          {
+            echo "This moves \`worker/\` from Blygger Studio $OLD to $NEW with \`npm run upgrade-worker\`. The typecheck, the tests, and a smoke test against a local Worker passed before this pull request was opened."
+            echo
+            cat "$RUNNER_TEMP/notes.md"
+            echo
+            echo "## Before merging"
+            echo
+            echo "Merging deploys to the live site and applies any new migrations to the live database first. Read the release notes in \`worker/CHANGELOG.md\` for every version above, and check \`worker/wrangler.jsonc\` against \`wrangler.jsonc\` for settings the studio now expects. Blygger Desktop's end-to-end suite is not run here: from a checkout of burrow-blyg-windows- run \`BLYG_WORKER_DIR=<this repo> bash scripts/e2e-local.sh\`. After the deploy, \`BLYG_URL=https://pioneeringspirit.xyz BLYG_PASSWORD=... npm run smoke\` checks the live studio."
+          } > "$RUNNER_TEMP/body.md"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add -A
+          git commit -m "Upgrade Blygger Studio from $OLD to $NEW"
+          git push origin "$branch"
+          gh pr create --base main --head "$branch" --title "Upgrade Blygger Studio to $NEW" --body-file "$RUNNER_TEMP/body.md"
