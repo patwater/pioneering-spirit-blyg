@@ -3,6 +3,7 @@
 
 import { attachedQuote } from "./directives.ts";
 import { codeRanges, htmlCodeRanges, inRanges, lineOffsets, type Range } from "./code-ranges.ts";
+import { sanitizeHtml } from "./importer/sanitize.ts";
 import { blygItemUrl } from "./importer/util.ts";
 import { excerptFromHtml, renderMarkdown, selectionText } from "./markdown.ts";
 import type { ImportedItemRow, ItemRow, TextQuoteSelector, Transclusion, VersionRow } from "./types.ts";
@@ -391,12 +392,16 @@ export async function resolveTransclusions(db: D1Database, contentMd: string, se
  * time (see resolveTransclusions above); not a protocol surface.
  */
 export async function previewTransclusions(db: D1Database, contentMd: string, selfId?: string): Promise<ResolveResult> {
-  return walk(
+  const result = await walk(
     db,
     contentMd,
     (err) => `<blockquote class="blyg-transclusion unresolved"><p>⚠ unresolvable: ${escapeHtml(err.reason)}</p></blockquote>`,
     selfId,
   );
+  // Publish bakes the target's HTML verbatim (§5.2, §10.2), so the walk does
+  // not sanitize. The preview is displayed in the owner's studio, and every
+  // display sanitizes at render, as the public pages do with the baked thread.
+  return { ...result, html: await sanitizeHtml(result.html) };
 }
 
 // --- `[[id]]` plain internal links (§16.2, decision #32) ---
@@ -417,12 +422,17 @@ export interface InternalLinkDocument {
 
 /**
  * The anchor's text. Items are titleless by design (§5.3), so an id would be
- * the one label guaranteed to mean nothing to a reader — this uses a short
- * excerpt of the target in quotes, which reads as a citation inside running
- * prose. Presentation, and ours to choose (§16.2); it is frozen into
- * `content_html` at publish like every other rendered thing.
+ * the one label guaranteed to mean nothing to a reader. When the target opens
+ * with a heading (a thread's markdown H1 is its title by convention) that
+ * heading is the label, as plain text; otherwise this uses a short excerpt of
+ * the target in quotes, which reads as a citation inside running prose.
+ * Presentation, and ours to choose (§16.2); it is frozen into `content_html`
+ * at publish like every other rendered thing.
  */
 function anchorText(target: ResolvedTarget): string {
+  const heading = /^\s*<h[1-6]\b[^>]*>([\s\S]*?)<\/h[1-6]>/i.exec(target.contentHtml);
+  const title = heading ? excerptFromHtml(heading[1], 80) : "";
+  if (title) return title;
   const excerpt = excerptFromHtml(target.contentHtml, 60);
   return excerpt ? `“${excerpt}”` : `${target.kind === "thread" ? "a thread" : "a fragment"}`;
 }

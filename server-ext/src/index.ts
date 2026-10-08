@@ -15,6 +15,11 @@
 // routes; nothing here changes what a reader or another blyg sees.
 
 import reference from "../../worker/src/index.ts";
+
+// The studio's edge-cached public-page entrypoint. Wrangler's `exports` block
+// (wrangler.jsonc) finds it by name on the Worker's main module, so it must be
+// re-exported from here.
+export { PublicHtml } from "../../worker/src/index.ts";
 import { authenticate, withSession } from "./auth.ts";
 import { translateLegacy } from "./compat.ts";
 import { type Env, json } from "./http.ts";

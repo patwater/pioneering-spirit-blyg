@@ -16,7 +16,7 @@ import type { FetchLike, FetchInit } from "../src/importer/http.ts";
 import { applyEffect, createSubscription } from "../src/importer/store.ts";
 import { transition } from "../src/importer/transition.ts";
 import { discoverEndpoint, endpointFromHtml, endpointFromLinkHeader } from "../src/mentions/discover.ts";
-import { receiveMention, relationTo, verifyMention } from "../src/mentions/receive.ts";
+import { receiveMention, relationTo, targetItemId, verifyMention } from "../src/mentions/receive.ts";
 import { drainOutbound } from "../src/mentions/send.ts";
 import {
   FAILED_INBOUND_RETENTION_MS,
@@ -24,8 +24,11 @@ import {
   INBOUND_DOMAIN_HOURLY_LIMIT,
   INBOUND_GLOBAL_HOURLY_LIMIT,
   INBOUND_HOURLY_LIMIT,
+  INBOUND_PENDING_LIMIT,
+  INBOUND_PENDING_WINDOW_MS,
   listOutbound,
   markInboundUnverified,
+  markInboundVerified,
   markOutbound,
   pruneFailedInbound,
   registrableDomain,
@@ -44,6 +47,10 @@ interface Recorded {
 }
 
 /** A FetchLike over a fixed URL map that also records what was sent to it. */
+function pageLinking(docUrl: string): string {
+  return `<html><head><link rel="alternate" type="application/json" href="${docUrl}"></head><body></body></html>`;
+}
+
 function fixtureNet(map: Record<string, { status?: number; body?: string; headers?: Record<string, string> }>): {
   fetch: FetchLike;
   calls: Recorded[];
@@ -473,6 +480,52 @@ describe("receiving and structural verification (§2.3.5)", () => {
     expect(res.reason).toMatch(/not a blyg item/);
   });
 
+  // Decision #61 (spec §15.4 step 2, eighth revision; conformance F1 and F4).
+  it("a blyg path-mounted on the same host cannot verify in another's name (F1)", async () => {
+    const { id, target } = await ourItem();
+    // Alice's document is served from alice's path but claims carol's origin.
+    const alice = sourceFixture({ origin: "https://shared.example/alice/", docOrigin: "https://shared.example/carol/", stubTargetId: id });
+    const net = fixtureNet(alice.map);
+    const out = await receiveMention(env.DB, { source: alice.page, target }, OURS);
+    const res = await verifyMention(env.DB, (out as { mentionId: string }).mentionId, alice.page, id, OURS, net.fetch);
+    expect(res.status).toBe("failed");
+    expect(res.reason).toMatch(/origin mismatch/);
+  });
+
+  it("a pinned version file never verifies a mention (F4)", async () => {
+    const { id, target } = await ourItem();
+    const src = sourceFixture({ stubTargetId: id });
+    // A pinned page whose alternate names the pin file, which still carries
+    // stub_of — while the live document may long since be an endcap.
+    const pinUrl = `${THEIRS}items/${src.id}/v2.json`;
+    const pinPage = `${THEIRS}t/${src.id}/v2/`;
+    const map = {
+      [pinPage]: { body: `<html><head><link rel="alternate" type="application/json" href="${pinUrl}"></head></html>` },
+      [pinUrl]: src.map[`${THEIRS}items/${src.id}.json`],
+    };
+    const net = fixtureNet(map);
+    const out = await receiveMention(env.DB, { source: pinPage, target }, OURS);
+    const res = await verifyMention(env.DB, (out as { mentionId: string }).mentionId, pinPage, id, OURS, net.fetch);
+    expect(res.status).toBe("failed");
+    expect(res.reason).toMatch(/origin mismatch/);
+  });
+
+  it("host case and a default port do not defeat an honest document", async () => {
+    const { id, target } = await ourItem();
+    const src = sourceFixture({ stubTargetId: id, docOrigin: "HTTPS://Friend.Example:443/blyg" });
+    const net = fixtureNet(src.map);
+    const out = await receiveMention(env.DB, { source: src.page, target }, OURS);
+    const res = await verifyMention(env.DB, (out as { mentionId: string }).mentionId, src.page, id, OURS, net.fetch);
+    expect(res.status).toBe("verified");
+  });
+
+  it("a target on our host but outside our mount names nothing of ours (§15.3)", async () => {
+    const { id } = await ourItem();
+    expect(await targetItemId(env.DB, new URL(`https://example.com/f/${id}/`), OURS)).toBeNull();
+    expect(await targetItemId(env.DB, new URL(`https://example.com/blygx/f/${id}/`), OURS)).toBeNull();
+    expect(await targetItemId(env.DB, new URL(`${OURS}f/${id}/`), OURS)).toBe(id);
+  });
+
   it("rejects malformed claims syntactically, before any fetch", async () => {
     const { target } = await ourItem();
     const cases: [string, { source?: string; target?: string }][] = [
@@ -504,6 +557,8 @@ describe("receiving and structural verification (§2.3.5)", () => {
     for (let i = 0; i < INBOUND_HOURLY_LIMIT; i++) {
       await upsertInbound(env.DB, `https://flood.example/t/${i}/`, target, id, new Date(now).toISOString());
     }
+    // These rows stand for claims already resolved; the pending cap (row 11) is tested on its own.
+    await env.DB.prepare("UPDATE mentions_in SET status = 'failed' WHERE target_item_id = ?").bind(id).run();
     const res = await receiveMention(env.DB, { source: "https://flood.example/t/last/", target }, OURS, now);
     expect(res.status).toBe(429);
     // A different host is unaffected — the limit is per source host.
@@ -519,6 +574,8 @@ describe("receiving and structural verification (§2.3.5)", () => {
     for (let i = 0; i < INBOUND_DOMAIN_HOURLY_LIMIT; i++) {
       await upsertInbound(env.DB, `https://h${i}.spam.example/t/x/`, target, id, new Date(now).toISOString());
     }
+    // These rows stand for claims already resolved; the pending cap (row 11) is tested on its own.
+    await env.DB.prepare("UPDATE mentions_in SET status = 'failed' WHERE target_item_id = ?").bind(id).run();
     const res = await receiveMention(env.DB, { source: "https://h999.spam.example/t/x/", target }, OURS, now);
     expect(res.status).toBe(429);
     expect((res as { error: string }).error).toMatch(/domain/);
@@ -540,6 +597,39 @@ describe("receiving and structural verification (§2.3.5)", () => {
     expect((res as { error: string }).error).toMatch(/hourly limit/);
     // An hour later the window has rolled and the endpoint accepts again.
     const later = now + 61 * 60_000;
+    expect((await receiveMention(env.DB, { source: "https://newcomer.example/t/x/", target }, OURS, later)).status).toBe(202);
+  });
+
+  it("refuses the same pair claimed again within a minute, without touching the stored row (row 11)", async () => {
+    const { target } = await ourItem();
+    const now = Date.parse("2026-10-07T12:00:00Z");
+    const source = `${THEIRS}t/x/`;
+    const first = await receiveMention(env.DB, { source, target }, OURS, now);
+    expect(first.status).toBe(202);
+    const row = await getInbound(env.DB, (first as { mentionId: string }).mentionId);
+    await markInboundVerified(env.DB, row!.id, { relation: "stub", sourceOrigin: THEIRS, sourceId: "x", sourceKind: "thread", sourceVersion: 1, authorJson: null, sourcePage: source });
+    const again = await receiveMention(env.DB, { source, target }, OURS, now + 10_000);
+    expect(again.status).toBe(429);
+    expect((again as { retryAfter: number }).retryAfter).toBe(50);
+    // Still verified, attempts not bumped: the repeat cost nothing and changed nothing.
+    const after = await getInbound(env.DB, row!.id);
+    expect(after?.status).toBe("verified");
+    expect(after?.attempts).toBe(row?.attempts);
+    // After the cooldown it is accepted and re-verified as before.
+    expect((await receiveMention(env.DB, { source, target }, OURS, now + 61_000)).status).toBe(202);
+  });
+
+  it("caps claims awaiting verification, and a wedged pending row ages out of the count (row 11)", async () => {
+    const { id, target } = await ourItem();
+    const now = Date.parse("2026-10-07T12:00:00Z");
+    for (let i = 0; i < INBOUND_PENDING_LIMIT; i++) {
+      await upsertInbound(env.DB, `https://p${i}.example/t/x/`, target, id, new Date(now).toISOString());
+    }
+    const res = await receiveMention(env.DB, { source: "https://newcomer.example/t/x/", target }, OURS, now);
+    expect(res.status).toBe(429);
+    expect((res as { error: string }).error).toMatch(/awaiting verification/);
+    // Verified and failed rows do not count, only pending ones.
+    const later = now + INBOUND_PENDING_WINDOW_MS + 1000;
     expect((await receiveMention(env.DB, { source: "https://newcomer.example/t/x/", target }, OURS, later)).status).toBe(202);
   });
 
@@ -581,7 +671,7 @@ describe("receiving and structural verification (§2.3.5)", () => {
 
     const gone = sourceFixture({ id: src.id, stubTargetId: id, withdrawn: true });
     net = fixtureNet(gone.map);
-    const again = await receiveMention(env.DB, { source: src.page, target }, OURS);
+    const again = await receiveMention(env.DB, { source: src.page, target }, OURS, Date.now() + 2 * 60_000);
     expect((again as { mentionId: string }).mentionId).toBe(mentionId);
     await verifyMention(env.DB, mentionId, src.page, id, OURS, net.fetch);
     const row = await getInbound(env.DB, mentionId);
@@ -639,7 +729,10 @@ describe("detect stubs — /studio/mentions (§3.3)", () => {
     await importFrom(THEIRS, { id: knownId, kind: "thread", version: 1, content_md: "their stub" }, "Friend Blyg");
     const known = await upsertInbound(env.DB, `${THEIRS}t/${knownId}/`, `${OURS}f/${mine}/`, mine);
     const net = fixtureNet({
-      [`${THEIRS}t/${knownId}/`]: {
+      // The page names its document, which lives at its real URL — §15.4
+      // step 2 (decision #61) verifies only a document served from there.
+      [`${THEIRS}t/${knownId}/`]: { body: pageLinking(`${THEIRS}items/${knownId}.json`) },
+      [`${THEIRS}items/${knownId}.json`]: {
         body: JSON.stringify({
           blyg: "0.3",
           id: knownId,
@@ -658,7 +751,8 @@ describe("detect stubs — /studio/mentions (§3.3)", () => {
     const strangerId = newId();
     const stranger = await upsertInbound(env.DB, `https://stranger.example/t/${strangerId}/`, `${OURS}f/${mine}/`, mine);
     const strangerNet = fixtureNet({
-      [`https://stranger.example/t/${strangerId}/`]: {
+      [`https://stranger.example/t/${strangerId}/`]: { body: pageLinking(`https://stranger.example/items/${strangerId}.json`) },
+      [`https://stranger.example/items/${strangerId}.json`]: {
         body: JSON.stringify({
           blyg: "0.3",
           id: strangerId,
@@ -718,7 +812,10 @@ describe("the stub stack (§4.3)", () => {
     // Their mention of F verifies as a stub.
     const inbound = await upsertInbound(env.DB, `${THEIRS}t/${s1}/`, `${OURS}f/${f}/`, f);
     const net = fixtureNet({
-      [`${THEIRS}t/${s1}/`]: {
+      // The page names its document, which lives at its real URL — §15.4
+      // step 2 (decision #61) verifies only a document served from there.
+      [`${THEIRS}t/${s1}/`]: { body: pageLinking(`${THEIRS}items/${s1}.json`) },
+      [`${THEIRS}items/${s1}.json`]: {
         body: JSON.stringify({
           blyg: "0.3",
           id: s1,

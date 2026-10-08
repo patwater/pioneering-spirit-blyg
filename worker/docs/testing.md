@@ -17,18 +17,25 @@ npm run release:build
 npm run release:verify
 ```
 
+Read the [project glossary](glossary.md) before naming model states or observations. The [auth oracle map](auth-oracles.md) and [security oracle map](auth-security-oracles.md) describe the OAuth/MCP tests and their limits.
+
+The lifecycle, pagination and PATCH oracles keep their laws beside the model and comparisons. The collection-walk witness and browser save oracle also state their fixture boundaries and omissions. Replay, cleanup and mutation harnesses explain what evidence they preserve; a failed setup is not a caught product bug. Use the glossary's terms when changing any of these files.
+
 ## Independent oracles
 
-The three generated oracles follow the
-[TanStack oracle-testing guide](https://github.com/TanStack/db/blob/main/docs/contributing/oracle-tests.md).
+The generated oracles follow the
+[oracle-writing guide](oracle-tests.md).
 Their models do not import production transitions, comparators, schemas, or
-resource projectors. They call the generated SDK against the actual Worker.
+resource projectors. The lifecycle, pagination and PATCH oracles call the
+generated SDK against the actual Worker. Mention delivery calls the production
+queue and sender against real SQLite through local D1.
 
 | Owner | Promised result and checkpoint | Domain and limits |
 |---|---|---|
 | `test/item-lifecycle.oracle.test.ts` | After every action, owner content/status/history and public current/pinned snapshots match a small independent model. Restore keeps the version counter. pins keep their content. | Nonempty plain-text fragments and threads. sequential edit, publish, withdraw, restore, and pin. No TK, references, forks, concurrent publication, or deletion claim. |
 | `test/pagination.oracle.test.ts` | Every signals page and the complete ordered walk match independent sorting and slicing, including row values, duplicates, and exhaustion. | Static collections of 0–25 records, three timestamp values, and page widths 1–10. No snapshot guarantee across writes and no database-cost claim. |
 | `test/patch-atomicity.oracle.test.ts` | A subsequent owner read preserves every field after rejection and changes only requested fields after acceptance. | Draft content, kind, response preference, and citation clearing. Invalid enums, malformed citations, and immutable fields. Separate controlled race cases change kind, citation, and withdrawal state before the guarded SQL write. No promise about concurrent text-edit conflicts. |
+| `test/mention-delivery.oracle.test.ts` | Discovery and successful delivery match an independent longest literal-prefix model. Check the complete request trace, stored queue state and absence of redelivery. | Generated names, source kinds, insertion orders and 49–96 byte origins. Each input includes parent/nested prefixes, an RSS decoy, a wildcard-looking nonmatch and an unrelated 58-byte origin. Controlled HTTP responses. No retry, incoming verification, cron or production DNS claim. |
 
 Each normal campaign runs eight histories with seed `20261001`, then eight
 histories with a fresh random seed. Both use the same generator, recorder,
@@ -41,7 +48,8 @@ To replay a failure, use its reported seed and shrink path:
 ORACLE_TARGET=item-lifecycle ORACLE_SEED=123 ORACLE_PATH='0:1:2' npm test -- --maxWorkers=2 test/item-lifecycle.oracle.test.ts
 ```
 
-The other targets are `pagination` and `patch-atomicity`. Replay mode selects
+The other targets in this table are `pagination`, `patch-atomicity` and
+`mention-delivery`. Replay mode selects
 only the named replay test. It does not first run fixed or random campaigns.
 These generators use arrays, not `fc.commands`. no command replay path exists.
 `test/oracle-replay.test.ts` captures a deliberate failure and checks direct
@@ -80,11 +88,15 @@ The lifecycle checker rejects rewound history and changed pinned content.
 It also retains the complete wire response from the first pin read and compares
 all later reads with those exact bytes. It never overwrites that reference.
 These controls calibrate comparisons. `npm run test:mutations` also checks the
-full production path in an isolated copy. Green baselines precede four mutations:
-missing pins, wrong restored text, ignored offsets, and reversed tie order.
+full production path in an isolated copy. Green baselines precede seven mutations:
+missing pins, wrong restored text, ignored offsets, reversed tie order, restored
+mention `LIKE` lookup, shortest-origin selection and inclusion of RSS origins.
 Each must fail at its named semantic checkpoint. Setup errors and timeouts do
 not count as caught mutations. Logs remain in `build/mutation-*.log`.
 These checks do not cover every conceivable production mutation.
+The mention `LIKE` mutation also captures its failing seed and shrink path and
+replays them through `ORACLE_TARGET=mention-delivery`. Replay must reach the same
+delivery-result checkpoint. Its log is `build/mutation-mention-replay.log`.
 
 ## Integration evidence
 
@@ -151,13 +163,36 @@ repository revision containing this file, within the stated domains.
 | ORC-005 | Real SDK/Worker executions compare public results after awaited actions. exact arrays retain duplicates, omissions, and order. Campaigns record execution. |
 | ORC-006 | Each checker rejects explicit wrong answers. Four production mutations fail at named semantic checkpoints. Browser tests failed on the prior editor code at the intended save/publish/order checkpoints, then passed after the fix. |
 | ORC-007 | Equal-budget fixed/random campaigns and direct target/seed/path replay. replay calibration is executable. No commands generator. |
-| ORC-008 | Lifecycle retains working text, status, snapshots, kind, and pins: edit/read, withdraw, restore, publish, and repeated pin distinguish those states. Other models are stateless recomputations. |
+| ORC-008 | Lifecycle retains working copy content, status, snapshots, kind, and pins: edit/read, withdraw, restore, publish, and repeated pin distinguish those states. Other models are stateless recomputations. |
 | ORC-009 | Model `content` maps to API `content_md`. snapshot index + 1 maps to the public version number. Authored kind remains distinct from withdrawal kind. |
 | ORC-010 | Named checkpoint failures retain the original input/cause and reject reductions with another checkpoint. Worker isolation owns cleanup. upgrade temporary repositories use `finally`. |
 | ORC-011 | Owner and public lifecycle reads provide separate observations. No second independent implementation is claimed. shared-fault risks in unmodeled rendering remain open. |
 | ORC-012 | This table records all guide obligations and scope limits. No complete bug-class closure is claimed beyond the named laws and histories. |
 | ORC-013 | Empty/width-one/tied page boundaries, repeated pin, restore after withdrawal, and valid-plus-invalid patches distinguish nearby weaker rules. Unmodeled limits remain open. |
 | ORC-014 | Worker/D1 evidence is local. Race tests supply controlled ordering. the HTTP proxy supplies known forwarding ranges. Production Cloudflare scheduling and live route configuration remain unverified. |
+
+### Mention delivery review
+
+This record applies to the repository revision containing the named oracle and
+mutation controls. The executable oracle states the law, independent reference,
+grammar, receiving driver, comparisons and limits beside the checks.
+
+| Requirement | Outcome and evidence |
+|---|---|
+| ORC-001 | Discovery §2.3.4 and established longest-origin behavior supply the authority. The oracle limits its claim to successful delivery routing. |
+| ORC-002 | The reference scans an array with `startsWith`. It imports no production classifier or SQL. Network responses depend on the requested URL, not the reference answer. |
+| ORC-003 | Contract, model, grammar, driver and named comparisons remain visible in `mention-delivery.oracle.test.ts`. |
+| ORC-004 | The grammar reconstructs long unrelated and matched origins, nested prefixes, RSS decoys and literal percent characters. The opening comment explains each axis, its ablation, bounded range and excluded invalid origins. |
+| ORC-005 | Real migrated SQLite receives production enqueue/discovery/delivery calls. Exact request arrays, queue rows and a second idle drain observe omissions, misrouting and redelivery. |
+| ORC-006 | Production mutants restore `LIKE`, select the shortest origin and include RSS. The runner requires assertion failure at the intended checkpoint. Setup errors, timeouts and surviving mutants fail calibration. |
+| ORC-007 | The same property runs eight inputs with seed `20261001` and eight without a seed. The mutation runner captures and directly replays seed/path at the same checkpoint. No commands generator exists. |
+| ORC-008 | No stateful reference model. Each subscription snapshot recomputes its expected route independently. Each uses a fresh target so saved endpoints cannot bypass discovery. |
+| ORC-009 | The model origin selects the expected manifest URL. Distinct receiving endpoints identify routing. Source kind maps to the public `f` or `t` path. The independent queue projection compares documented delivery fields. |
+| ORC-010 | The shared campaign preserves the first checkpoint through shrinking. `withOracleCleanup` releases the source, mentions and owned subscriptions while retaining operation and cleanup failures. |
+| ORC-011 | Review found no concrete shared model/production semantic fault requiring a second formulation. Independent SQL versus array selection remains the primary judgment. |
+| ORC-012 | This table records all numbered outcomes. The claim remains bounded to the stated routing grammar and receiving path. No complete mention-system closure is claimed. |
+| ORC-013 | Every input receives the long-origin premise and parent/nested/RSS/wildcard neighbors. The restored `LIKE` and wrong-selection controls distinguish weaker rules at delivery and trace checkpoints. |
+| ORC-014 | SQLite supplies the actual LIKE failure locally. A read-only production D1 query also received that error and accepted the replacement prefix query. HTTP responses remain controlled. Live DNS, delivery and cron behavior remain unverified by this oracle. |
 
 ## Open coverage
 
@@ -219,3 +254,7 @@ and empty-page fixtures. No copy of the old renderer remains in production.
 These budgets cover database work for the homepage. Published HTML size, the
 number of pins and attachments, browser image loads, and database latency can
 still affect response time. Archive and RSS generation have separate read paths.
+
+## Remaining oracle prose pass
+
+Lifecycle, pagination, PATCH atomicity, collection walks, browser save, replay, cleanup and mutation witnesses now state their laws, driver boundaries and limits beside the executable checks. The Worker rerun passed22 tests across six files. All40 save-oracle browser cases passed across desktop/mobile Chromium. Separate browser cases now use separate stable fixture edge addresses, so they retain real throttling without exhausting one shared login budget. Production policy and executable assertions did not change. AST comparison against HEAD confirmed comment-only changes in the six tracked Worker oracle/harness files touched by this pass.

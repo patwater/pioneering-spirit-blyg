@@ -16,6 +16,7 @@
     "forceConsistentCasingInFileNames": true
   },
   // assets.d.ts types the studio app bundles (`import x from "*.txt"`) that
-  // worker/src/spa.ts pulls in through the Worker entry point.
-  "include": ["src/**/*.ts", "test/**/*.ts", "../worker/src/assets.d.ts"]
+  // worker/src/spa.ts pulls in through the Worker entry point; runtime.d.ts
+  // declares the PublicHtml entrypoint on `ctx.exports`.
+  "include": ["src/**/*.ts", "test/**/*.ts", "../worker/src/assets.d.ts", "../worker/src/runtime.d.ts"]
 }

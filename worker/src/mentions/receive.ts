@@ -8,6 +8,7 @@
 //
 // No content of theirs is ever stored. A verified mention is a pointer.
 
+import { fetchSurface, itemUrl } from "../surface.ts";
 import type { FetchLike } from "../importer/http.ts";
 import { normalizeOrigin } from "../stub.ts";
 import type { MentionRelation, Transclusion } from "../types.ts";
@@ -16,9 +17,14 @@ import {
   hostOf,
   INBOUND_DOMAIN_HOURLY_LIMIT,
   INBOUND_GLOBAL_HOURLY_LIMIT,
+  INBOUND_PAIR_COOLDOWN_MS,
+  INBOUND_PENDING_LIMIT,
+  INBOUND_PENDING_WINDOW_MS,
   INBOUND_HOURLY_LIMIT,
   markInboundUnverified,
   markInboundVerified,
+  pairLastSeen,
+  pendingInboundCount,
   recentInboundSources,
   registrableDomain,
   upsertInbound,
@@ -26,7 +32,8 @@ import {
 
 export type ReceiveOutcome =
   | { status: 202; mentionId: string; source: string; target: string }
-  | { status: 400 | 429; error: string };
+  | { status: 400; error: string }
+  | { status: 429; error: string; retryAfter: number };
 
 /** Absolute http(s) only — a relative or non-web URL is a syntactic failure (§2.3.5 step 1). */
 function absoluteWebUrl(raw: string | undefined): URL | null {
@@ -50,7 +57,13 @@ export async function targetItemId(db: D1Database, target: URL, ourOrigin: strin
   if (target.origin !== origin.origin) return null;
   const base = origin.pathname.replace(/\/$/, "");
   let path = target.pathname;
-  if (base && path.startsWith(base)) path = path.slice(base.length);
+  // §15.3 step 1 (revision of 2026-10-06, decision #61): the target lies
+  // within our full origin, path included. On a path-mounted blyg, a URL on
+  // the same host but outside the mount names something else.
+  if (base) {
+    if (!path.startsWith(`${base}/`)) return null;
+    path = path.slice(base.length);
+  }
   const m = /^\/(?:([ft])\/([^/]+)\/?|items\/([^/]+)\.json)$/.exec(path);
   const id = m?.[2] ?? m?.[3];
   if (!id) return null;
@@ -81,6 +94,13 @@ export async function receiveMention(
   const itemId = await targetItemId(db, target, ourOrigin);
   if (!itemId) return { status: 400, error: "target is not a published item on this blyg" };
 
+  // The same pair again, soon: nothing new is learned and verification would
+  // cost two fetches and un-verify a verified row. Refuse, saying when.
+  const seen = await pairLastSeen(db, source.toString(), target.toString());
+  if (seen !== null && now - seen < INBOUND_PAIR_COOLDOWN_MS) {
+    return { status: 429, error: "this mention was claimed moments ago", retryAfter: Math.ceil((INBOUND_PAIR_COOLDOWN_MS - (now - seen)) / 1000) };
+  }
+
   // Three caps over one read of the last hour (§2.3.5 step 2 + §9.1 gaps 1–2),
   // checked narrowest first so that the refusal a sender reads is the true
   // reason: a single flooding host trips all three, and only the first is
@@ -88,14 +108,18 @@ export async function receiveMention(
   const recent = await recentInboundSources(db, now);
   const host = hostOf(source.toString());
   if (host && recent.filter((s) => hostOf(s) === host).length >= INBOUND_HOURLY_LIMIT) {
-    return { status: 429, error: "too many mentions from this host in the last hour" };
+    return { status: 429, error: "too many mentions from this host in the last hour", retryAfter: 3600 };
   }
   const domain = registrableDomain(source.toString());
   if (domain && recent.filter((s) => registrableDomain(s) === domain).length >= INBOUND_DOMAIN_HOURLY_LIMIT) {
-    return { status: 429, error: "too many mentions from this domain in the last hour" };
+    return { status: 429, error: "too many mentions from this domain in the last hour", retryAfter: 3600 };
   }
   if (recent.length >= INBOUND_GLOBAL_HOURLY_LIMIT) {
-    return { status: 429, error: "this endpoint is at its hourly limit for new claims" };
+    return { status: 429, error: "this endpoint is at its hourly limit for new claims", retryAfter: 3600 };
+  }
+
+  if ((await pendingInboundCount(db, now)) >= INBOUND_PENDING_LIMIT) {
+    return { status: 429, error: "too many mentions are awaiting verification", retryAfter: Math.ceil(INBOUND_PENDING_WINDOW_MS / 1000 / 2) };
   }
 
   const row = await upsertInbound(db, source.toString(), target.toString(), itemId, new Date(now).toISOString());
@@ -122,8 +146,11 @@ export function alternateJsonHref(html: string, base: string): string | null {
   while ((m = tag.exec(html))) {
     const rel = /\brel\s*=\s*["']?([^"'>]+)["']?/i.exec(m[0]);
     if (!rel || !rel[1].toLowerCase().split(/\s+/).includes("alternate")) continue;
-    const type = /\btype\s*=\s*["']?([^"'>\s]+)["']?/i.exec(m[0]);
-    if (!type || !type[1].toLowerCase().startsWith("application/json")) continue;
+    // The media type exactly, parameters aside: WordPress pages also carry an
+    // oEmbed alternate typed `application/json+oembed`, often first.
+    const type = /\btype\s*=\s*["']([^"']*)["']|\btype\s*=\s*([^\s>]+)/i.exec(m[0]);
+    const media = (type?.[1] ?? type?.[2] ?? "").split(";")[0].trim().toLowerCase();
+    if (media !== "application/json") continue;
     const href = /\bhref\s*=\s*["']([^"']*)["']/i.exec(m[0]);
     if (!href) continue;
     try {
@@ -181,12 +208,18 @@ export interface VerifyResult {
 /**
  * Fetch the source, find its item document, and decide. Bounded to two
  * fetches (§2.3.5): the page, and the document its `rel="alternate"` names —
- * or one, when the source URL *is* the document.
+ * or one, when the source URL *is* the document. A third, the sender's own
+ * manifest, only when the document was served from outside the default path
+ * (a templated blyg, §16.6e, whose bounds are raised to three).
  *
- * The identity rule is the load-bearing one: the document's asserted `origin`
- * must sit on the same host as the URL we actually fetched. That is 0.2
- * §12.2 applied inbound, and it is what stops a mirror or an impostor from
- * speaking in a real blyg's name.
+ * The identity rule is the load-bearing one: the item document must have been
+ * fetched from exactly `{origin}items/{id}.json` for its own asserted `origin`
+ * and `id` (§15.4 step 2, revision of 2026-10-06, decision #61). That is §12.2
+ * applied inbound with the full origin, path included — so neither a mirror,
+ * nor another blyg path-mounted on the same host, can speak in a real blyg's
+ * name — and because a pinned file's URL is never the live document's, a
+ * pin that still carries `stub_of` stops verifying once the live document is
+ * a withdrawal endcap.
  */
 export async function verifyMention(
   db: D1Database,
@@ -231,8 +264,21 @@ export async function verifyMention(
 
   const asserted = normalizeOrigin(doc.origin);
   if (!asserted) return fail("item document declares no origin");
-  if (new URL(asserted).origin !== new URL(finalUrl).origin) {
-    return fail(`origin mismatch: document claims ${asserted} but was served from ${new URL(finalUrl).origin}`);
+  if (typeof doc.id !== "string" || !doc.id) return fail("item document declares no id");
+  const expected = new URL(`items/${encodeURIComponent(doc.id)}.json`, asserted);
+  const served = new URL(finalUrl);
+  served.hash = "";
+  if (served.href !== expected.href) {
+    // §16.6e: a templated blyg serves item documents where its manifest's
+    // `item` template says, possibly outside the identity origin. Read the
+    // asserted origin's own manifest (the third fetch) and accept only an
+    // exact match with its template; a missing manifest fails the claim.
+    const surface = await fetchSurface(asserted, fetchFn);
+    const templated = surface?.item ? new URL(itemUrl(asserted, surface, doc.id)) : null;
+    if (templated) templated.hash = "";
+    if (!templated || served.href !== templated.href) {
+      return fail(`origin mismatch: document claims ${expected.href}${templated ? ` or ${templated.href}` : ""} but was served from ${served.href}`);
+    }
   }
   if (doc.kind === "withdrawn") return fail("source item is withdrawn", "gone");
 
