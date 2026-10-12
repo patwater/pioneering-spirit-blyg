@@ -39,7 +39,9 @@ both out of the config. Open `https://blyg.example.com/studio`, sign in, and set
 your title and author name in Settings. Add subscriptions and publish a fragment
 to check the setup. AI keys are optional: `AI_PROVIDER_KEY` (Anthropic), `OPENAI_API_KEY` or
 `GOOGLE_AI_KEY`, for whichever provider's models you choose in Settings; set
-one with `npx wrangler@4 secret put AI_PROVIDER_KEY`. This prebuilt worker
+one with `npx wrangler@4 secret put AI_PROVIDER_KEY`. The `@cf/…` models run
+on Cloudflare Workers AI with no key: uncomment the `"ai"` binding in the
+included `wrangler.jsonc` to offer them. This prebuilt worker
 carries the shipped model list; to use a model it does not list, choose
 *other…* in Settings and type its id.
 
@@ -47,6 +49,27 @@ The archive includes the Worker bundle, migrations, licenses, and a deployment
 README. It needs no `npm ci` or source build. Wrangler's
 [Cloudflare setup instructions](https://developers.cloudflare.com/r2/get-started/workers-api/)
 cover login and bucket creation.
+
+## Public HTML cache
+
+Use Wrangler 4.107.0 or later. The included config enables a 60-second shared
+cache only for the `PublicHtml` entrypoint. Studio and API requests remain
+uncached. Browsers use ETags to validate saved HTML. Cloudflare can serve stale
+HTML for another 300 seconds during background refresh, so public changes can
+appear after that window.
+
+Existing installations must add the following block to their own config:
+
+```json
+"cache": { "enabled": false },
+"exports": {
+  "PublicHtml": { "type": "worker", "cache": { "enabled": true } }
+}
+```
+
+No dashboard rule, binding, or migration is required. Without this block, ETags
+still work but each request renders HTML. After deployment, check public pages
+for `Cf-Cache-Status: HIT` or `UPDATING` and matching conditional requests for 304.
 
 ## Upgrading
 

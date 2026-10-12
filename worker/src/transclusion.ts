@@ -3,6 +3,7 @@
 
 import { attachedQuote } from "./directives.ts";
 import { codeRanges, htmlCodeRanges, inRanges, lineOffsets, type Range } from "./code-ranges.ts";
+import { sanitizeHtml } from "./importer/sanitize.ts";
 import { blygItemUrl } from "./importer/util.ts";
 import { excerptFromHtml, renderMarkdown, selectionText } from "./markdown.ts";
 import type { ImportedItemRow, ItemRow, TextQuoteSelector, Transclusion, VersionRow } from "./types.ts";
@@ -122,36 +123,17 @@ export class TransclusionResolveError extends Error {
   }
 }
 
-/**
- * Resolve a local item id to a currently-published **fragment** (item + latest
- * version), or a reason it can't be used as a target. This is the v0.1 rule,
- * kept verbatim for TK source-ref resolution (tk-core-plan.md §2.3) — v0.3
- * explicitly leaves the generation hooks untouched (v0.3-plan §1 non-goals),
- * so a TK source is still local, published, fragment-only. Transclusion
- * targets go through resolveTarget below, which is the rule that widened.
- */
-export async function resolveFragment(
-  db: D1Database,
-  id: string,
-): Promise<{ ok: true; item: ItemRow; version: VersionRow } | { ok: false; reason: string }> {
-  const item = await db.prepare("SELECT * FROM items WHERE id = ?").bind(id).first<ItemRow>();
-  if (!item) return { ok: false, reason: "unknown item" };
-  if (item.status === "draft") return { ok: false, reason: "item is a draft, not published" };
-  if (item.kind === "withdrawn") return { ok: false, reason: "item is withdrawn" };
-  if (item.kind === "thread") return { ok: false, reason: "cannot use a thread as a TK source" };
-  const version = await db
-    .prepare("SELECT * FROM versions WHERE item_id = ? AND version = ?")
-    .bind(item.id, item.version)
-    .first<VersionRow>();
-  if (!version) return { ok: false, reason: "unknown item" };
-  return { ok: true, item, version };
-}
-
 /** A resolved transclusion target: the bytes to bake plus the provenance to record. */
 export interface ResolvedTarget {
   id: string;
   version: number;
   contentHtml: string;
+  /**
+   * The target's markdown as held here: our own version's, or the imported
+   * row's (empty when the origin's feed carried none). A TK scope feeds a
+   * generator from this (decision #44); baking never reads it.
+   */
+  contentMd: string;
   /** Identity origin for a remote (imported) source; omitted for own-origin — decision #26. */
   origin?: string;
   /** Authored kind, for callers that need the target's page URL rather than its bytes. */
@@ -222,7 +204,7 @@ export async function resolveTarget(
         return { ok: false, reason: "circular transclusion: that thread already quotes this one" };
       }
     }
-    return { ok: true, target: { id: item.id, version: version.version, contentHtml: version.content_html, kind: item.kind } };
+    return { ok: true, target: { id: item.id, version: version.version, contentHtml: version.content_html, contentMd: version.content_md, kind: item.kind } };
   }
 
   // Imported: identity is the subscription's own origin (0.2 §12.2 — the
@@ -247,7 +229,7 @@ export async function resolveTarget(
     // own absolutizing pass (publish(), session 30) finds nothing relative to
     // re-point at us. Covers rows imported before the importer did this itself.
     const contentHtml = absolutizeHtml(row.content_html, row.sub_origin);
-    return { ok: true, target: { id, version, contentHtml, origin: row.sub_origin, kind: row.kind, page: row.page } };
+    return { ok: true, target: { id, version, contentHtml, contentMd: row.content_md, origin: row.sub_origin, kind: row.kind, page: row.page } };
   }
   if (candidates.length) return { ok: false, reason: "source withdrawn by origin" };
   if (rows.results.length) return { ok: false, reason: "source is a plain RSS (L0) item, not a blyg item" };
@@ -391,12 +373,16 @@ export async function resolveTransclusions(db: D1Database, contentMd: string, se
  * time (see resolveTransclusions above); not a protocol surface.
  */
 export async function previewTransclusions(db: D1Database, contentMd: string, selfId?: string): Promise<ResolveResult> {
-  return walk(
+  const result = await walk(
     db,
     contentMd,
     (err) => `<blockquote class="blyg-transclusion unresolved"><p>⚠ unresolvable: ${escapeHtml(err.reason)}</p></blockquote>`,
     selfId,
   );
+  // Publish bakes the target's HTML verbatim (§5.2, §10.2), so the walk does
+  // not sanitize. The preview is displayed in the owner's studio, and every
+  // display sanitizes at render, as the public pages do with the baked thread.
+  return { ...result, html: await sanitizeHtml(result.html) };
 }
 
 // --- `[[id]]` plain internal links (§16.2, decision #32) ---
@@ -417,12 +403,17 @@ export interface InternalLinkDocument {
 
 /**
  * The anchor's text. Items are titleless by design (§5.3), so an id would be
- * the one label guaranteed to mean nothing to a reader — this uses a short
- * excerpt of the target in quotes, which reads as a citation inside running
- * prose. Presentation, and ours to choose (§16.2); it is frozen into
- * `content_html` at publish like every other rendered thing.
+ * the one label guaranteed to mean nothing to a reader. When the target opens
+ * with a heading (a thread's markdown H1 is its title by convention) that
+ * heading is the label, as plain text; otherwise this uses a short excerpt of
+ * the target in quotes, which reads as a citation inside running prose.
+ * Presentation, and ours to choose (§16.2); it is frozen into `content_html`
+ * at publish like every other rendered thing.
  */
 function anchorText(target: ResolvedTarget): string {
+  const heading = /^\s*<h[1-6]\b[^>]*>([\s\S]*?)<\/h[1-6]>/i.exec(target.contentHtml);
+  const title = heading ? excerptFromHtml(heading[1], 80) : "";
+  if (title) return title;
   const excerpt = excerptFromHtml(target.contentHtml, 60);
   return excerpt ? `“${excerpt}”` : `${target.kind === "thread" ? "a thread" : "a fragment"}`;
 }

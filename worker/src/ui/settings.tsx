@@ -12,17 +12,32 @@ import {
 } from './components.tsx';
 import { Link } from '@tanstack/react-router';
 import './reading.css';
-import { THEMES } from '../themes.ts';
+import {
+  THEMES,
+  CUSTOM_THEME_ID,
+  customFromPreset,
+  THEME_NAME_MAX,
+  type CustomTheme,
+} from '../themes.ts';
+import { ThemeEditor, ThemeShare } from './theme-editor.tsx';
+import { FONTS } from '../fonts.ts';
 import { CLIENT } from '../client.ts';
+import { compiledExtensions } from '../../build/extensions.ui.ts';
 
 const fields = [
   'site_title',
   'theme',
+  'custom_theme',
+  'custom_theme_dark',
+  'custom_theme_name',
+  'font',
   'author_name',
+  'author_url',
   'author_bio',
   'author_links',
   'site_url',
   'timezone',
+  'picker_typing',
   'avatar_media_id',
   'ai_model_tk',
   'ai_model_changelog',
@@ -32,8 +47,10 @@ const fields = [
   'accept_mentions',
   'update_check',
   'show_responses_default',
+  'highlight_generated_default',
   'auto_change_notes',
   'update_feed_url',
+  'extensions',
 ] as const;
 function editable(row: Settings): Settings {
   return Object.fromEntries(fields.map((key) => [key, row[key]])) as Settings;
@@ -99,6 +116,7 @@ function SettingsForm({ initial }: { initial: Settings }) {
     key:
       | 'site_title'
       | 'author_name'
+      | 'author_url'
       | 'author_bio'
       | 'site_url'
       | 'ai_style_prompt'
@@ -135,6 +153,7 @@ function SettingsForm({ initial }: { initial: Settings }) {
     key:
       | 'update_check'
       | 'show_responses_default'
+      | 'highlight_generated_default'
       | 'accept_mentions'
       | 'auto_change_notes',
     label: string,
@@ -186,6 +205,7 @@ function SettingsForm({ initial }: { initial: Settings }) {
         <h3 className="card-h">profile</h3>
         {field('site_title', 'Site title')}
         {field('author_name', 'Author name')}
+        {field('author_url', 'Author URL', false, 'blank = this blyg\'s own address')}
         {field('author_bio', 'Bio', true)}
         <div className="field">
           <label htmlFor="author_links">
@@ -306,7 +326,140 @@ function SettingsForm({ initial }: { initial: Settings }) {
                 </label>
               );
             })}
+            <label className="theme-opt" key={CUSTOM_THEME_ID}>
+              <input
+                type="radio"
+                name="theme"
+                value={CUSTOM_THEME_ID}
+                checked={form.theme === CUSTOM_THEME_ID}
+                onChange={() => {
+                  // First time: start from whichever preset was showing.
+                  if (!form.custom_theme)
+                    change(
+                      'custom_theme',
+                      customFromPreset(Object.prototype.hasOwnProperty.call(THEMES, form.theme) ? form.theme : 'paper'),
+                    );
+                  change('theme', CUSTOM_THEME_ID);
+                }}
+              />
+              <span
+                className={`theme-swatch${form.custom_theme ? '' : ' theme-swatch-empty'}`}
+                style={{
+                  background:
+                    form.custom_theme && form.custom_theme_dark
+                      ? `linear-gradient(90deg,${form.custom_theme.page} 50%,${form.custom_theme_dark.page} 50%)`
+                      : form.custom_theme?.page,
+                }}
+              >
+                {form.custom_theme ? (
+                  <span
+                    className="sheet-mini"
+                    style={{
+                      background: form.custom_theme_dark
+                        ? `linear-gradient(90deg,${form.custom_theme.paper} 50%,${form.custom_theme_dark.paper} 50%)`
+                        : form.custom_theme.paper,
+                    }}
+                  >
+                    <span
+                      className="line"
+                      style={{
+                        background: form.custom_theme_dark
+                          ? `linear-gradient(90deg,${form.custom_theme.ink} 50%,${form.custom_theme_dark.ink} 50%)`
+                          : form.custom_theme.ink,
+                      }}
+                    />
+                    <span
+                      className="line short"
+                      style={{ background: form.custom_theme.pencil }}
+                    />
+                  </span>
+                ) : (
+                  <span className="theme-plus" aria-hidden="true">
+                    +
+                  </span>
+                )}
+              </span>
+              <span className="theme-name">
+                {form.custom_theme_name || 'Custom'}
+              </span>
+            </label>
           </div>
+        </div>
+        {form.theme === CUSTOM_THEME_ID && form.custom_theme ? (
+          <CustomThemeFields
+            name={form.custom_theme_name}
+            light={form.custom_theme}
+            dark={form.custom_theme_dark}
+            font={FONTS[form.font]?.stack}
+            onName={(name) => change('custom_theme_name', name)}
+            onChange={(light, dark) => {
+              change('custom_theme', light);
+              change('custom_theme_dark', dark);
+            }}
+          />
+        ) : null}
+        <div className="field">
+          <span>
+            Typeface — fonts already on the reader's device, so nothing is
+            downloaded and no one else sees your readers. It will look a little
+            different from one device to the next.
+          </span>
+          <div className="font-grid" role="radiogroup" aria-label="Typeface">
+            {Object.entries(FONTS).map(([id, f]) => (
+              <label className="font-opt" key={id}>
+                <input
+                  type="radio"
+                  name="font"
+                  value={id}
+                  checked={form.font === id}
+                  onChange={() => change('font', id)}
+                />
+                <span className="font-sample" style={{ fontFamily: f.stack }}>
+                  <span className="font-sample-text">
+                    The quick brown fox
+                  </span>
+                  <span className="font-name">{f.label}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+        </div>
+        {toggle(
+          'highlight_generated_default',
+          'Highlight generated portions by default',
+          <>
+            Text written by <code>[TK]</code> generation shows on your public
+            pages in a lightly tinted, outlined box, in every theme. A post can
+            override this in its editor's TK card.
+          </>,
+        )}
+      </section>
+      <section className="card">
+        <h3 className="card-h">writing</h3>
+        <div className="field" role="radiogroup" aria-labelledby="picker_typing-label">
+          <span id="picker_typing-label">
+            When you type <code>[[</code> or <code>![[</code>, search by typing in
+          </span>
+          {(
+            [
+              ['auto', 'Automatic', 'the editor with a mouse, the picker on a touch screen, where it fills the screen'],
+              ['editor', 'The editor', 'keep typing after the brackets; arrow keys and Enter pick'],
+              ['panel', 'The picker', 'the picker opens with its own search box'],
+            ] as const
+          ).map(([value, label, hint]) => (
+            <label className="check" key={value}>
+              <input
+                type="radio"
+                name="picker_typing"
+                value={value}
+                checked={form.picker_typing === value}
+                onChange={() => change('picker_typing', value)}
+              />
+              <span>
+                {label} <span className="hint">{hint}</span>
+              </span>
+            </label>
+          ))}
         </div>
       </section>
       <section className="card">
@@ -421,6 +574,42 @@ function SettingsForm({ initial }: { initial: Settings }) {
           </>,
         )}
       </section>
+      {compiledExtensions.length ? (
+        <section className="card" id="extensions">
+          <h3 className="card-h">extensions</h3>
+          <p className="hint">
+            Experiments compiled into this build, by the release or by its
+            operator. They are not part of the reference Studio and change
+            only what you see here, never your public pages or what other
+            blygs read. Each starts off.
+          </p>
+          {compiledExtensions.map((extension) => (
+            <div key={extension.name}>
+              <label className="check">
+                <input
+                  id={`extension-${extension.name}`}
+                  type="checkbox"
+                  data-extension={extension.name}
+                  checked={form.extensions.includes(extension.name)}
+                  aria-describedby={`extension-${extension.name}-hint`}
+                  onChange={(event) =>
+                    change(
+                      'extensions',
+                      event.target.checked
+                        ? [...form.extensions, extension.name].sort()
+                        : form.extensions.filter((name) => name !== extension.name),
+                    )
+                  }
+                />
+                <span>{extension.label}</span>
+              </label>
+              <p className="hint check-hint" id={`extension-${extension.name}-hint`}>
+                {extension.description}
+              </p>
+            </div>
+          ))}
+        </section>
+      ) : null}
       <div className="save-bar">
         <span className="state">
           {saved ? <span role="status">saved</span> : null}
@@ -439,6 +628,13 @@ const FUNCTIONS = [
   { key: 'ai_model_feed', label: 'feed scoring', hint: 'for the Smart Feed; not used yet' },
 ] as const;
 const OTHER = '__other__';
+
+/** A provider's readiness in words: a key, a Workers AI binding (studio#8), or neither needed. */
+function providerStatus(p: AiModels['providers'][number]): string {
+  if (p.binding) return p.configured ? 'binding set' : 'no binding';
+  if (!p.key_secret) return 'no key needed';
+  return p.configured ? 'key set' : 'no key';
+}
 
 /**
  * One model per AI function (0.26.0), chosen from the model manifest
@@ -481,7 +677,13 @@ function ModelSettings({
             <li key={p.id} data-configured={p.configured}>
               {p.configured ? '✓' : '–'} {p.label}{' '}
               <span className="hint">
-                {p.configured ? 'key set' : 'no key'} (<code>{p.key_secret}</code>)
+                {providerStatus(p)}
+                {p.key_secret || p.binding ? (
+                  <>
+                    {' '}
+                    (<code>{p.key_secret ?? p.binding}</code>)
+                  </>
+                ) : null}
               </span>
             </li>
           ))}
@@ -509,7 +711,7 @@ function ModelSettings({
             >
               <option value="">— none —</option>
               {manifest?.providers.map((p) => (
-                <optgroup key={p.id} label={p.configured ? p.label : `${p.label} (no key)`}>
+                <optgroup key={p.id} label={p.configured ? p.label : `${p.label} (${providerStatus(p)})`}>
                   {manifest.models
                     .filter((m) => m.provider === p.id)
                     .map((m) => (
@@ -545,5 +747,119 @@ function ModelSettings({
         </select>
       </div>
     </>
+  );
+}
+
+/**
+ * The custom theme's fields: one palette, or a light palette with a dark
+ * companion so the theme follows the reader's light/dark preference the way
+ * Auto does. Most people's devices switch on their own now; a custom theme
+ * that ignored that would be a step back from Auto.
+ */
+function CustomThemeFields({
+  name,
+  light,
+  dark,
+  font,
+  onName,
+  onChange,
+}: {
+  name: string;
+  light: CustomTheme;
+  dark: CustomTheme | null;
+  font?: string;
+  onName: (name: string) => void;
+  onChange: (light: CustomTheme, dark: CustomTheme | null) => void;
+}) {
+  const [editing, setEditing] = useState<'light' | 'dark'>('light');
+  const paired = dark !== null;
+  const showing = paired && editing === 'dark' ? 'dark' : 'light';
+  return (
+    <div className="custom-theme">
+      <div className="field">
+        <label htmlFor="theme-name">
+          <span>Name this look (optional)</span>
+        </label>
+        <input
+          id="theme-name"
+          type="text"
+          maxLength={THEME_NAME_MAX}
+          value={name}
+          placeholder="e.g. Pink Quill"
+          onChange={(event) => onName(event.target.value)}
+        />
+        <p className="hint">
+          Shown on the tile, and carried with the look when you share it.
+        </p>
+      </div>
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={paired}
+          onChange={(event) => {
+            if (event.target.checked) {
+              // A pair is a light palette plus a dark one. If the palette so
+              // far is dark, it becomes the dark half and a light one is
+              // seeded; otherwise a dark one is seeded from Nord.
+              if (light.dark) onChange(customFromPreset('paper'), light);
+              else onChange(light, customFromPreset('nord'));
+              setEditing('dark');
+            } else {
+              onChange(light, null);
+              setEditing('light');
+            }
+          }}
+        />
+        <span>Follow the reader's light/dark setting</span>
+      </label>
+      <p className="hint check-hint">
+        Adds a dark version. Readers whose device is in dark mode get it;
+        everyone else gets the light one.
+      </p>
+      {paired ? (
+        <div className="segmented" aria-label="Palette">
+          {(['light', 'dark'] as const).map((which) => (
+            <button
+              key={which}
+              type="button"
+              aria-pressed={showing === which}
+              className={`seg${showing === which ? ' is-active' : ''}`}
+              onClick={() => setEditing(which)}
+            >
+              {which === 'light' ? 'Light palette' : 'Dark palette'}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      {showing === 'dark' && dark ? (
+        <ThemeEditor
+          key="dark"
+          value={dark}
+          font={font}
+          lockDark
+          onChange={(next) => onChange(light, { ...next, dark: true })}
+        />
+      ) : (
+        <ThemeEditor
+          key="light"
+          value={light}
+          font={font}
+          lockDark={paired}
+          onChange={(next) =>
+            onChange(paired ? { ...next, dark: false } : next, dark)
+          }
+        />
+      )}
+      <ThemeShare
+        name={name}
+        light={light}
+        dark={dark}
+        onImport={(look) => {
+          onChange(look.light, look.dark);
+          if (look.name) onName(look.name);
+          setEditing('light');
+        }}
+      />
+    </div>
   );
 }
