@@ -4,48 +4,15 @@ export type ClientOptions = {
     baseUrl: 'http://localhost:8787' | (string & {});
 };
 
-export type Item = {
+export type Authorization = {
     id: string;
-    kind: 'fragment' | 'thread' | 'withdrawn';
-    status: 'draft' | 'public' | 'withdrawn';
-    created: string;
-    updated: string;
-    version: number;
-    content_md: string;
-    dirty: boolean;
-    responses: 'default' | 'show' | 'hide';
-    provenance: Array<GenerationProvenance | null>;
-    stub_of: VersionReference | {
-        url: string;
-        cited?: Citation;
-    } | null;
-    forked_from: VersionReference | null;
-    fork_cite: Citation | null;
-};
-
-export type GenerationProvenance = {
-    sources: Array<{
-        id: string;
-        version: number;
-    }>;
-    model?: string;
-    at?: string;
-    [key: string]: unknown;
-};
-
-export type VersionReference = {
-    origin: string;
-    id: string;
-    version: number;
-    cited?: Citation;
-};
-
-export type Citation = {
-    source: string;
-    author?: string;
-    excerpt?: string;
-    url: string;
-    retrieved: string;
+    clientId: string;
+    name: string;
+    manual: boolean;
+    resource: string;
+    scope: Array<string>;
+    createdAt: number;
+    expiresAt?: number;
 };
 
 export type ApiError = {
@@ -65,10 +32,80 @@ export type ApiError = {
     [key: string]: unknown;
 };
 
+export type ChangeState = {
+    epoch: string;
+    domains: {
+        items: number;
+        reading: number;
+        subscriptions: number;
+        hoppers: number;
+        signals: number;
+        settings: number;
+        feed: number;
+    };
+};
+
+export type Item = {
+    id: string;
+    kind: 'fragment' | 'thread' | 'withdrawn';
+    status: 'draft' | 'public' | 'withdrawn';
+    created: string;
+    updated: string;
+    version: number;
+    content_md: string;
+    dirty: boolean;
+    responses: 'default' | 'show' | 'hide';
+    highlight: 'default' | 'show' | 'hide';
+    provenance: Array<GenerationProvenance | null>;
+    stub_of: VersionReference | {
+        url: string;
+        cited?: Citation;
+    } | null;
+    forked_from: VersionReference | null;
+    fork_cite: Citation | null;
+};
+
+export type GenerationProvenance = {
+    sources: Array<GenerationSource>;
+    model?: string;
+    at?: string;
+    [key: string]: unknown;
+};
+
+export type GenerationSource = {
+    id: string;
+    version: number;
+    /**
+     * Present for a remote source (0.4, §16.3); omitted for this blyg's own.
+     */
+    origin?: string;
+    cited?: Citation;
+};
+
+export type Citation = {
+    source: string;
+    author?: string;
+    excerpt?: string;
+    url: string;
+    retrieved: string;
+};
+
+export type VersionReference = {
+    origin: string;
+    id: string;
+    version: number;
+    cited?: Citation;
+};
+
 export type Settings = {
     site_title: string;
     theme: string;
+    custom_theme: CustomTheme;
+    custom_theme_dark: CustomTheme;
+    custom_theme_name: string;
+    font: string;
     author_name: string;
+    author_url: string;
     author_bio: string;
     author_links: Array<{
         label: string;
@@ -86,10 +123,28 @@ export type Settings = {
     accept_mentions: boolean;
     update_check: boolean;
     show_responses_default: boolean;
+    highlight_generated_default: boolean;
     auto_change_notes: boolean;
+    picker_typing: 'auto' | 'editor' | 'panel';
     update_feed_url: string;
     update_notice_ack: boolean;
+    /**
+     * Studio extensions enabled on this node (docs/extensions.md). Only names compiled into this build are accepted; every extension starts disabled.
+     */
+    extensions: Array<string>;
 };
+
+export type CustomTheme = {
+    dark: boolean;
+    page: string;
+    paper: string;
+    ink: string;
+    inkSoft: string;
+    rule: string;
+    pencil: string;
+    genBg: string;
+    genRule: string;
+} | null;
 
 export type Subscription = {
     id: string;
@@ -102,6 +157,7 @@ export type Subscription = {
     fail_count: number;
     last_index_sync_at: string | null;
     created: string;
+    title_follows_source: boolean;
     in_blogroll: boolean;
     flags: Array<{
         type: string;
@@ -190,6 +246,10 @@ export type ImportedItem = {
     page: string | null;
     stub_of_json: string | null;
     forked_from_json: string | null;
+    /**
+     * The origin's `generated` array as published (0.4 adds remote sources); null when it discloses none.
+     */
+    generated_json: string | null;
 };
 
 export type SignalRow = {
@@ -228,7 +288,17 @@ export type AiModels = {
     providers: Array<{
         id: string;
         label: string;
-        key_secret: string;
+        /**
+         * The Worker secret holding this provider's key. Absent for a Workers AI provider (it uses `binding`) and for a keyless OpenAI-compatible endpoint.
+         */
+        key_secret?: string;
+        /**
+         * Workers AI only: the Worker binding the provider calls (studio#8).
+         */
+        binding?: string;
+        /**
+         * The key secret is set, the binding is bound, or the provider needs neither.
+         */
         configured: boolean;
     }>;
     models: Array<{
@@ -246,7 +316,7 @@ export type Mention = {
     target: string;
     target_item_id: string;
     status: 'pending' | 'verified' | 'failed' | 'gone';
-    relation: 'stub' | 'transclusion' | 'fork' | null;
+    relation: 'stub' | 'transclusion' | 'fork' | 'source' | null;
     source_origin: string | null;
     source_id: string | null;
     source_kind: string | null;
@@ -302,7 +372,79 @@ export type ReadingEntry = {
         contentHtml: string;
         pinnedVersionRetained: number | null;
         sourceUrl: string | null;
+        /**
+         * The version of the item held here. A readVersion below it means a newer version arrived after the owner read it.
+         */
+        version: number;
+        /**
+         * The highest version the owner has marked read; null when unread or cleared.
+         */
+        readVersion: number | null;
     };
+};
+
+export type ImportedReadingEntry = {
+    subscriptionId: string;
+    subscriptionTitle: string;
+    remoteId: string;
+    kind: 'fragment' | 'thread';
+    withdrawn: boolean;
+    l0: boolean;
+    updated: string | null;
+    observedAt: string;
+    contentHtml: string;
+    pinnedVersionRetained: number | null;
+    sourceUrl: string | null;
+    /**
+     * The version of the item held here. A readVersion below it means a newer version arrived after the owner read it.
+     */
+    version: number;
+    /**
+     * The highest version the owner has marked read; null when unread or cleared.
+     */
+    readVersion: number | null;
+    origin: string;
+    created: string | null;
+    /**
+     * The item's markdown as imported; empty for a withdrawn item and for feeds that carry none.
+     */
+    contentMd: string;
+    author: {
+        name: string | null;
+        url: string | null;
+    } | null;
+    /**
+     * The origin's declared page, as the origin declared it; null when it declares none.
+     */
+    page: string | null;
+    /**
+     * The owner's signal; null when none.
+     */
+    thumb: 1 | -1 | null;
+    /**
+     * Ids of the hoppers holding this item.
+     */
+    hoppers: Array<string>;
+    /**
+     * The origin's transclusions[] verbatim (Transclusion shape, cited included); remote and unvalidated. Null for fragments, L0 items, withdrawn items, or malformed data.
+     */
+    transclusions: Array<unknown> | null;
+    /**
+     * The origin's stub_of verbatim (CitationTarget shape); remote and unvalidated. Null when none.
+     */
+    stubOf: {
+        [key: string]: unknown;
+    } | null;
+    /**
+     * The origin's forked_from verbatim (VersionReference shape); remote and unvalidated. Null when none.
+     */
+    forkedFrom: {
+        [key: string]: unknown;
+    } | null;
+    /**
+     * The origin's generated[] verbatim (GenerationProvenance shape, remote sources' origin and cited included); remote and unvalidated. Null when none.
+     */
+    generated: Array<unknown> | null;
 };
 
 export type ThreadFreshness = {
@@ -326,17 +468,60 @@ export type QuoteFreshness = {
     reason?: string;
 };
 
-export type ListItemsData = {
-    body?: never;
-    path?: never;
-    query?: {
-        offset?: number | null;
-        limit?: number;
+export type LineageGlyphLineage = {
+    node: {
+        origin: string | null;
+        id: string | null;
+        version: number | null;
+        held: 'own' | 'imported' | null;
+        sub: string | null;
+        kind: 'fragment' | 'thread' | null;
+        title: string | null;
+        excerpt: string | null;
+        source: string | null;
+        url: string | null;
     };
-    url: '/api/items';
+    ancestors: Array<LineageGlyphNode>;
+    descendants: Array<LineageGlyphNode>;
 };
 
-export type ListItemsErrors = {
+export type LineageGlyphNode = {
+    origin: string | null;
+    id: string | null;
+    version: number | null;
+    held: 'own' | 'imported' | null;
+    sub: string | null;
+    kind: 'fragment' | 'thread' | null;
+    title: string | null;
+    excerpt: string | null;
+    source: string | null;
+    url: string | null;
+    relation: 'stub' | 'transclusion' | 'fork';
+    partial: boolean;
+    via: 'reference' | 'mention';
+};
+
+export type LineageGlyphSummary = {
+    up: {
+        stub: number;
+        transclusion: number;
+        fork: number;
+    };
+    down: {
+        stub: number;
+        transclusion: number;
+        fork: number;
+    };
+};
+
+export type RevokeAllAuthorizationsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/authorizations';
+};
+
+export type RevokeAllAuthorizationsErrors = {
     /**
      * Request failed
      */
@@ -345,6 +530,223 @@ export type ListItemsErrors = {
      * Request failed
      */
     401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+};
+
+export type RevokeAllAuthorizationsError = RevokeAllAuthorizationsErrors[keyof RevokeAllAuthorizationsErrors];
+
+export type RevokeAllAuthorizationsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        ok: boolean;
+    };
+};
+
+export type RevokeAllAuthorizationsResponse = RevokeAllAuthorizationsResponses[keyof RevokeAllAuthorizationsResponses];
+
+export type ListAuthorizationsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/authorizations';
+};
+
+export type ListAuthorizationsErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+};
+
+export type ListAuthorizationsError = ListAuthorizationsErrors[keyof ListAuthorizationsErrors];
+
+export type ListAuthorizationsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        items: Array<Authorization>;
+    };
+};
+
+export type ListAuthorizationsResponse = ListAuthorizationsResponses[keyof ListAuthorizationsResponses];
+
+export type CreateAuthorizationData = {
+    body: {
+        name: string;
+        scope: Array<'owner:read' | 'owner:draft' | 'owner:publish' | 'owner:manage' | 'reading:state'>;
+        resource: 'api' | 'mcp';
+    };
+    path?: never;
+    query?: never;
+    url: '/api/authorizations';
+};
+
+export type CreateAuthorizationErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+};
+
+export type CreateAuthorizationError = CreateAuthorizationErrors[keyof CreateAuthorizationErrors];
+
+export type CreateAuthorizationResponses = {
+    /**
+     * Success
+     */
+    200: {
+        authorization: Authorization;
+        access_token: string;
+        token_type: 'Bearer';
+        expires_in: number;
+    };
+};
+
+export type CreateAuthorizationResponse = CreateAuthorizationResponses[keyof CreateAuthorizationResponses];
+
+export type RevokeAuthorizationData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/api/authorizations/{id}';
+};
+
+export type RevokeAuthorizationErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+};
+
+export type RevokeAuthorizationError = RevokeAuthorizationErrors[keyof RevokeAuthorizationErrors];
+
+export type RevokeAuthorizationResponses = {
+    /**
+     * Success
+     */
+    200: {
+        ok: boolean;
+    };
+};
+
+export type RevokeAuthorizationResponse = RevokeAuthorizationResponses[keyof RevokeAuthorizationResponses];
+
+export type GetChangesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/changes';
+};
+
+export type GetChangesErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
     /**
      * Request failed
      */
@@ -369,6 +771,82 @@ export type ListItemsErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+    /**
+     * Request failed
+     */
+    502: ApiError;
+};
+
+export type GetChangesError = GetChangesErrors[keyof GetChangesErrors];
+
+export type GetChangesResponses = {
+    /**
+     * Success
+     */
+    200: ChangeState;
+};
+
+export type GetChangesResponse = GetChangesResponses[keyof GetChangesResponses];
+
+export type ListItemsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        offset?: number | null;
+        limit?: number;
+    };
+    url: '/api/items';
+};
+
+export type ListItemsErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    405: ApiError;
+    /**
+     * Request failed
+     */
+    409: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    415: ApiError;
+    /**
+     * Request failed
+     */
+    422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -402,6 +880,7 @@ export type ListItemsResponse = ListItemsResponses[keyof ListItemsResponses];
 
 export type CreateItemData = {
     body?: {
+        provenance?: Array<GenerationProvenance | null>;
         content_md?: string;
         kind?: 'fragment' | 'thread';
         stub_of?: VersionReference | {
@@ -437,6 +916,10 @@ export type CreateItemErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -458,6 +941,10 @@ export type CreateItemErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -500,6 +987,10 @@ export type DeleteItemErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -521,6 +1012,10 @@ export type DeleteItemErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -566,6 +1061,10 @@ export type GetItemErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -587,6 +1086,10 @@ export type GetItemErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -613,6 +1116,7 @@ export type GetItemResponses = {
         content_md: string;
         dirty: boolean;
         responses: 'default' | 'show' | 'hide';
+        highlight: 'default' | 'show' | 'hide';
         provenance: Array<GenerationProvenance | null>;
         stub_of: VersionReference | {
             url: string;
@@ -631,6 +1135,7 @@ export type GetItemResponse = GetItemResponses[keyof GetItemResponses];
 
 export type UpdateItemData = {
     body: {
+        provenance?: Array<GenerationProvenance | null>;
         content_md?: string;
         kind?: 'fragment' | 'thread';
         stub_of?: VersionReference | {
@@ -638,6 +1143,7 @@ export type UpdateItemData = {
             cited?: Citation;
         } | null;
         responses?: 'default' | 'show' | 'hide';
+        highlight?: 'default' | 'show' | 'hide';
     };
     path: {
         id: string;
@@ -655,6 +1161,10 @@ export type UpdateItemErrors = {
      * Request failed
      */
     401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
     /**
      * Request failed
      */
@@ -679,6 +1189,10 @@ export type UpdateItemErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -724,6 +1238,10 @@ export type PublishItemErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -745,6 +1263,10 @@ export type PublishItemErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -791,6 +1313,10 @@ export type DraftNoteErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -812,6 +1338,10 @@ export type DraftNoteErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -860,6 +1390,10 @@ export type GenerateItemErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -884,6 +1418,10 @@ export type GenerateItemErrors = {
     /**
      * Request failed
      */
+    429: ApiError;
+    /**
+     * Request failed
+     */
     500: ApiError;
     /**
      * Request failed
@@ -900,6 +1438,7 @@ export type GenerateItemResponses = {
     200: {
         text: string;
         model: string;
+        content_md: string;
     };
 };
 
@@ -928,6 +1467,10 @@ export type WithdrawItemErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -949,6 +1492,10 @@ export type WithdrawItemErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -995,6 +1542,10 @@ export type PinItemErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -1016,6 +1567,10 @@ export type PinItemErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -1064,6 +1619,10 @@ export type RestoreItemErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -1085,6 +1644,10 @@ export type RestoreItemErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -1134,6 +1697,10 @@ export type UploadMediaErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -1155,6 +1722,10 @@ export type UploadMediaErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -1201,6 +1772,10 @@ export type DeleteMediaErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -1222,6 +1797,10 @@ export type DeleteMediaErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -1265,6 +1844,10 @@ export type GetSettingsErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -1286,6 +1869,10 @@ export type GetSettingsErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -1311,7 +1898,12 @@ export type UpdateSettingsData = {
     body: {
         site_title?: string;
         theme?: string;
+        custom_theme?: CustomTheme;
+        custom_theme_dark?: CustomTheme;
+        custom_theme_name?: string;
+        font?: string;
         author_name?: string;
+        author_url?: string;
         author_bio?: string;
         author_links?: Array<{
             label: string;
@@ -1329,9 +1921,15 @@ export type UpdateSettingsData = {
         accept_mentions?: boolean;
         update_check?: boolean;
         show_responses_default?: boolean;
+        highlight_generated_default?: boolean;
         auto_change_notes?: boolean;
+        picker_typing?: 'auto' | 'editor' | 'panel';
         update_feed_url?: string;
         update_notice_ack?: boolean;
+        /**
+         * Studio extensions enabled on this node (docs/extensions.md). Only names compiled into this build are accepted; every extension starts disabled.
+         */
+        extensions?: Array<string>;
     };
     path?: never;
     query?: never;
@@ -1347,6 +1945,10 @@ export type UpdateSettingsErrors = {
      * Request failed
      */
     401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
     /**
      * Request failed
      */
@@ -1371,6 +1973,10 @@ export type UpdateSettingsErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -1414,6 +2020,10 @@ export type ListSubscriptionsErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -1435,6 +2045,10 @@ export type ListSubscriptionsErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -1484,6 +2098,10 @@ export type CreateSubscriptionErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -1505,6 +2123,10 @@ export type CreateSubscriptionErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -1561,6 +2183,10 @@ export type DeleteSubscriptionErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -1582,6 +2208,10 @@ export type DeleteSubscriptionErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -1626,6 +2256,10 @@ export type GetSubscriptionErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -1647,6 +2281,10 @@ export type GetSubscriptionErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -1671,7 +2309,10 @@ export type GetSubscriptionResponse = GetSubscriptionResponses[keyof GetSubscrip
 export type UpdateSubscriptionData = {
     body: {
         in_blogroll?: boolean;
-        title?: string;
+        /**
+         * A name of your own; null hands the name back to the source, refreshed while polling.
+         */
+        title?: string | null;
         paused?: boolean;
     };
     path: {
@@ -1690,6 +2331,10 @@ export type UpdateSubscriptionErrors = {
      * Request failed
      */
     401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
     /**
      * Request failed
      */
@@ -1717,6 +2362,10 @@ export type UpdateSubscriptionErrors = {
     /**
      * Request failed
      */
+    429: ApiError;
+    /**
+     * Request failed
+     */
     500: ApiError;
     /**
      * Request failed
@@ -1734,6 +2383,77 @@ export type UpdateSubscriptionResponses = {
 };
 
 export type UpdateSubscriptionResponse = UpdateSubscriptionResponses[keyof UpdateSubscriptionResponses];
+
+export type PollAllSubscriptionsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/subscriptions/poll';
+};
+
+export type PollAllSubscriptionsErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    405: ApiError;
+    /**
+     * Request failed
+     */
+    409: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    415: ApiError;
+    /**
+     * Request failed
+     */
+    422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+    /**
+     * Request failed
+     */
+    502: ApiError;
+};
+
+export type PollAllSubscriptionsError = PollAllSubscriptionsErrors[keyof PollAllSubscriptionsErrors];
+
+export type PollAllSubscriptionsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        polling: number;
+    };
+};
+
+export type PollAllSubscriptionsResponse = PollAllSubscriptionsResponses[keyof PollAllSubscriptionsResponses];
 
 export type ResyncSubscriptionData = {
     body?: never;
@@ -1756,6 +2476,10 @@ export type ResyncSubscriptionErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -1777,6 +2501,10 @@ export type ResyncSubscriptionErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -1823,6 +2551,10 @@ export type ListHoppersErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -1844,6 +2576,10 @@ export type ListHoppersErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -1891,6 +2627,10 @@ export type CreateHopperErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -1912,6 +2652,10 @@ export type CreateHopperErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -1954,6 +2698,10 @@ export type DeleteHopperErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -1975,6 +2723,10 @@ export type DeleteHopperErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -2021,6 +2773,10 @@ export type GetHopperErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -2042,6 +2798,10 @@ export type GetHopperErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -2094,6 +2854,10 @@ export type UpdateHopperErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -2115,6 +2879,10 @@ export type UpdateHopperErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -2159,6 +2927,10 @@ export type RemoveHopperItemErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -2180,6 +2952,10 @@ export type RemoveHopperItemErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -2226,6 +3002,10 @@ export type AddHopperItemErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -2247,6 +3027,10 @@ export type AddHopperItemErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -2292,6 +3076,10 @@ export type DeleteSignalErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -2313,6 +3101,10 @@ export type DeleteSignalErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -2360,6 +3152,10 @@ export type SetSignalErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -2384,6 +3180,10 @@ export type SetSignalErrors = {
     /**
      * Request failed
      */
+    429: ApiError;
+    /**
+     * Request failed
+     */
     500: ApiError;
     /**
      * Request failed
@@ -2403,6 +3203,323 @@ export type SetSignalResponses = {
 };
 
 export type SetSignalResponse = SetSignalResponses[keyof SetSignalResponses];
+
+export type MarkUnreadData = {
+    body?: never;
+    path: {
+        sub: string;
+        remoteId: string;
+    };
+    query?: never;
+    url: '/api/reading/{sub}/{remoteId}/read';
+};
+
+export type MarkUnreadErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    405: ApiError;
+    /**
+     * Request failed
+     */
+    409: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    415: ApiError;
+    /**
+     * Request failed
+     */
+    422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+    /**
+     * Request failed
+     */
+    502: ApiError;
+};
+
+export type MarkUnreadError = MarkUnreadErrors[keyof MarkUnreadErrors];
+
+export type MarkUnreadResponses = {
+    /**
+     * Success
+     */
+    200: {
+        ok: boolean;
+        stored: false;
+        read_version: null;
+    };
+};
+
+export type MarkUnreadResponse = MarkUnreadResponses[keyof MarkUnreadResponses];
+
+export type MarkReadData = {
+    body: {
+        version: number;
+        /**
+         * When the client read it (ISO-8601). A read earlier than the row's latest clear is ignored; omitted, the read always applies.
+         */
+        read_at?: string;
+    };
+    path: {
+        sub: string;
+        remoteId: string;
+    };
+    query?: never;
+    url: '/api/reading/{sub}/{remoteId}/read';
+};
+
+export type MarkReadErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    405: ApiError;
+    /**
+     * Request failed
+     */
+    409: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    415: ApiError;
+    /**
+     * Request failed
+     */
+    422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+    /**
+     * Request failed
+     */
+    502: ApiError;
+};
+
+export type MarkReadError = MarkReadErrors[keyof MarkReadErrors];
+
+export type MarkReadResponses = {
+    /**
+     * Success
+     */
+    200: {
+        ok: boolean;
+        stored: boolean;
+        read_version: number | null;
+    };
+};
+
+export type MarkReadResponse = MarkReadResponses[keyof MarkReadResponses];
+
+export type MarkReadBatchData = {
+    body: {
+        items: Array<{
+            sub: string;
+            remote_id: string;
+            version: number;
+            /**
+             * When the client read it (ISO-8601). A read earlier than the row's latest clear is ignored; omitted, the read always applies.
+             */
+            read_at?: string;
+        }>;
+    };
+    path?: never;
+    query?: never;
+    url: '/api/reading/read';
+};
+
+export type MarkReadBatchErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    405: ApiError;
+    /**
+     * Request failed
+     */
+    409: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    415: ApiError;
+    /**
+     * Request failed
+     */
+    422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+    /**
+     * Request failed
+     */
+    502: ApiError;
+};
+
+export type MarkReadBatchError = MarkReadBatchErrors[keyof MarkReadBatchErrors];
+
+export type MarkReadBatchResponses = {
+    /**
+     * Success
+     */
+    200: {
+        ok: boolean;
+        received: number;
+    };
+};
+
+export type MarkReadBatchResponse = MarkReadBatchResponses[keyof MarkReadBatchResponses];
+
+export type MarkUnreadBatchData = {
+    body: {
+        items: Array<{
+            sub: string;
+            remote_id: string;
+        }>;
+    };
+    path?: never;
+    query?: never;
+    url: '/api/reading/unread';
+};
+
+export type MarkUnreadBatchErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    405: ApiError;
+    /**
+     * Request failed
+     */
+    409: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    415: ApiError;
+    /**
+     * Request failed
+     */
+    422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+    /**
+     * Request failed
+     */
+    502: ApiError;
+};
+
+export type MarkUnreadBatchError = MarkUnreadBatchErrors[keyof MarkUnreadBatchErrors];
+
+export type MarkUnreadBatchResponses = {
+    /**
+     * Success
+     */
+    200: {
+        ok: boolean;
+        received: number;
+    };
+};
+
+export type MarkUnreadBatchResponse = MarkUnreadBatchResponses[keyof MarkUnreadBatchResponses];
 
 export type UpdateMentionData = {
     body: {
@@ -2427,6 +3544,10 @@ export type UpdateMentionErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -2448,6 +3569,10 @@ export type UpdateMentionErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -2494,6 +3619,10 @@ export type ListSignalsErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -2515,6 +3644,10 @@ export type ListSignalsErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -2564,6 +3697,10 @@ export type ListInteractionsErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -2585,6 +3722,10 @@ export type ListInteractionsErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -2630,6 +3771,10 @@ export type ListThumbsErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -2651,6 +3796,10 @@ export type ListThumbsErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -2693,6 +3842,10 @@ export type GetAiModelsErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -2714,6 +3867,10 @@ export type GetAiModelsErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -2758,6 +3915,10 @@ export type ListMentionsErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -2779,6 +3940,10 @@ export type ListMentionsErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -2829,6 +3994,10 @@ export type PreviewErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -2850,6 +4019,10 @@ export type PreviewErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -2875,6 +4048,23 @@ export type PreviewResponses = {
             hasOutput: boolean;
             block: boolean;
             imported: boolean;
+            sources: Array<{
+                id: string;
+                ok: boolean;
+                /**
+                 * "you", or the subscription title of a remote source
+                 */
+                from?: string;
+                /**
+                 * A remote source: its author is sent a `source` mention when the generated text is published.
+                 */
+                remote?: boolean;
+                excerpt?: string;
+                /**
+                 * Why generate would refuse this source
+                 */
+                reason?: string;
+            }>;
         }>;
         link_errors?: Array<{
             id?: string;
@@ -2901,6 +4091,9 @@ export type SearchData = {
         offset?: number | null;
         limit?: number;
         q?: string;
+        source?: 'all' | 'mine' | 'imported';
+        sub?: string;
+        sort?: 'newest' | 'oldest';
     };
     url: '/api/search';
 };
@@ -2914,6 +4107,10 @@ export type SearchErrors = {
      * Request failed
      */
     401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
     /**
      * Request failed
      */
@@ -2941,6 +4138,10 @@ export type SearchErrors = {
     /**
      * Request failed
      */
+    429: ApiError;
+    /**
+     * Request failed
+     */
     500: ApiError;
     /**
      * Request failed
@@ -2961,6 +4162,10 @@ export type SearchResponses = {
             version: number;
             updated: string;
             badge: string;
+            source: 'mine' | 'imported';
+            kind: 'fragment' | 'thread';
+            subscription_id: string | null;
+            source_title: string | null;
         }>;
         total: number;
         offset: number;
@@ -2992,6 +4197,10 @@ export type GetVersionErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -3013,6 +4222,10 @@ export type GetVersionErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -3058,6 +4271,10 @@ export type ListReadingErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -3079,6 +4296,10 @@ export type ListReadingErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -3108,22 +4329,33 @@ export type ListReadingResponses = {
         offset: number;
         limit: number;
         selected: string;
+        /**
+         * This server stores read state: each imported entry's readVersion is meaningful.
+         */
+        read_state: true;
+        /**
+         * Read state can be cleared: DELETE /reading/{sub}/{remoteId}/read, POST /reading/unread, and read_at on reads.
+         */
+        read_state_clear: true;
     };
 };
 
 export type ListReadingResponse = ListReadingResponses[keyof ListReadingResponses];
 
-export type GetImportedItemData = {
+export type ListImportedReadingData = {
     body?: never;
-    path: {
-        sub: string;
-        id: string;
+    path?: never;
+    query?: {
+        /**
+         * The next value of the previous page. Opaque.
+         */
+        cursor?: string;
+        limit?: number;
     };
-    query?: never;
-    url: '/api/imports/{sub}/{id}';
+    url: '/api/reading/imported';
 };
 
-export type GetImportedItemErrors = {
+export type ListImportedReadingErrors = {
     /**
      * Request failed
      */
@@ -3132,6 +4364,10 @@ export type GetImportedItemErrors = {
      * Request failed
      */
     401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
     /**
      * Request failed
      */
@@ -3156,6 +4392,89 @@ export type GetImportedItemErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+    /**
+     * Request failed
+     */
+    502: ApiError;
+};
+
+export type ListImportedReadingError = ListImportedReadingErrors[keyof ListImportedReadingErrors];
+
+export type ListImportedReadingResponses = {
+    /**
+     * Success
+     */
+    200: {
+        items: Array<ImportedReadingEntry>;
+        /**
+         * Pass as cursor for the next page; null on the last page.
+         */
+        next: string | null;
+        limit: number;
+    };
+};
+
+export type ListImportedReadingResponse = ListImportedReadingResponses[keyof ListImportedReadingResponses];
+
+export type GetImportedItemData = {
+    body?: never;
+    path: {
+        sub: string;
+        id: string;
+    };
+    query?: never;
+    url: '/api/imports/{sub}/{id}';
+};
+
+export type GetImportedItemErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    405: ApiError;
+    /**
+     * Request failed
+     */
+    409: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    415: ApiError;
+    /**
+     * Request failed
+     */
+    422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -3199,6 +4518,10 @@ export type GetImportedHistoryErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -3220,6 +4543,10 @@ export type GetImportedHistoryErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -3274,6 +4601,10 @@ export type GetImportedVersionErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -3295,6 +4626,10 @@ export type GetImportedVersionErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -3340,6 +4675,10 @@ export type GetUpdateStateErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -3361,6 +4700,10 @@ export type GetUpdateStateErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -3405,6 +4748,10 @@ export type GetMentionSourceErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -3426,6 +4773,10 @@ export type GetMentionSourceErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -3469,6 +4820,10 @@ export type ListStaleThreadsErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -3490,6 +4845,10 @@ export type ListStaleThreadsErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -3536,6 +4895,10 @@ export type GetItemFreshnessErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -3557,6 +4920,10 @@ export type GetItemFreshnessErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -3601,6 +4968,10 @@ export type RefreshItemErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -3622,6 +4993,10 @@ export type RefreshItemErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -3672,6 +5047,10 @@ export type GetForkOptionsErrors = {
     /**
      * Request failed
      */
+    403: ApiError;
+    /**
+     * Request failed
+     */
     404: ApiError;
     /**
      * Request failed
@@ -3693,6 +5072,10 @@ export type GetForkOptionsErrors = {
      * Request failed
      */
     422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
     /**
      * Request failed
      */
@@ -3722,3 +5105,154 @@ export type GetForkOptionsResponses = {
 };
 
 export type GetForkOptionsResponse = GetForkOptionsResponses[keyof GetForkOptionsResponses];
+
+export type ExtLineageGlyphGetLineageData = {
+    body?: never;
+    path?: never;
+    query: {
+        id: string;
+        sub?: string;
+        origin?: string;
+    };
+    url: '/api/ext/lineage-glyph/lineage';
+};
+
+export type ExtLineageGlyphGetLineageErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    405: ApiError;
+    /**
+     * Request failed
+     */
+    409: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    415: ApiError;
+    /**
+     * Request failed
+     */
+    422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+    /**
+     * Request failed
+     */
+    502: ApiError;
+};
+
+export type ExtLineageGlyphGetLineageError = ExtLineageGlyphGetLineageErrors[keyof ExtLineageGlyphGetLineageErrors];
+
+export type ExtLineageGlyphGetLineageResponses = {
+    /**
+     * Success
+     */
+    200: LineageGlyphLineage;
+};
+
+export type ExtLineageGlyphGetLineageResponse = ExtLineageGlyphGetLineageResponses[keyof ExtLineageGlyphGetLineageResponses];
+
+export type ExtLineageGlyphListSummariesData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * A JSON array of up to 50 reading entry keys.
+         */
+        keys: string;
+    };
+    url: '/api/ext/lineage-glyph/summaries';
+};
+
+export type ExtLineageGlyphListSummariesErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    405: ApiError;
+    /**
+     * Request failed
+     */
+    409: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    415: ApiError;
+    /**
+     * Request failed
+     */
+    422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+    /**
+     * Request failed
+     */
+    502: ApiError;
+};
+
+export type ExtLineageGlyphListSummariesError = ExtLineageGlyphListSummariesErrors[keyof ExtLineageGlyphListSummariesErrors];
+
+export type ExtLineageGlyphListSummariesResponses = {
+    /**
+     * Success
+     */
+    200: {
+        summaries: {
+            [key: string]: LineageGlyphSummary;
+        };
+    };
+};
+
+export type ExtLineageGlyphListSummariesResponse = ExtLineageGlyphListSummariesResponses[keyof ExtLineageGlyphListSummariesResponses];

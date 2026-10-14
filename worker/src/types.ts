@@ -1,3 +1,4 @@
+import type { CustomTheme } from "./themes.ts";
 export interface Env {
   DB: D1Database;
   MEDIA: R2Bucket;
@@ -11,12 +12,41 @@ export interface Env {
    * protocol vocabulary.
    */
   MOUNT?: string;
+  /** Explicit network exception; unset/false restricts outbound destinations. */
+  ALLOW_PRIVATE_FETCH?: string;
+  /** Owner/per-grant authenticated API calls per minute (default: 1,200 reads and 120 writes). */
+  API_READ_LIMIT?: string;
+  /** Authenticated MCP envelopes per minute, including discovery (default 300). */
+  MCP_REQUEST_LIMIT?: string;
+  API_WRITE_LIMIT?: string;
+  /** Delegated aggregate per-minute API ceilings; owner quotas are separate. */
+  API_DELEGATED_READ_LIMIT?: string;
+  API_DELEGATED_WRITE_LIMIT?: string;
+  MCP_DELEGATED_REQUEST_LIMIT?: string;
+  /** Total AI calls reserved for owner/background work (default 5). */
+  AI_OWNER_RESERVED_CALLS?: string;
+  AI_GRANT_DAILY_CALL_LIMIT?: string;
+  /** REST/authorization request bytes (default 8 MiB). */
+  API_BODY_LIMIT?: string;
+  /** Actual AI provider calls per UTC day (default: 20). */
+  AI_DAILY_CALL_LIMIT?: string;
+  /** Stored OAuth clients plus pending anonymous registrations (default: 100). */
+  OAUTH_CLIENT_LIMIT?: string;
+  /** Grace for abandoned unapproved anonymous clients (default 24 hours). */
+  OAUTH_UNAPPROVED_CLIENT_TTL_SECONDS?: string;
   /** The Anthropic API key (the manifest's anthropic key_secret). Wrangler secret, per security-policy.md — never in code or .dev.vars committed to git. */
   AI_PROVIDER_KEY?: string;
   /** OpenAI API key, when an OpenAI model is chosen in Settings (0.26.0). Wrangler secret. */
   OPENAI_API_KEY?: string;
   /** Google Gemini API key, when a Gemini model is chosen in Settings (0.26.0). Wrangler secret. */
   GOOGLE_AI_KEY?: string;
+  /**
+   * The Workers AI binding (`"ai": { "binding": "AI" }` in wrangler.jsonc), for
+   * `@cf/…` models (studio#8). Optional and off by default: a model only runs
+   * on it when the operator picks one in Settings. A `workers-ai` provider in
+   * models.local.json may name a different binding; this is the default.
+   */
+  AI?: Ai;
 }
 
 export interface ItemRow {
@@ -52,6 +82,8 @@ export interface ItemRow {
    * about should not.
    */
   responses_override: number | null;
+  /** Highlight generated spans on public pages: NULL inherits `highlight_generated_default` (migration 0020). */
+  highlight_override: number | null;
   /**
    * Working-copy stub citation (migration 0007, v0.3-plan §2.2) — JSON `StubOf`
    * or null. Threads only. Carried onto the published version by publish(),
@@ -162,9 +194,22 @@ export interface StubCite {
   retrieved: string;
 }
 
+/**
+ * One `generated[].sources[]` entry: the §5.9 reference (0.3 §16.3, decision
+ * #44). `origin` is present for a remote source and omitted for our own, so
+ * every document published before remote sources stays valid. A remote source
+ * carries its frozen human half, composed when the scope was generated.
+ */
+export interface GenerationSource {
+  id: string;
+  version: number;
+  origin?: string;
+  cited?: StubCite;
+}
+
 /** Per-scope TK generation provenance (tk-core-plan.md §3.1/§4). */
 export interface ScopeProvenance {
-  sources: { id: string; version: number }[];
+  sources: GenerationSource[];
   model?: string;
   at?: string;
 }
@@ -227,6 +272,10 @@ export interface SubscriptionRow {
   /** JSON array of ImporterFlag strings — the discrepancy log surfaced in the subs UI. */
   flags: string;
   created: string;
+  /** 1 = the title follows the source (manifest or channel title); 0 = the owner named it. */
+  title_auto: number;
+  /** JSON `Surface` (src/surface.ts): where a templated blyg's files live. NULL = default paths. */
+  surface: string | null;
 }
 
 export interface ImportedItemRow {
@@ -252,6 +301,8 @@ export interface ImportedItemRow {
   stub_of_json: string | null;
   /** The origin's `forked_from`, verbatim JSON (migration 0017). */
   forked_from_json: string | null;
+  /** JSON `generated` array as published (migration 0027); null when none or imported before it. */
+  generated_json: string | null;
 }
 
 export interface HopperRow {
@@ -283,7 +334,7 @@ export interface SignalRow {
 // --- v0.3 "Trunk" Webmention (migration 0007, v0.3-plan.md §4.1) ---
 
 /** Why a mention relates to us — read out of the source document's own structure, never from body text (§2.3.5). */
-export type MentionRelation = "stub" | "transclusion" | "fork";
+export type MentionRelation = "stub" | "transclusion" | "fork" | "source";
 
 /**
  * An inbound mention. `pending` → `verified` | `failed` | `gone`; a row that
@@ -338,9 +389,19 @@ export interface MentionOutRow {
 /** Site settings with defaults applied. */
 export interface Settings {
   site_title: string;
-  /** Reading theme for the public pages — a key of THEMES, or "auto" to follow the reader's system preference. */
+  /** Reading theme for the public pages — a key of THEMES, "custom" for custom_theme, or "auto" to follow the reader's system preference. */
   theme: string;
+  /** The author's own palette (the nine values a preset has), used when theme is "custom". Null until one is saved. */
+  custom_theme: CustomTheme | null;
+  /** Optional dark companion to custom_theme. When set, the custom theme follows the reader's light/dark preference, as Auto does. */
+  custom_theme_dark: CustomTheme | null;
+  /** What the custom look is called when shared ("Pink Quill"). Empty when unnamed. */
+  custom_theme_name: string;
+  /** Reading typeface for the public pages: a key of FONTS (system font stacks only). "book" is the stylesheet's own. */
+  font: string;
   author_name: string;
+  /** Where the author is found on the web (§2.3 `author.url`); empty = the blyg's own address. */
+  author_url: string;
   author_bio: string;
   author_links: AuthorLink[];
   /** Canonical origin (full base URL incl. any mount path, e.g. https://example.com/blyg/); empty = derive from request origin + MOUNT. */
@@ -416,12 +477,15 @@ export interface Settings {
    * from per-item to once — it does not reverse it.
    */
   show_responses_default: boolean;
+  highlight_generated_default: boolean;
   /**
    * Draft a changelog note with the configured model whenever a new version is
    * published with an empty note (#40). The draft is shown for editing before
    * anything is published; off by default, because it spends the operator's key.
    */
   auto_change_notes: boolean;
+  /** Where you type to search in the [[ / ![[ picker (0.29): auto = the editor with a mouse, the panel on touch. */
+  picker_typing: "auto" | "editor" | "panel";
   /** Where to ask. Configurable so a fork checks its own releases, not ours. */
   update_feed_url: string;
   /**
@@ -431,6 +495,8 @@ export interface Settings {
    * saying so plainly is what buys the default.
    */
   update_notice_ack: boolean;
+  /** Studio extensions enabled on this node (docs/extensions.md). Every extension starts disabled. */
+  extensions: string[];
 }
 
 /**
@@ -506,8 +572,16 @@ export const GENERATOR_URL = CLIENT.url;
  * the blogroll key and its document was not drafted until session 20. The key
  * reports what the wire carries; the document follows (decision #21 — building
  * the implementation is how the protocol gets tested).
+ *
+ * "0.4" since 0.41.0 (session 44): remote generation sources (0.3 §16.3,
+ * decision #44) put `origin` on `generated[].sources[]` and a `source`
+ * mention on the wire, a construct a receiver must act on (#43), and the
+ * templated surface (§16.6e) was already read. Bumped with the build and
+ * before `protocol-v0.4.md` exists, as both earlier bumps were. Pinned files
+ * report it too: a pin's promise is its content (§8 rules 1 and 6), and this
+ * key says what the serving deployment implements.
  */
-export const PROTOCOL_VERSION = "0.3";
+export const PROTOCOL_VERSION = "0.4";
 /**
  * The conformance level this deployment implements. **2 since session 27:** 0.3
  * §3 defines L2 as this specification, and live nodes were publishing 0.3

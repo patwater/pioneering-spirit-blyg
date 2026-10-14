@@ -64,8 +64,31 @@ function extractSourceIds(scopeText: string): string[] {
   return ids;
 }
 
-const BLANK_BEFORE = /(^|\n[ \t]*\n)[ \t]*$/;
-const BLANK_AFTER = /^[ \t]*(\n[ \t]*\n|$)/;
+const OWN_LINE_DIRECTIVE = new RegExp(`^[ \\t]*!\\[\\[([${ID_ALPHABET}]{26})\\]\\][ \\t]*$`, "gm");
+
+/**
+ * Ids that sit on their own line in a scope's generated output without being
+ * named by its instruction (decision #60). At publish such a line is an
+ * ordinary transclusion directive — it bakes a quote and notifies the quoted
+ * origin — which is right when the author put it there and a surprise when a
+ * model echoed it, so publish warns rather than refuses.
+ */
+export function unrequestedOutputDirectives(contentMd: string): string[] {
+  const { scopes } = parseScopes(contentMd);
+  const found: string[] = [];
+  for (const s of scopes) {
+    if (s.imported || s.output === null) continue;
+    for (const m of s.output.matchAll(OWN_LINE_DIRECTIVE)) {
+      if (!s.sourceIds.includes(m[1]) && !found.includes(m[1])) found.push(m[1]);
+    }
+  }
+  return found;
+}
+
+// Document edges count as blank lines even with stray whitespace or one newline
+// between the scope and the edge (roadmap row 2): editors commonly end a post with "\n".
+const BLANK_BEFORE = /(^\s*|\n[ \t]*\n)[ \t]*$/;
+const BLANK_AFTER = /^[ \t]*(\n[ \t]*\n|\s*$)/;
 
 function isBlockPosition(contentMd: string, start: number, end: number): boolean {
   return BLANK_BEFORE.test(contentMd.slice(0, start)) && BLANK_AFTER.test(contentMd.slice(end));
@@ -84,27 +107,32 @@ export function parseScopes(contentMd: string): { scopes: TkScope[]; errors: TkP
   const errors: TkParseError[] = [];
   // A `[TK]` written inside code is an example of the grammar, not a scope
   // (studio#3), the same exemption the bracket grammar has (§10.1, #54).
+  // Every token is looked for outside code, not only the opening one: a
+  // `[TK]` or `[/TK]` quoted in code inside a scope is text, not a nested
+  // scope or an early close (found publishing a changelog that quoted `[TK]`
+  // inside an impyrt scope, session 45).
   const code = contentMd.includes("[TK]") ? codeRanges(contentMd) : [];
+  const find = (token: string, from: number) => {
+    let at = contentMd.indexOf(token, from);
+    while (at !== -1 && inRanges(code, at)) at = contentMd.indexOf(token, at + token.length);
+    return at;
+  };
   let i = 0;
   while (true) {
-    const tkIdx = contentMd.indexOf("[TK]", i);
+    const tkIdx = find("[TK]", i);
     if (tkIdx === -1) break;
-    if (inRanges(code, tkIdx)) {
-      i = tkIdx + 4;
-      continue;
-    }
-    const closeIdx = contentMd.indexOf("[/TK]", tkIdx + 4);
+    const closeIdx = find("[/TK]", tkIdx + 4);
     if (closeIdx === -1) {
       errors.push({ at: tkIdx, reason: "unterminated scope (missing [/TK])" });
       break;
     }
-    const nestedIdx = contentMd.indexOf("[TK]", tkIdx + 4);
+    const nestedIdx = find("[TK]", tkIdx + 4);
     if (nestedIdx !== -1 && nestedIdx < closeIdx) {
       errors.push({ at: nestedIdx, reason: "nested TK scopes are not supported" });
       i = closeIdx + 5;
       continue;
     }
-    const eqIdx = contentMd.indexOf("[=]", tkIdx + 4);
+    const eqIdx = find("[=]", tkIdx + 4);
     const hasEq = eqIdx !== -1 && eqIdx < closeIdx;
     const instrEnd = hasEq ? eqIdx : closeIdx;
     let instruction = contentMd.slice(tkIdx + 4, instrEnd).trim();
@@ -128,7 +156,11 @@ export function parseScopes(contentMd: string): { scopes: TkScope[]; errors: TkP
       end,
       instruction,
       output,
-      sourceIds: imported ? [] : extractSourceIds(contentMd.slice(tkIdx, end)),
+      // Sources are what the generator was fed: the instruction's directives
+      // only (decision #60). A directive in the *output* is content — on its own
+      // line it becomes a real quote at publish — and is a source only if the
+      // instruction also names it.
+      sourceIds: imported ? [] : extractSourceIds(contentMd.slice(tkIdx + 4, instrEnd)),
       outputStart,
       block: isBlockPosition(contentMd, tkIdx, end),
       ...(imported ? { imported } : {}),

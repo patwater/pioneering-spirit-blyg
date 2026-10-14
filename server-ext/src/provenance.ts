@@ -9,7 +9,7 @@
 
 import { getItem } from "../../worker/src/model.ts";
 import { parseScopes } from "../../worker/src/tk.ts";
-import { resolveFragment } from "../../worker/src/transclusion.ts";
+import { resolveTarget } from "../../worker/src/transclusion.ts";
 import type { ScopeProvenance } from "../../worker/src/types.ts";
 import { type Env, badRequest, json, notFound, parseJson, readJson } from "./http.ts";
 import { checkScopes } from "./provenance-check.ts";
@@ -50,16 +50,28 @@ export async function putProvenance(req: Request, env: Env, id: string): Promise
     }
     const sources: ScopeProvenance["sources"] = [];
     for (const s of e.sources) {
-      const r = await resolveFragment(env.DB, s.id);
+      const r = await resolveTarget(env.DB, s.id);
       if (!r.ok) {
         errors.push({ index, reason: `source ${s.id}: ${r.reason}` });
         continue;
       }
-      if (s.version !== undefined && s.version > r.version.version) {
+      // Upstream 0.41 lets a TK scope draw on threads and imported items, but
+      // Desktop's recorded provenance has only ever named this blyg's own
+      // fragments, and a remote source needs an origin and a citation it
+      // cannot supply here, so those stay refused.
+      if (r.target.origin !== undefined) {
+        errors.push({ index, reason: `source ${s.id}: only this blyg's own fragments can be recorded as sources` });
+        continue;
+      }
+      if (r.target.kind === "thread") {
+        errors.push({ index, reason: `source ${s.id}: cannot use a thread as a recorded source` });
+        continue;
+      }
+      if (s.version !== undefined && s.version > r.target.version) {
         errors.push({ index, reason: `source ${s.id}: version ${s.version} was never published` });
         continue;
       }
-      sources.push({ id: s.id, version: s.version ?? r.version.version });
+      sources.push({ id: s.id, version: s.version ?? r.target.version });
     }
     stored.push({ sources, model: e.model, at: e.at ?? now });
   }

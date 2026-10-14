@@ -11,17 +11,23 @@ import { Link, useLocation } from '@tanstack/react-router';
 import { useLiveQuery } from '@tanstack/react-db';
 import {
   settings as settingsCollection,
+  items as itemsCollection,
   polling,
   queryClient,
   updates,
 } from './data.ts';
 import { readState } from '../versions.ts';
+import { displayUrl } from '../importer/util.ts';
 import { Sheet } from './sheets.tsx';
 import { applyTheme } from './theme.ts';
+import type { CustomTheme } from '../themes.ts';
 export { Button };
 export const mount =
   document.getElementById('studio-root')!.dataset.mount ?? '';
 export const basepath = `${mount}/studio`;
+/** An item's public permalink, mount-relative (the page a reader sees). */
+export const publicPath = (item: { id: string; kind: string }) =>
+  `${mount}/${item.kind === 'thread' ? 't' : 'f'}/${item.id}/`;
 export function usePoll(key: string, refresh: () => Promise<unknown>) {
   useEffect(() => polling.watch(key, refresh), [key, refresh]);
 }
@@ -42,6 +48,15 @@ export function useUpdateState() {
         update_checked_at: row.update_checked_at || '',
       })
     : undefined;
+}
+/** Every reading card's citation line: where the entry lives, in a new tab. */
+export function SourceLink({ url }: { url?: string | null }) {
+  return url ? (
+    <a className="entry-src" href={url} target="_blank" rel="noreferrer">
+      <span aria-hidden="true">↗ </span>
+      {displayUrl(url)}
+    </a>
+  ) : null;
 }
 export function Html({ html, id }: { html: string; id?: string }) {
   return <div id={id} dangerouslySetInnerHTML={{ __html: html }} />;
@@ -76,6 +91,7 @@ export function Modal({
     </Sheet>
   );
 }
+
 
 /* ---------------- CHROME ----------------
  * A screen tells the Layout how to frame it with useChrome():
@@ -124,6 +140,7 @@ const tabs = [
   { label: 'mentions', to: '/mentions', icon: '↩' },
   { label: 'updates', to: '/updates', icon: '↻' },
   { label: 'more', to: '/more', icon: '⋯' },
+
 ] as const;
 type Tab = (typeof tabs)[number]['label'];
 /** Which tab owns a studio path (relative to the basepath). */
@@ -134,7 +151,7 @@ export function tabFor(path: string): Tab | null {
   if (p === '/hoppers' || p.startsWith('/hoppers/')) return 'hoppers';
   if (p === '/mentions') return 'mentions';
   if (p === '/updates') return 'updates';
-  if (p === '/more' || p === '/settings' || p === '/syntax' || p === '/signals') return 'more';
+  if (p === '/more' || p === '/settings' || p === '/syntax' || p === '/signals' || p === '/access') return 'more';
   return null;
 }
 function relativePath(pathname: string) {
@@ -157,7 +174,9 @@ export function Layout({ children }: { children: ReactNode }) {
     const failure = (event: Event) => setError((event as CustomEvent).detail);
     window.addEventListener('studio-read-error', failure);
     const unsubscribe = queryClient.getQueryCache().subscribe((event) => {
-      if (event.type === 'updated' && event.query.state.status === 'error')
+      // Source collections report shared-read failures after handling expected 404s.
+      if (event.type === 'updated' && event.query.queryKey[0] !== 'owner-read' &&
+          event.query.state.status === 'error')
         setError(event.query.state.error);
     });
     return () => {
@@ -168,19 +187,41 @@ export function Layout({ children }: { children: ReactNode }) {
   // The studio wears the reading theme. Until settings load, the theme
   // applied at startup (the last one seen on this device) stays.
   const theme = settings?.theme;
+  // The palettes as strings, so the effect re-runs on a changed colour but not
+  // on every new settings object with the same values.
+  const customKey = settings?.custom_theme
+    ? JSON.stringify(settings.custom_theme)
+    : '';
+  const customDarkKey = settings?.custom_theme_dark
+    ? JSON.stringify(settings.custom_theme_dark)
+    : '';
   useEffect(() => {
     if (theme === undefined) return;
-    applyTheme(theme);
-    // `auto` follows the device; keep theme-color in step when it flips.
+    const custom = customKey ? (JSON.parse(customKey) as CustomTheme) : null;
+    const customDark = customDarkKey
+      ? (JSON.parse(customDarkKey) as CustomTheme)
+      : null;
+    applyTheme(theme, custom, customDark);
+    // `auto` and a custom light/dark pair follow the device; keep in step when it flips.
     const media = matchMedia('(prefers-color-scheme: dark)');
-    const flip = () => applyTheme(theme);
+    const flip = () => applyTheme(theme, custom, customDark);
     media.addEventListener('change', flip);
     return () => media.removeEventListener('change', flip);
-  }, [theme]);
+  }, [theme, customKey, customDarkKey]);
   useEffect(() => {
     document.body.classList.toggle('has-tabs', showTabs);
     document.body.classList.toggle('no-tabs', !showTabs);
   }, [showTabs]);
+  // In the editor of a published item, "public page" means that item's page;
+  // everywhere else it is the blyg's home.
+  const editing = path.startsWith('/edit/') ? path.split('/')[2] : undefined;
+  const allItems =
+    useLiveQuery({ query: (q) => q.from({ item: itemsCollection }) }).data;
+  const editedItem = editing
+    ? allItems?.find((item) => item.id === editing)
+    : undefined;
+  const publicHref =
+    editedItem?.status === 'public' ? publicPath(editedItem) : `${mount}/`;
   const behind = !!(settings?.update_check && update?.behind);
   const unacked = !!(settings?.update_check && !settings.update_notice_ack);
   return (
@@ -204,7 +245,7 @@ export function Layout({ children }: { children: ReactNode }) {
           ) : null}
           <a
             className="tb-btn"
-            href={`${mount}/`}
+            href={publicHref}
             target="_blank"
             rel="noreferrer"
             aria-label="public page ↗"

@@ -29,19 +29,27 @@ Consult `openapi.json` for every field and response.
 | Settings | `GET /settings` | `PATCH /settings` |
 | Media | Included in item detail | `POST /media` with a multipart file (`inline=true` when the client places it in the text), `DELETE /media/{id}` (detaches; deletes the file only when no published version shows it) |
 | Imported items | `GET /imports/{sub}/{id}`, `GET /imports/{sub}/{id}/history`, `GET /imports/{sub}/{id}/versions/{v}` (history and public versions, read from the origin) | The subscription importer manages these items |
-| Reading | `GET /reading` | Read only |
+| Reading | `GET /reading`, `GET /reading/imported` (imported items only, cursor-paged; see below) | Read only |
+| Read state | `readVersion` on each imported Reading entry | `PUT`/`DELETE /reading/{sub}/{remoteId}/read`, `POST /reading/read`, `POST /reading/unread` |
+| Change revisions | `GET /changes` | Maintained by database triggers |
 | Quote freshness | `GET /freshness`, `GET /items/{id}/freshness` | `POST /items/{id}/refresh` |
 
 Publication, withdrawal, restoration, and generation remain explicit operations:
 
 - `POST /items/{id}/publish` and `POST /items/{id}/withdraw` accept an optional publication note.
-- `POST /items/{id}/restore` copies a stored version into the working draft. It does not publish.
+- `POST /items/{id}/restore` copies a stored version into the working copy. It does not publish.
 - `POST /items/{id}/generate` generates one TK scope.
 - `POST /subscriptions/{id}/resync` refreshes a Blyg subscription.
 - `POST /items/{id}/note-draft` drafts a changelog note from the change between the published version and the working copy. It never publishes. When the published version is unpinned, the note must not reproduce wording that only that version had; a draft that does returns 422. Send `note_generated: true` with `POST /items/{id}/publish` only when the note is that draft, unedited: it becomes `changelog[].generated` on the wire.
 - `POST /items/{id}/refresh` republishes a thread to re-bake quotes whose source has a newer version. See below.
 
 Preview and search use `/preview` and `/search`.
+`GET /changes` returns `{ epoch, domains }`, with revision counters for items,
+Reading, subscriptions, hoppers, signals, settings and the public feed. It uses
+the same current owner/delegated read authorization as other private reads.
+Clients can skip unchanged data refreshes, but must capture their target before
+loading and acknowledge it only after successful installation. These are change
+signals, not row-delta cursors or permission to cache authorization decisions.
 The old fork, stub, pause, resume, response-policy, and pin routes no longer exist.
 Studio calls the canonical routes through the generated SDK.
 
@@ -148,6 +156,106 @@ Subscription resources omit internal HTTP cache fields.
 Hopper detail includes `total` and `source_count`.
 Use `?preview=true` for an index preview of three memberships and bodies.
 The default hopper detail still includes all memberships and bodies.
+
+## Imported reading feed
+
+`GET /reading` is the Studio's timeline: own and imported entries together,
+sanitized HTML only, paged by offset. A client that syncs what the owner reads
+and writes from it (Blygger Desktop) needs the other shape, and
+`GET /reading/imported` (`listImportedReading`, `owner:read`) is it:
+
+- Every imported item, own items excluded, newest observed first. Each row is
+  an imported entry as `GET /reading` returns it (`subscriptionId`, `remoteId`,
+  `kind`, `withdrawn`, `l0`, `version`, `readVersion`, `updated`, `observedAt`,
+  `contentHtml` (sanitized), `sourceUrl`, `pinnedVersionRetained`, …) plus
+  `origin`, `created`, `contentMd`, `author` (`{ name, url }` or null), `page`
+  (as the origin declared it), `thumb` (the owner's signal: 1, −1 or null),
+  `hoppers` (ids) and the origin's `transclusions`, `stubOf` and `forkedFrom`.
+- The last three are the origin's own JSON, verbatim and unvalidated: remote
+  data, unknown members included. Null means none held, or stored data that is
+  malformed or of the wrong kind.
+- `readVersion` is the read-state join below: null when unread or cleared.
+- Paged by an opaque cursor over `(observed_at, subscription_id, remote_id)`.
+  Pass `next` back as `cursor`; `next` is null on the last page. One poll run
+  stamps one `observed_at` on everything it imports, so ties are common and
+  the cursor resumes inside one. Rows observed after a walk began sort ahead
+  of its cursor, so a poll between two requests neither shifts nor repeats the
+  walk; start a new walk from the top to collect them. A cursor this server
+  did not issue is 400.
+- `limit` defaults to 50 and accepts at most 100; outside 1–100 is 400.
+
+```ts
+let cursor: string | undefined;
+do {
+  const page = await unwrap(BlyggerApi.listImportedReading({ client, query: { cursor, limit: 100 } }));
+  for (const entry of page.items) console.log(entry.subscriptionId, entry.remoteId, entry.readVersion);
+  cursor = page.next ?? undefined;
+} while (cursor);
+```
+
+## Read state
+
+A client that keeps "read" for imported items can store it here, so a post read
+on one device reads as read on the owner's others. Each reading row holds one
+number: the highest version the owner has read. It is Studio-private. No public
+page, feed, item document, `blyg.json` or export reads it.
+
+- `PUT /reading/{sub}/{remoteId}/read` with `{ version }` stores the larger of
+  the held and requested values and returns `{ ok, stored, read_version }`.
+  A replay or a stale client never lowers it.
+- `POST /reading/read` with `{ items: [{ sub, remote_id, version }] }` does the
+  same for up to 500 rows in one transaction and returns `{ ok, received }`.
+  Any malformed entry fails the whole request with 400, and nothing is written.
+  The batch is one request against the write budget, however many rows it marks.
+- A row this server does not hold, by subscription or by item, is acknowledged
+  with 200 and `stored: false`, never 404. Clients may read a 404 from these
+  routes as "this server keeps no read state".
+- `GET /reading` returns `read_state: true`, and each imported entry carries
+  `readVersion`: an integer, or null when unread. A client can rely on the flag
+  rather than probing the write routes. Each imported entry also carries
+  `version`, the version held here: `readVersion` below it means a newer
+  version arrived after the owner read it, and it is the value to send when
+  marking the entry read.
+
+### Marking unread
+
+- `DELETE /reading/{sub}/{remoteId}/read` clears the row and always returns
+  `{ ok: true, stored: false, read_version: null }`. It is idempotent, and an
+  unknown subscription or item is 200 as well, never 404.
+- `POST /reading/unread` with `{ items: [{ sub, remote_id }] }` clears up to 500
+  rows in one transaction and returns `{ ok, received }`, validated whole like
+  `POST /reading/read`.
+- `GET /reading` returns `read_state_clear: true` when the server supports both.
+
+A clear leaves a tombstone: the server records `unread_at`, its own time of
+the clear, and `readVersion` reads null. Both read writes accept an optional
+`read_at` (ISO-8601 with `Z` or an offset; on `PUT` beside `version`, in the
+batch on each item), the time the client read the post:
+
+- A read whose `read_at` is earlier than the row's latest clear is ignored.
+  `PUT` answers `stored: false` with whatever is held; the batch skips that row.
+  Nothing changes, so no revision advances.
+- A read with a later `read_at`, or the same instant, applies.
+- A read with no `read_at` applies, as before clearing existed. Send `read_at`
+  from any client that queues reads offline, or a queued read can undo a later
+  "mark unread" from another device.
+  The Studio acts online and sends none, so its reads always apply.
+
+A clear resets the row, so the next accepted read stores its own version
+rather than the larger of it and the value held before the clear. From there
+reads are monotonic again. The tombstone stays after a read applies, so a
+second stale read is still refused.
+
+`read_at` is compared as an instant (the server normalizes it to UTC) against
+the server's clock. A client whose clock runs fast can make a read look later
+than a clear that followed it; one that runs slow can have a fresh read
+ignored. Clients that cannot trust their clock may omit `read_at` and accept
+last-write-wins.
+
+Version is an integer from 1 (items start there) to 2^32 − 1. All four writes need `reading:state`,
+a scope of their own so a sync-only reader app need not hold `owner:manage`. Read state goes with its imported item or subscription when either
+is deleted, and a change, including a clear, advances the `reading` revision in
+`GET /changes`.
 
 ## Quote freshness
 

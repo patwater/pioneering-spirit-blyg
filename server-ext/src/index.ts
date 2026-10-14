@@ -91,3 +91,7 @@ export default {
   fetch,
   scheduled: reference.scheduled,
 } satisfies ExportedHandler<Env>;
+
+// The reference Worker serves public HTML through this entrypoint (cached by
+// the "exports" block in wrangler.jsonc), so the main module must export it.
+export { PublicHtml } from "../../worker/src/index.ts";

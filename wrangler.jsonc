@@ -11,6 +11,14 @@
   "name": "pioneering-spirit-blyg",
   "main": "server-ext/src/index.ts",
   "compatibility_date": "2026-07-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Only public HTML uses the shared 60-second cache; the router stays
+  // uncached. PublicHtml is exported from server-ext/src/index.ts.
+  "cache": { "enabled": false },
+  "exports": {
+    "PublicHtml": { "type": "worker", "cache": { "enabled": true } }
+  },
 
   // Pin the Cloudflare account so a deploy can never land somewhere else
   // (upstream incident 2026-09-12-01). Find it in the dashboard sidebar or
@@ -45,9 +53,11 @@
   // settings, so a dashboard-only toggle is reset by the next push.
   "observability": { "enabled": true },
 
-  // Poll subscriptions and retry outbound webmentions every 15 minutes.
+  // Warm the saved feed XML every minute; poll subscriptions and retry
+  // outbound webmentions every 15 minutes; repair imports and prune expired
+  // mentions daily at midnight UTC.
   "triggers": {
-    "crons": ["*/15 * * * *"]
+    "crons": ["* * * * *", "*/15 * * * *", "0 0 * * *"]
   },
 
   "d1_databases": [
