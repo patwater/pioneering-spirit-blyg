@@ -27,7 +27,7 @@
 //   settings [file]             push studio settings (default: blyg.settings.json)
 //   status [dir]                list drafts with their ids and versions
 //
-// Environment: BLYG_URL (default https://pioneeringspirit.xyz), BLYG_PASSWORD.
+// Environment: BLYG_URL (default https://blyg.pioneeringspirit.xyz), BLYG_PASSWORD.
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -35,7 +35,7 @@ import { createInterface } from "node:readline/promises";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const SESSION_FILE = path.join(ROOT, ".blyg-session");
-const BASE = (process.env.BLYG_URL ?? "https://pioneeringspirit.xyz").replace(/\/+$/, "");
+const BASE = (process.env.BLYG_URL ?? "https://blyg.pioneeringspirit.xyz").replace(/\/+$/, "");
 const FRAGMENT_MAX = 1000;
 const ID_RE = /^[0-9a-hjkmnp-tv-z]{26}$/;
 

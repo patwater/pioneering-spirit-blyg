@@ -46,7 +46,7 @@ The CLI (`npm run blyg -- <command>`):
 | `status` | List drafts, ids, versions, and pending TK scopes |
 | `settings` | Push `blyg.settings.json` to the studio |
 
-The CLI needs `BLYG_PASSWORD` (or a prompt) and reaches `https://pioneeringspirit.xyz` unless `BLYG_URL` says otherwise. In a cloud session, the environment's network policy must allow `pioneeringspirit.xyz`; if it does not, write the draft file anyway and tell Patrick which command to run.
+The CLI needs `BLYG_PASSWORD` (or a prompt) and reaches `https://blyg.pioneeringspirit.xyz` unless `BLYG_URL` says otherwise. In a cloud session, the environment's network policy must allow `blyg.pioneeringspirit.xyz`; if it does not, write the draft file anyway and tell Patrick which command to run.
 
 ## Drafting in dialogue with the corpus
 
