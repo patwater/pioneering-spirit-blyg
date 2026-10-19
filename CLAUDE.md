@@ -1,6 +1,6 @@
 # Pioneering Spirit blyg: the writing room
 
-This repo is two things at once. It deploys Patrick Atwater's blyg at the root of pioneeringspirit.xyz, and it is the room where he drafts in conversation with his own corpus. Most sessions here are writing sessions, not coding sessions.
+This repo is two things at once. It deploys Patrick Atwater's blyg at blyg.pioneeringspirit.xyz, and it is the room where he drafts in conversation with his own corpus. Most sessions here are writing sessions, not coding sessions.
 
 ## Ground rules
 

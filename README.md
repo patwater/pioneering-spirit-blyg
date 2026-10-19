@@ -1,11 +1,11 @@
 # Pioneering Spirit, as a blyg
 
-This repository runs [Pioneering Spirit](https://pioneeringspirit.xyz) as a [Blygger](https://github.com/blygger/blygger-spec) blyg at the root of pioneeringspirit.xyz, on Cloudflare. It replaces the earlier Paragraph-to-blyg sync. The blyg is now the home of new writing, and the Paragraph archive becomes a corpus to write in dialogue with, while every old post stays online at its original address.
+This repository runs [Pioneering Spirit](https://pioneeringspirit.xyz) as a [Blygger](https://github.com/blygger/blygger-spec) blyg at [blyg.pioneeringspirit.xyz](https://blyg.pioneeringspirit.xyz), on Cloudflare. It replaces the earlier Paragraph-to-blyg sync. The blyg is the home of new writing, and the Paragraph archive becomes a corpus to write in dialogue with. The Paragraph site itself stays at the apex, pioneeringspirit.xyz, so every old post stays online at its original address.
 
 ## How the pieces fit
 
 ```
-                         pioneeringspirit.xyz  (one Cloudflare Worker)
+                    blyg.pioneeringspirit.xyz  (one Cloudflare Worker)
   ┌──────────────────────────────────────────────────────────────────────────┐
   │  /  /f/{id}/  /t/{id}/  feed.xml  blyg.json  items/…   public blyg        │
   │  /studio  /api                                         private editor     │
@@ -18,7 +18,7 @@ This repository runs [Pioneering Spirit](https://pioneeringspirit.xyz) as a [Bly
 
 - `worker/` is a verbatim copy of a [Blygger Studio](https://github.com/blygger/blygger-studio) release (pinned in `upstream.json`). It provides the public blyg, the private **studio** editor at `/studio` (a React app that is compiled when you install), the documented owner API at `/api`, subscriptions to other blygs, transclusion, and TK (AI) generation. It is never edited here, so upgrades are a clean overwrite.
 - `server-ext/` is the Worker's entry point: a thin wrapper that adds the owner API Blygger Desktop needs (bearer-token auth, JSON reads, reading list, AI provenance, read-state sync, and translation of the legacy write routes that Studio 0.9 removed) and hands everything else to `worker/` unchanged. See `server-ext/README.md`.
-- `wrangler.jsonc` holds everything specific to this deployment: the root mount, the custom domain, the database, the media bucket, and the static archive.
+- `wrangler.jsonc` holds everything specific to this deployment: the root mount, the `blyg.pioneeringspirit.xyz` custom domain, the database, the media bucket, and the static archive.
 - `blyg.settings.json` holds the site identity and the AI style prompt as code.
 - `corpus/` is the library you write in dialogue with: the Paragraph export, *A New California Dream*, Stag Hunt, and anything else.
 - `drafts/` holds pieces drafted in this repo, including sessions with Claude, which `npm run blyg` pushes to the studio.
@@ -58,23 +58,23 @@ Wrangler prompts for each value, so nothing lands in your shell history or in a 
 npx wrangler secret put OWNER_PASSWORD    # your studio login password
 npx wrangler secret put COOKIE_SECRET     # any long random string
 npx wrangler secret put AI_PROVIDER_KEY   # an Anthropic API key; optional, enables [TK] generation
-npx wrangler secret put BLYG_OWNER_TOKEN  # a long random string; the desktop app signs in with it
+npx wrangler secret put BLYG_OWNER_TOKEN  # optional; only the older Windows port signs in with it
 ```
 
 You can set the same secrets in the Cloudflare dashboard under the Worker's **Settings → Variables and Secrets**, as type **Secret**.
 
-### 4. Cut the domain over from Paragraph
+### 4. Attach the domain and push your settings
 
-Do these in order, ideally in one sitting, since the site is briefly unavailable between steps b and c.
+The blyg lives at `blyg.pioneeringspirit.xyz`, and the apex `pioneeringspirit.xyz` stays on Paragraph. The `routes` block in `wrangler.jsonc` attaches the subdomain as a Worker custom domain, which creates its DNS record and certificate on the first deploy. That address is also the blyg's identity: it is `site_url` in `blyg.settings.json`, and it goes into the manifest, every item document, and every Webmention. Choose it once and keep it, because subscribers and other blygs' quotes refer to it.
 
-1. **Export everything from Paragraph first.** Run the *Export Paragraph archive* action from the Actions tab (or `npm run export-paragraph` locally) and commit `corpus/paragraph/`. Separately, export your **email subscriber list** from Paragraph's dashboard, because a blyg has no newsletter of its own (see "Email subscribers" below).
-2. **Detach the domain from Paragraph.** Remove the custom domain in Paragraph's settings, and delete the DNS records Paragraph had you create for `pioneeringspirit.xyz` in the Cloudflare dashboard.
-3. **Deploy.** Uncomment the `routes` block in `wrangler.jsonc` and push to `main` (or run `npm run deploy`). The deploy builds the archive and attaches `pioneeringspirit.xyz` as a Worker custom domain, which creates the DNS record and certificate automatically.
-4. **Log in and push your settings.** `npm run blyg -- login`, then `npm run blyg -- settings`. You can also visit https://pioneeringspirit.xyz/studio.
-5. **Redirect `www`.** In Cloudflare, add a redirect rule from `www.pioneeringspirit.xyz/*` to `https://pioneeringspirit.xyz/${1}` so the blyg has a single origin.
-6. **Check the old links.** Any old post URL such as `https://pioneeringspirit.xyz/<slug>` should now show the archived copy, and `https://pioneeringspirit.xyz/paragraph/` lists them all.
+1. **Export everything from Paragraph.** Run the *Export Paragraph archive* action from the Actions tab (or `npm run export-paragraph` locally) and commit `corpus/paragraph/`. Separately, export your **email subscriber list** from Paragraph's dashboard, because a blyg has no newsletter of its own (see "Email subscribers" below).
+2. **Deploy.** Push to `main` (or run `npm run deploy`). The deploy attaches `blyg.pioneeringspirit.xyz`, builds the archive, and applies any new migrations.
+3. **Log in and push your settings.** Run `npm run blyg -- settings`, which logs in and sets the address, title, author, and bio. The studio is at https://blyg.pioneeringspirit.xyz/studio.
+4. **Check it.** https://blyg.pioneeringspirit.xyz/blyg.json should name `https://blyg.pioneeringspirit.xyz/` as its `site`, and its `generator` shows the running studio version.
 
-Until the cutover, the `routes` block stays commented out and the blyg runs at https://pioneering-spirit-blyg.patrickatwater.workers.dev, which is a good place to rehearse: log in to `/studio`, push settings, and publish a test fragment.
+The archive the deploy builds is served on the blyg too, at `https://blyg.pioneeringspirit.xyz/<slug>/` and `https://blyg.pioneeringspirit.xyz/paragraph/`, with each page naming its original `pioneeringspirit.xyz` address as canonical. If you later retire Paragraph and point the apex at this Worker as well, add `{ "pattern": "pioneeringspirit.xyz", "custom_domain": true }` to `routes` after detaching the domain from Paragraph, and the old links will keep resolving at their original addresses. The blyg's own identity stays on the subdomain either way.
+
+The Worker also answers at https://pioneering-spirit-blyg.patrickatwater.workers.dev, which is a good place to check a deploy.
 
 ### 5. Deploys
 
@@ -134,7 +134,7 @@ A few habits make the most of what Blygger offers for this kind of writing.
 
 ## Email subscribers
 
-Paragraph readers who subscribed by email will not follow the move automatically. The simplest bridge is an RSS-to-email service (Buttondown, Kit, and Mailchimp all offer one) pointed at `https://pioneeringspirit.xyz/feed.xml`, seeded with the subscriber list you exported. Because the feed announces every new version, you may want the service to send a digest rather than one email per update.
+Paragraph readers who subscribed by email will not follow new writing on the blyg automatically. The simplest bridge is an RSS-to-email service (Buttondown, Kit, and Mailchimp all offer one) pointed at `https://blyg.pioneeringspirit.xyz/feed.xml`, seeded with the subscriber list you exported. Because the feed announces every new version, you may want the service to send a digest rather than one email per update.
 
 ## The desktop app
 
