@@ -1,4 +1,5 @@
 import { itemResource, versionResource, mediaResource, subscriptionResource, hopperResource, importedResource, mentionResource } from "./contract/resources.ts";
+import { settingsResource } from "./settings-resource.ts";
 import { fetchOnSurface, itemUrl } from "./surface.ts";
 import type { Context } from "hono";
 import { contractApp, readJson } from "./contract/app.ts";
@@ -25,6 +26,7 @@ import { mentionFetchFor } from "./mentions/http.ts";
 import { platformFetchFor } from "./importer/http.ts";
 import { fetchImportedHistory, fetchPublicVersion } from "./imported-history.ts";
 import { readChanges } from './changes.ts';
+import { linkLabel } from "./link-label.ts";
 
 export const readApi = contractApp();
 readApi.openapi(routes.getChanges, async c => c.json(await readChanges(c.env.DB)));
@@ -56,7 +58,7 @@ readApi.openapi(routes.getItem, async (c) => {
   const detail = await itemDetail(c.env.DB, c.req.param("id"));
   return detail ? c.json({ ...itemResource(detail.item), authored_kind: detail.kind, media: detail.media.map(mediaResource), versions: await Promise.all(detail.versions.map(presentVersion)), published: detail.published ? await presentVersion(detail.published) : null }) : c.json({ error: "not found" }, 404);
 });
-readApi.openapi(routes.getSettings, async (c) => c.json(await getSettings(c.env.DB)));
+readApi.openapi(routes.getSettings, async (c) => c.json(settingsResource(await getSettings(c.env.DB))));
 readApi.openapi(routes.listSubscriptions, async (c) => {
   const page = await collection<SubscriptionRow>(c.env.DB, c.req.query(), "SELECT * FROM subscriptions ORDER BY created ASC, id ASC", "SELECT COUNT(*) AS total FROM subscriptions");
   return c.json({ ...page, items: page.items.map(subscriptionResource) });
@@ -75,7 +77,7 @@ readApi.openapi(routes.getHopper, async (c) => {
   const preview = c.req.query("preview") === "true";
   const limit = preview ? " LIMIT 3" : "";
   const memberships = (await c.env.DB.prepare(`SELECT * FROM hopper_items WHERE hopper_id = ? ORDER BY added_at DESC, subscription_id, remote_id${limit}`).bind(hopper.id).all<import("./types.ts").HopperItemRow>()).results;
-  const counts = await c.env.DB.prepare("SELECT COUNT(*) AS total, COUNT(DISTINCT subscription_id) AS source_count FROM hopper_items WHERE hopper_id = ?").bind(hopper.id).first<{ total: number; source_count: number }>();
+  const counts = await c.env.DB.prepare("SELECT COUNT(*) AS total, COUNT(DISTINCT CASE WHEN subscription_id <> '~own' THEN subscription_id END) AS source_count FROM hopper_items WHERE hopper_id = ?").bind(hopper.id).first<{ total: number; source_count: number }>();
   const rows = await c.env.DB.prepare(`SELECT ii.* FROM hopper_items hi JOIN imported_items ii
     ON ii.subscription_id = hi.subscription_id AND ii.remote_id = hi.remote_id
     WHERE hi.hopper_id = ? ORDER BY hi.added_at DESC, hi.subscription_id, hi.remote_id${limit}`).bind(hopper.id).all<ImportedItemRow>();
@@ -205,7 +207,7 @@ readApi.openapi(routes.getVersion, async (c) => {
  * subject widened.
  *
  * One list serves both bracket forms, and that is not a convenience: `[[id]]`
- * resolves through `resolveTarget` too — "by the same order", §16.2 — so the
+ * resolves through `resolveTarget` too — "by the same order", §10.1 — so the
  * set of ids a link can name *is* the set a directive can name. A second
  * endpoint would be a second copy of that rule, free to drift from it.
  */
@@ -255,10 +257,12 @@ readApi.openapi(routes.search, async (c) => {
     // From rendered HTML, not markdown source — the picker showed literal
     // "#"/"*" markers otherwise, same bug class as the index rows.
     const excerpt = clampText(plainTextFromHtml(r.html ?? ""), 140);
+    const label = linkLabel(r.html ?? "", r.kind);
     const sourceTitle = r.source === "mine" ? null : r.source_title || (r.origin ? new URL(r.origin).host : null);
     return {
       id: r.id,
       excerpt,
+      label,
       version: r.version,
       updated: r.updated,
       // Pre-0.29 field, kept for existing clients: the kind for own items, the source for imports.

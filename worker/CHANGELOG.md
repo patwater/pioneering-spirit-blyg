@@ -18,6 +18,193 @@ not have its own repo until session 26.
 
 ---
 
+## 0.47.0 — 2026-10-17
+
+**Migrations: none.** No config change. Implements protocol 0.4, opened today.
+
+- **Labels on links and quotes: `[[id | text]]` and `![[id | text]]`** (0.4
+  §10.1, decision #70; blygger-spec#16, ROADMAP row 66). On a link the label is
+  the link text, in place of the target's heading or an excerpt. On a quote
+  it is a note for you that keeps a thread's source readable, and it never
+  reaches the published quote, `transclusions[]` or provenance. The id comes
+  first; the label runs to `]]`, may contain a pipe, and an empty one is no
+  label. The picker and *copy [[id]]* now write the long form, labelled with
+  the text the link would have shown, so nothing changes until you edit it.
+  Search results carry that text as a new `label` field. Labelled forms are
+  inert inside code like the rest of the grammar, and fork flattening keeps a
+  labelled link's text.
+- **Generated text no longer publishes literal brackets** (ROADMAP row 67). A
+  model that echoed `[[id]]` or an inline `![[id]]` from its context left raw
+  brackets in the post. The generation prompt now asks for none, and any that
+  survive are removed before the text reaches the draft, keeping a label's
+  words. A quote alone on its own line still quotes, as before (decision #60).
+- The bracket grammar is defined once (`src/grammar.ts`) and every reader of
+  it, server and studio, builds from there. Code comments now cite protocol
+  0.4's sections instead of 0.3's appendix.
+
+## 0.46.3 — 2026-10-17
+
+**Migrations: none.** No config change. **The code is 0.46.2's**, released under
+a new number because 0.46.2's tag could not be: the conformance-suite images
+that 0.46.2's new `oauth-interop` CI job pins by digest were deleted from
+GitLab's registry when GitLab rebuilt the `release-v5.3.2` tag, so that
+commit's Check could not pass. Both images are re-pinned to the tag's current
+digests. If you upgraded to 0.46.2 from its tag, nothing changes but the
+version string.
+
+## 0.46.2 — 2026-10-17 (tagged, never released)
+
+**Migrations: none.** No config change.
+
+- **OAuth clients that leave out `resource` now get a working token** (Kyle
+  Mathews, #66; reported as #54). A client that omits the RFC 8707 resource
+  indicator, as generic OAuth clients and manually configured MCP proxies do,
+  could complete the owner's consent and then fail at the token endpoint with
+  `invalid_grant`. The authorization request now defaults to the node's MCP
+  resource before login, consent and code issuance, and the consent page shows
+  that MCP address. An explicit resource is validated as before, and the
+  default grant cannot reach the REST API: REST clients still ask for the API
+  resource by name. No new routes, no host-root paths. `docs/oauth-interop.md`
+  and `docs/issue-54-cloudflare-mcp.md` have the findings and the Cloudflare
+  portal setup.
+- **Hover text on the editor toolbar** (#48). The `[[`, `![[` and `[TK]`
+  buttons had labels for screen readers only; each now says what it does when
+  pointed at, and *attach image* does too.
+- **CI:** a new `oauth-interop` job runs MCP Inspector 2.10.1 and selected
+  OpenID Foundation conformance modules against disposable Workers, with the
+  package version and container digests pinned (#66).
+
+## 0.46.1 — 2026-10-13
+
+**Migrations: none.** No config change.
+
+- **Publishing shows at once on public pages.** Since 0.39.0 the edge cache
+  kept serving a page's old copy for up to a minute after a publish, a
+  withdrawal or a settings change, and a reload could not get past it. The
+  cache key now carries the blyg's public revision (the `change_state`
+  counters for items, subscriptions, hoppers, settings and feed), so the
+  first read after a change goes to a fresh entry. Each public read costs one
+  small D1 query. The owner's reading state and thumbs do not move the key.
+  Hiding or showing an inbound mention still waits out the 60-second window:
+  mentions have no revision counter yet.
+
+## 0.46.0 — 2026-10-12
+
+**Migrations: none.** One default changes: the main menu (`links_position`)
+now sits on the **left** unless the owner chose otherwise, so a blyg that never
+set it moves its menu from below the content to a left sidebar on upgrade.
+Choose *Below the content* in Settings → Links to keep the old place.
+
+- **Settings on one page, in sections**, with a sidebar of anchors: General,
+  Feed, Appearance, Links, AI, Network (and Extensions when the build has
+  any). The section in view is marked, `settings#ai` and the like link
+  straight to one, and on a phone the sidebar is a row of chips under the top
+  bar. Under Links, the two menus are named for where they appear: the
+  *masthead menu* (your author links) and the *main menu*. Under AI, each
+  function's model sits beside its own instructions: TK generation with the
+  house style, change notes with auto-drafting, the smart feed with its
+  scoring prompt.
+- **The front page is chosen by search**, like the main menu's threads, with
+  *use latest items* to go back.
+
+## 0.45.0 — 2026-10-12
+
+**Migrations: none.**
+
+- **Your own posts in hoppers.** *Add to hopper…* in a post's ⋯ menu puts it
+  in a hopper beside what you have read (or in a new one). A public hopper's
+  page shows it as your home page does, once published and not after
+  withdrawal; the studio's hopper view lists it with *edit* and *remove*.
+  Clients: `PUT /api/hoppers/{id}/items/~own/{itemId}` (the existing route,
+  with `~own` in place of a subscription id).
+- **Typing no longer greys out publish.** Autosave ran through the same busy
+  state as publish and save draft, so every pause disabled both until the save
+  returned. It now saves quietly; a publish clicked meanwhile waits for the
+  save and publishes the newest text.
+- **The side menu, done properly.** On the left or right, one link per line
+  in a narrow column; your name and title sit over the content rather than the
+  menu; on a phone or a narrow window the menu folds behind a *Menu* button
+  under your name instead of falling to the bottom of the page.
+- **Find threads by search** when choosing what the links section lists,
+  instead of scrolling one long list.
+
+## 0.44.0 — 2026-10-12
+
+**Migrations: none.** The new settings are ordinary settings rows.
+
+- **A links section on every public page** (Settings → links section). It
+  lists threads you choose, in your order (an About or Now page, say), your
+  public collections, your own links (one per line, `label | url`), and a
+  line of standard links: your blogroll as OPML when it lists anyone, *Made
+  with Blygger* (blygger.org) and *Find more blygs* (blygger.com). Each group
+  can be turned off; the standard links start on. It sits below the content
+  by default, so no page moves on upgrade; choose left or right for a sidebar
+  on wide screens, which falls below the content on a phone. A listed thread
+  that is withdrawn drops out, and the front page's entry links to the root.
+  Collections now appear here rather than at the foot of the home page and
+  archive, unless that group is off.
+- **Settings save after a withdrawal.** A front page or listed thread that
+  had since been withdrawn made every later Settings save fail, because the
+  form sends each field back. A stored value is now accepted as it is, and a
+  withdrawn listed thread is dropped.
+
+## 0.43.0 — 2026-10-12
+
+**Migrations: none.** Both new settings are ordinary settings rows, written
+only when the owner changes them.
+
+- **A static front page**, as on WordPress. Choose a published thread in
+  Settings → home page, or with *set as front page* in the thread's ⋯ menu,
+  and readers arriving at your blyg see it instead of your latest items. You
+  edit it like any thread. The latest items move to `{mount}/posts/`, which
+  every public page then links to in its header; the address is a setting
+  (one lowercase segment; names the blyg already uses, such as `feed`,
+  `archive` and `studio`, are refused) and is served whether or not a front
+  page is set. The thread's permalink keeps working and names the root as
+  canonical. The front page is left off the posts page but stays in
+  `feed.xml`, the archive and `items/index.json`, so nothing changes on the
+  wire. If it is later withdrawn, the root shows the latest items again. The
+  static export saves the posts page too.
+- **Canceled reads stay out of the error banner** (#71, Kyle Mathews). TanStack
+  Query cancels a pending read during normal updates, and the studio showed
+  that as a `CancelledError` banner, intermittently, while editing.
+
+## 0.42.0 — 2026-10-12
+
+**Migrations: `0029_feed_order_and_setup.sql`** (two settings rows, written
+only on a node that has published: `feed_order` = `reverse-chronological` and
+`setup` = `notice`). Apply it before deploying:
+`wrangler d1 migrations apply <database> --remote`. `0028` is reserved for the
+duplicate-upload guard (#7) and is not skipped by mistake.
+
+- **A pace-layered home page: the diachronic view** (`docs/pace-layered-feed.md`).
+  Items sink as new ones arrive and climb one place with each new version.
+  Pins slow the sinking: each unit of pin weight drops an item one of six
+  layers (fashion to nature), each sinking at half the speed of the one above.
+  An item's weight is its own pinned versions plus half the weight of each item
+  that quotes it in a pinned version, out to six hops. An item pinned and
+  revised often holds the top. It reads only what is public (changelog, pins,
+  own-origin transclusions), so other clients can compute the same order;
+  `test/fixtures/feeds/` holds worked histories with their expected orders.
+  Only the home page follows it: feeds and the archive stay newest first.
+- **The home page order is a setting** (Settings → home page): pace-layered,
+  the default for a fresh install, or newest first. A node that has published
+  keeps newest first until its owner chooses.
+- **Extensions can add home page orders** (`docs/extensions.md`, "Feed
+  orders"). An order sees the same public history and returns ids; the page
+  shows published items only, once each, and renders every card itself.
+  `extensions/feed-example` ("Pinned first") is the template.
+- **A setup walk-through** (`/studio/setup`): you, look, home page, writing
+  and AI, others, then a review. Every setting shows its current value and
+  its default; nothing is saved until the end, and then only what changed.
+  A fresh install is greeted with it; a node that had published is told once
+  that it exists. Settings can run it again.
+- **Discard changes leaves the item clean.** It now restores the published
+  version whole, its stub citation included, so a stub whose quote had moved
+  on no longer showed "unpublished changes" that neither discard nor publish
+  could clear. Publish also writes the version-agreed citation back to the
+  working copy, which is how the two drifted apart.
+
 ## 0.41.1 — 2026-10-10
 
 **Migrations: none.**

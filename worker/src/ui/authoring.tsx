@@ -13,13 +13,14 @@ import { useLiveQuery } from '@tanstack/react-db';
 import { Link, useNavigate, useBlocker } from '@tanstack/react-router';
 import { formatDateIn } from '../dates.ts';
 import { renderMarkdown } from '../markdown.ts';
+import { linkInline } from '../grammar.ts';
 import { markImported, parseScopes, previewStrip } from '../tk.ts';
 import { extractDirectives } from '../directives.ts';
 import { previewFromHtml } from '../preview.ts';
 import type { ListItemsResponses, Version } from '../../sdk/dist/browser.js';
 import { BlyggerApi, unwrap } from '../../sdk/dist/browser.js';
 import type { Detail } from './data.ts';
-import { client, items, itemDetail, changed, refreshItems, createDraftAction } from './data.ts';
+import { client, items, itemDetail, changed, refreshItems, createDraftAction, settings as settingsCollection, hoppers } from './data.ts';
 import {
   ActionBar,
   Button,
@@ -64,13 +65,34 @@ function useAction() {
   const [busy, setBusy] = useState(false);
   const [warning, setWarning] = useState<string>();
   const pending = useRef(0);
+  // Whether the error showing came from a background save, which the next
+  // successful one may clear; an action's error stays until the next action.
+  const backgroundError = useRef(false);
   return {
     error,
     warning,
     busy,
+    /**
+     * Autosave: reports a failure like an action, but never sets `busy`, so
+     * typing does not disable publish and save draft. Safe because draft
+     * writes are queued (createPacedDraftAction) and publish saves first.
+     */
+    background: async (fn: () => Promise<unknown>) => {
+      try {
+        await fn();
+        if (backgroundError.current) {
+          backgroundError.current = false;
+          setError(undefined);
+        }
+      } catch (error) {
+        backgroundError.current = true;
+        setError(error);
+      }
+    },
     run: async (fn: () => Promise<unknown>) => {
       pending.current++;
       setBusy(true);
+      backgroundError.current = false;
       setError(undefined);
       setWarning(undefined);
       try {
@@ -374,7 +396,13 @@ function ToolRow({
 }) {
   return (
     <div className={className}>
-      <Button id={attachId} className="tool sans" disabled={disabled} onClick={attach}>
+      <Button
+        id={attachId}
+        className="tool sans"
+        disabled={disabled}
+        title="Upload an image and insert it at the cursor"
+        onClick={attach}
+      >
         attach image
       </Button>
       <Button
@@ -400,6 +428,7 @@ function ToolRow({
         data-action="bracket-link"
         disabled={disabled}
         aria-label="[[ link an item"
+        title="Link to an item, inline anywhere: an ordinary link to its page that notifies no one"
         onClick={() => tools.bracket('[[')}
       >
         [[
@@ -410,6 +439,7 @@ function ToolRow({
           data-action="bracket-quote"
           disabled={disabled}
           aria-label="![[ quote an item"
+          title="Quote an item on its own line: bakes a snapshot of it into this thread and tells its author"
           onClick={() => tools.bracket('![[')}
         >
           ![[
@@ -420,6 +450,7 @@ function ToolRow({
         data-action="tk"
         disabled={disabled}
         aria-label="[TK] instruction"
+        title="Write an instruction for the model; the generated text publishes disclosed as machine-written"
         onClick={tools.tk}
       >
         [TK]
@@ -814,7 +845,9 @@ export function Compose() {
   useEffect(() => {
     if (saved || !text.trim()) return;
     if (!id && (text.replace(/\s/g, '').length < 8)) return;
-    const timer = setTimeout(() => void action.run(save), id ? 400 : 3000);
+    // The first save creates the draft and holds the buttons while it does, so
+    // a publish cannot race it into a second item; later saves stay quiet.
+    const timer = setTimeout(() => void (id ? action.background(save) : action.run(save)), id ? 400 : 3000);
     return () => clearTimeout(timer);
   }, [text, kind, id, saved]);
   const change = (next: string) => {
@@ -1059,7 +1092,7 @@ function ItemRow({
   // "(empty draft)" here. Ask the preview endpoint once for what the reader
   // and public pages show (quotes baked, links resolved); until it answers,
   // say what the item does.
-  const LINK = /(?<!!)\[\[[^\]\n]+\]\]/g;
+  const LINK = linkInline();
   const links = (item.content_md.match(LINK) ?? []).length;
   // Bare [[id]] tokens are not prose: without them, is anything left?
   const prose = links ? previewFromHtml(renderMarkdown(stripped.text.replace(LINK, ''))) : own;
@@ -1356,6 +1389,8 @@ const initiallyOpen = (hash: string) => location.hash === `#${hash}`;
 function Editor({ item }: { item: Detail }) {
   const navigate = useNavigate();
   const settings = useSettings();
+  const buckets =
+    useLiveQuery({ query: (q) => q.from({ hopper: hoppers }) }).data ?? [];
   const sharing = useSharing();
   const action = useAction();
   const write = useMemo(() => createDraftAction(item.id), [item.id]);
@@ -1413,7 +1448,7 @@ function Editor({ item }: { item: Detail }) {
     setText(text);
     setSaved(false);
     clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => void action.run(save), 400);
+    saveTimer.current = setTimeout(() => void action.background(save), 400);
   };
   useEffect(() => () => clearTimeout(saveTimer.current), []);
   useEffect(() => {
@@ -1542,6 +1577,30 @@ function Editor({ item }: { item: Detail }) {
     });
   const isThread = item.authored_kind === 'thread';
   const isPublic = item.status === 'public';
+  // Own items can go in hoppers beside what you read (session 47); "~own" is
+  // the store's marker for them (src/importer/store.ts OWN_SUBSCRIPTION).
+  const addToHopper = async () => {
+    const chosen = await menu({
+      title: '+ add to hopper…',
+      rows: [
+        ...buckets.map((bucket) => ({ key: `hopper:${bucket.id}`, icon: '▤', label: bucket.name })),
+        { key: 'new', icon: '＋', label: 'new hopper…' },
+      ],
+    });
+    if (!chosen) return;
+    let hopperId = chosen.slice('hopper:'.length);
+    let name = buckets.find((bucket) => bucket.id === hopperId)?.name;
+    if (chosen === 'new') {
+      const typed = await prompt({ title: 'Name the new hopper:' });
+      if (!typed?.trim()) return;
+      const hopper = await unwrap(BlyggerApi.createHopper({ client, body: { name: typed } }));
+      hopperId = hopper.id;
+      name = hopper.name;
+    }
+    await unwrap(BlyggerApi.addHopperItem({ client, path: { id: hopperId, sub: '~own', remoteId: item.id } }));
+    await changed('hoppers', 'hopper', 'hopper-preview');
+    toast(`added to ${name}`);
+  };
   const edited = !saved && text !== item.content_md;
   // Unpublished changes, discounting a working copy that already holds the
   // published words again (discard changes leaves `dirty` set on purpose).
@@ -1591,6 +1650,31 @@ function Editor({ item }: { item: Detail }) {
           icon: '⇪',
           label: 'share…',
           onSelect: () => void sharing.share(shareable),
+        },
+        // The static front page (session 47): a published thread at the public root.
+        isPublic && isThread && settings && {
+          icon: '⌂',
+          label: settings.front_page === item.id ? 'stop using as front page' : 'set as front page',
+          description:
+            settings.front_page === item.id
+              ? 'your public home page goes back to your latest items'
+              : `readers arriving at your blyg see this thread; your latest items move to /${settings.posts_path}/`,
+          disabled: action.busy,
+          onSelect: () =>
+            void action.run(async () => {
+              const front = settings.front_page === item.id ? '' : item.id;
+              await settingsCollection.update('settings', (row) => {
+                row.front_page = front;
+              }).isPersisted.promise;
+              toast(front ? 'This thread is now your front page' : 'Your home page shows your latest items again', { tone: 'ok' });
+            }),
+        },
+        item.status !== 'withdrawn' && {
+          icon: '▤',
+          label: 'add to hopper…',
+          description: isPublic ? undefined : 'it shows on a public hopper once published',
+          disabled: action.busy,
+          onSelect: () => void action.run(addToHopper),
         },
         isPublic && {
           icon: '📌',

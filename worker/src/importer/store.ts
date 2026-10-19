@@ -33,7 +33,7 @@ export async function findSubscription(db: D1Database, origin: string, feedUrl: 
 
 /**
  * Record where a subscription's surface lives, re-read from its manifest
- * (§16.6e). The feed URL moves with it: the manifest's `feed` is authoritative.
+ * (§6.1). The feed URL moves with it: the manifest's `feed` is authoritative.
  */
 export async function updateSurface(db: D1Database, id: string, surface: Surface | null, feedUrl: string): Promise<void> {
   await db
@@ -418,6 +418,14 @@ export async function deleteHopper(db: D1Database, id: string): Promise<void> {
     db.prepare("DELETE FROM hoppers WHERE id = ?").bind(id),
   ]);
 }
+
+/**
+ * The subscription id a hopper membership uses for one of the owner's own
+ * items (session 47): the remote id is then the item's id. "~" is outside the
+ * id alphabet, so it never names a real subscription. Such rows are not in the
+ * interaction log, which records reading: LOG_HOPPER finds no subscription.
+ */
+export const OWN_SUBSCRIPTION = "~own";
 
 export async function addHopperItem(db: D1Database, hopperId: string, subscriptionId: string, remoteId: string): Promise<void> {
   const at = nowIso();

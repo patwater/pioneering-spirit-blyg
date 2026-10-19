@@ -57,7 +57,7 @@ for (const kind of ['fragment', 'thread'] as const) test(`${kind} discard change
   await editorMenu(page, 'discard changes');
   await answerSheet(page, { name: /^Discard unpublished changes and go back to the published v1\?/ });
   await expect(page.locator('#md-input')).toHaveValue('published text');
-  expect(await page.evaluate(async id => (await fetch(`/api/items/${id}`)).json(), id)).toMatchObject({ version: 1, dirty: true, content_md: 'published text' });
+  expect(await page.evaluate(async id => (await fetch(`/api/items/${id}`)).json(), id)).toMatchObject({ version: 1, dirty: false, content_md: 'published text' }); // clean since session 46: discard restores the published version whole
   await expect(page.locator('[data-action=view-version]')).toHaveCount(1);
 });
 test('quick edit retains markdown and persists without leaving compose', async ({ page }) => {
@@ -158,7 +158,7 @@ test('palette pages all candidates and applies bracket grammar in each composer'
   await page.getByRole('button', { name: 'load more (20 of 23)' }).click();
   await expect(page.getByRole('listbox', { name: 'items' }).getByRole('option')).toHaveCount(23);
   await page.getByRole('listbox', { name: 'items' }).getByRole('option').last().click();
-  await expect(page.locator('#composer-text')).toHaveValue(/^\[\[[0-9a-z]{26}\]\]$/);
+  await expect(page.locator('#composer-text')).toHaveValue(/^\[\[[0-9a-z]{26} \| “[^\]]+”\]\]$/); // the long form (#70)
   await page.locator('#composer-text').fill(`![[${token}`);
   await expect(page.getByRole('listbox')).toHaveCount(0);
   await page.locator('#composer-text').fill('thread picker');
@@ -167,7 +167,7 @@ test('palette pages all candidates and applies bracket grammar in each composer'
   await page.locator('#md-input').fill(`![[${token}`);
   await expect(page.getByRole('listbox', { name: 'items' }).getByRole('option')).toHaveCount(20);
   await page.getByRole('listbox', { name: 'items' }).getByRole('option').first().click();
-  await expect(page.locator('#md-input')).toHaveValue(/^!\[\[[0-9a-z]{26}\]\]$/);
+  await expect(page.locator('#md-input')).toHaveValue(/^!\[\[[0-9a-z]{26} \| “[^\]]+”\]\]$/);
   await expect(page.locator('#palette-search')).toHaveCount(0);
 });
 
