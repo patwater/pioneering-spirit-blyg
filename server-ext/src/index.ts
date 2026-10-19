@@ -57,12 +57,10 @@ async function fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Res
   if (!path.startsWith("/api/")) return reference.fetch(req, env, ctx);
 
   const auth = await authenticate(req, env);
-  if (auth === "bad-bearer") {
-    // Say when the blyg has no token at all: the usual cause is a deploy
-    // that dropped BLYG_OWNER_TOKEN, and "wrong token" would mislead.
-    const reason = env.BLYG_OWNER_TOKEN ? undefined : "BLYG_OWNER_TOKEN is not set on this blyg";
-    return json(reason ? { error: "unauthorized", reason } : { error: "unauthorized" }, 401);
-  }
+  // A bearer that isn't BLYG_OWNER_TOKEN is the studio's own OAuth grant or
+  // API token (studio 0.28+), which is how Burrow 0.13 signs in. The studio
+  // checks it and answers in its own shapes, exactly as on a stock install.
+  if (auth === "studio-bearer") return reference.fetch(req, env, ctx);
   const route = match(req.method, path);
   if (route) {
     if (auth === "none") return json({ error: "unauthorized" }, 401);

@@ -4,7 +4,7 @@ This folder is the Worker entry point (`main` in `wrangler.jsonc`). It wraps the
 
 | # | Extension | Where |
 |---|---|---|
-| 1 | `Authorization: Bearer <BLYG_OWNER_TOKEN>` is accepted wherever the studio cookie is. A valid bearer is turned into a signed session cookie on the forwarded request, so upstream routes accept it as they are. | `auth.ts` |
+| 1 | `Authorization: Bearer <BLYG_OWNER_TOKEN>` is accepted wherever the studio cookie is. A valid bearer is turned into a signed session cookie on the forwarded request, so upstream routes accept it as they are. Any other bearer is the studio's own OAuth grant or API token and goes to the studio untouched, which is how Burrow 0.13 and later sign in. | `auth.ts` |
 | 2 | `GET /api/items`, `GET /api/items/:id` (with `versions`), `GET /api/subscriptions` | `reads.ts` |
 | 3 | `GET /api/reading?limit&before` (opaque keyset cursor), `GET /api/mentions`, `GET /api/settings` (public-safe fields only), `GET /api/hoppers`, and `show_responses` on items | `reads.ts`, `cursor.ts` |
 | 4 | `GET`/`PUT /api/items/:id/tk-provenance`: text and position-keyed provenance written in one statement, validated first, never storing the instruction | `provenance.ts`, `provenance-check.ts` |

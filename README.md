@@ -142,6 +142,8 @@ Blygger Desktop, Aneesh Sathe's native reading-and-writing app, is ported to Win
 
 **Connecting it.** Set the `BLYG_OWNER_TOKEN` secret (step 3), then enter your blyg's address and that token in the app's **Connect your blyg** screen. The app talks to this blyg through the owner API in `server-ext/`.
 
+**Burrow 0.13 and later** (Aneesh's own app, now on Windows too) needs no extension and no `BLYG_OWNER_TOKEN`: it expects a stock studio 0.47 or later. Choose **Sign in with the browser** in Burrow, or paste an API token made in Studio → More → Client access. `server-ext/` passes those tokens to the studio untouched. Do not give Burrow the `BLYG_OWNER_TOKEN`, because that token gets the old Desktop shapes, which Burrow reads as a server older than studio 0.9.
+
 **Testing the pair.** Aneesh's end-to-end suite drives the real client against two local copies of this Worker, which is the best check that the app and `server-ext/` still agree. Run it from a checkout of the app, pointing it at this repository:
 
 ```bash
