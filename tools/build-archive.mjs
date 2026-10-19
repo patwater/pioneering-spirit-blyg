@@ -68,7 +68,7 @@ ol.archive li { margin: 0.6rem 0; }
 </style>
 </head>
 <body><main>
-<div class="banner">From the <a href="/paragraph/">Pioneering Spirit archive</a> (originally published on Paragraph). The living blyg is at <a href="/">pioneeringspirit.xyz</a>.</div>
+<div class="banner">From the <a href="/paragraph/">Pioneering Spirit archive</a> (originally published on Paragraph). The living blyg is at <a href="https://blyg.pioneeringspirit.xyz/">blyg.pioneeringspirit.xyz</a>.</div>
 ${content}
 </main></body>
 </html>
