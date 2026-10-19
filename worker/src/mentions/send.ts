@@ -5,7 +5,7 @@
 import type { FetchLike } from "../importer/http.ts";
 import { blygItemUrl } from "../importer/util.ts";
 import { isBlygStub, parseStoredFork, parseStoredStub } from "../stub.ts";
-import type { Transclusion, VersionRow } from "../types.ts";
+import type { ScopeProvenance, Transclusion, VersionRow } from "../types.ts";
 import { discoverEndpoint } from "./discover.ts";
 import { dueOutbound, enqueueOutbound, markOutbound, RETRY_SCHEDULE_MS } from "./store.ts";
 
@@ -34,9 +34,20 @@ async function remotePermalink(db: D1Database, origin: string, id: string): Prom
   return blygItemUrl(origin, row?.kind ?? "fragment", id, row?.page ?? null);
 }
 
+function parseGenerated(json: string | null): ScopeProvenance[] {
+  if (!json) return [];
+  try {
+    const parsed: unknown = JSON.parse(json);
+    return Array.isArray(parsed) ? (parsed as ScopeProvenance[]) : [];
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Every **remote-origin** reference in one published version: the `stub_of`
- * citation (either shape) and every transclusion carrying an `origin`.
+ * citation (either shape), every transclusion carrying an `origin`, and every
+ * generation source carrying one.
  * Same-origin references never generate a mention — telling ourselves
  * something we already know is noise, not notification.
  */
@@ -55,6 +66,16 @@ export async function remoteReferences(db: D1Database, itemId: string, row: Vers
   for (const t of (JSON.parse(row.transclusions ?? "[]") as Transclusion[])) {
     if (!t.origin || t.origin === ourOrigin) continue;
     refs.push({ target: await remotePermalink(db, t.origin, t.id), origin: t.origin, targetVersion: t.version });
+  }
+  // A remote generation source is a remote reference too (§5.7,
+  // decision #44): a model at this origin used those words, so their origin
+  // is told, with relation `source`. Same target as a quote of the same item
+  // is one mention; the receiver decides the relation.
+  for (const g of parseGenerated(row.generated_json)) {
+    for (const src of g.sources ?? []) {
+      if (!src.origin || src.origin === ourOrigin) continue;
+      refs.push({ target: await remotePermalink(db, src.origin, src.id), origin: src.origin, targetVersion: src.version });
+    }
   }
   // §2.3.3: lineage is a remote reference like any other. It lives on the
   // item rather than the version (§2.4), so it is read from there — and it
@@ -92,8 +113,10 @@ export async function enqueueForVersion(
 
 /** Which blyg origin, if any, a target URL belongs to — the manifest-first discovery hint (§2.3.4 step 1). */
 async function blygOriginFor(db: D1Database, target: string): Promise<string | undefined> {
+  // Origins are literal prefixes. D1 caps LIKE patterns at 50 bytes, so one
+  // long subscription used to abort delivery for every pending mention.
   const row = await db
-    .prepare("SELECT origin FROM subscriptions WHERE kind = 'blyg' AND ? LIKE origin || '%' ORDER BY length(origin) DESC LIMIT 1")
+    .prepare("SELECT origin FROM subscriptions WHERE kind = 'blyg' AND substr(?, 1, length(origin)) = origin ORDER BY length(origin) DESC LIMIT 1")
     .bind(target)
     .first<{ origin: string }>();
   return row?.origin;

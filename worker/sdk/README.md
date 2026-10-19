@@ -32,8 +32,7 @@ const reading = await unwrap(BlyggerApi.listReading({ client, query: { offset: 0
 
 Create a separate client for each server request or owner so credentials stay
 isolated. Node Fetch does not manage browser sessions: supply an existing owner
-session cookie in `headers`, or its raw token through `auth` (the generated
-cookie scheme adds `blyg_session=`). A custom `fetch` transport is also supported.
+session cookie in `headers`. To use `auth` for an owner session, supply a callback that returns the raw cookie value only when `scheme.in === "cookie"`; a plain string now also configures Bearer authentication. A custom `fetch` transport is also supported.
 Never embed server credentials in browser code.
 
 ```js
@@ -70,3 +69,33 @@ checks drift.
 
 `npm run build` bundles the package and declarations for browser and server
 JavaScript. `npm pack ./sdk` creates the installable archive.
+
+## Generated schemas
+
+The same OpenAPI input also generates Zod 4 validators. Import them from the
+SDK's schema export when you need runtime validation or TanStack DB row types:
+
+```js
+import { zItem } from '@blygger/sdk/schemas';
+
+const item = zItem.parse(data);
+```
+
+Reusable definitions use names such as `zItem` and `zSubscription`. Endpoint
+schemas include `zGetItemResponse` and `zListItemsResponse`. Generate these
+files through `npm run sdk:generate`; do not edit them by hand. CI checks drift.
+The schema export uses the SDK's Zod dependency, while the existing HTTP client
+bundles remain self-contained.
+
+## Bearer tokens
+
+Create a resource-bound token in Studio's access page. For REST, select the API resource and the scopes your tool needs. Tokens work in browsers and Node:
+
+```js
+const client = createBlyggerClient({
+  baseUrl: 'https://example.com',
+  auth: scheme => scheme.scheme === 'bearer' ? accessToken : undefined,
+});
+```
+
+Browser bearer requests support CORS. Tokens expire and can be revoked; load them from your credential store. See [client access](https://github.com/blygger/blygger-studio/blob/main/docs/client-access.md) for scopes, revocation and the OAuth/MCP implementation status.

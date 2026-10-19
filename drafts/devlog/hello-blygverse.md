@@ -2,7 +2,7 @@
 kind: thread
 id:
 version: 0
-note: devlog 1, hello blygverse
+note: "devlog 1, hello blygverse. Known issue: TK generation did not work in the studio. The TK scopes panel showed each instruction wrapped in stray brackets, which happens when a scope is typed as [[TK]]...[[/TK]] instead of [TK]...[/TK], and its generate button failed."
 stub_of: https://github.com/aneeshsathe/blygger-desktop
 ---
 

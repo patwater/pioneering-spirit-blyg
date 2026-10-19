@@ -5,7 +5,7 @@ a Cloudflare Worker that publishes a blyg, subscribes to others, and threads,
 transcludes and responds across them.
 
 **Protocol implemented:** `blyg 0.3`, level 2 · **Client version:** 0.10.0 ·
-`generator: blygger-studio/0.10.0` · [releases + upgrading](#releases-and-upgrading)
+`generator: blygger-studio/0.32.2` · [releases + upgrading](#releases-and-upgrading)
 
 > The [Blygger spec](https://github.com/blygger/blygger-spec) defines the protocol.
 > As of 2026-09-28, at least seven clients publish live blygs. Six are other
@@ -33,6 +33,14 @@ Older releases only have GitHub's source archives. You need:
 - A domain on that account to use a custom domain.
 
 SDK generation uses a pinned Hey API npm package.
+
+The Worker limits API work, AI calls and stored OAuth clients. Outbound fetches
+allow public destinations by default. See [security configuration](docs/auth-deployment-hardening.md#work-and-outbound-limits)
+for defaults and the explicit LAN opt-in.
+
+Draft uploads require an owner cookie or an API token with `owner:read`.
+Studio sends the cookie for previews. Publication makes used images public and
+keeps images needed by published snapshots and pins available.
 
 Contributors: see [tests and their limits](docs/testing.md) for verification
 commands, oracle replay, and the upgrade test.
@@ -86,9 +94,11 @@ AI is optional. Each AI function (TK generation, changelog notes, and later
 feed scoring) takes its own model in Settings → AI models, chosen from
 `models.json`. Set the key for each provider you use: `AI_PROVIDER_KEY`
 (Anthropic), `OPENAI_API_KEY` (OpenAI) or `GOOGLE_AI_KEY` (Google), e.g.
-`npx wrangler@4 secret put AI_PROVIDER_KEY`. To change the model list without
+`npx wrangler@4 secret put AI_PROVIDER_KEY`, or bind Workers AI for the
+`@cf/…` models, which need no key. To change the model list without
 upgrade conflicts, copy entries into a `models.local.json` (gitignored, same
-shape; see the comment in `models.json`) and redeploy.
+shape; see the comment in `models.json`) and redeploy. See
+[AI models](#ai-models) for Workers AI and OpenAI-compatible endpoints.
 
 The archive includes the Worker bundle, migrations, licenses, and a deployment
 README. It needs no `npm ci` or source build. Wrangler's
@@ -152,6 +162,41 @@ npx playwright install chromium
 npm run test:e2e
 ```
 
+## Public page caching
+
+Public HTML pages use a shared Cloudflare cache for 60 seconds. After expiry,
+Cloudflare can serve the saved page for another 300 seconds while it refreshes
+in the background. Browsers validate their saved HTML with a content ETag.
+The cache key includes the blyg's public revision, so a publish, withdrawal
+or settings change moves every page to a fresh entry and shows on the next
+read. Hiding an inbound mention still waits out the cache window. Studio, API, media, and XML routes keep their existing behavior.
+
+New installations and Worker archives include the cache configuration. Existing
+installations must add this block to their deployment config, including any
+ignored private config, and deploy with Wrangler 4.107.0 or later:
+
+```json
+"cache": { "enabled": false },
+"exports": {
+  "PublicHtml": { "type": "worker", "cache": { "enabled": true } }
+}
+```
+
+The default router stays uncached. Only public HTML GET/HEAD requests enter the
+cached `PublicHtml` entrypoint. Its cache key includes the full origin and path,
+so aliases do not share origin-dependent HTML. Browser reloads validate the saved edge copy without forcing another render.
+Query parameters do not change public HTML and do not create separate cache entries. Errors and missing pages
+use `no-store`.
+
+No migration, dashboard cache rule, extra binding, or scheduled job is needed.
+Without the config block, ETags still work but each request renders the page.
+Local Wrangler and native tests exercise routing and validators. Cloudflare's
+production cache supplies shared hits and background refresh.
+
+After deployment, inspect `Cf-Cache-Status` for `HIT` or `UPDATING`. Test repeat
+GET requests. `If-None-Match` with the returned
+ETag should produce a bodyless 304. See [Workers Cache configuration](https://developers.cloudflare.com/workers/cache/configuration/).
+
 ## The public Webmention endpoint
 
 `{mount}/webmention` accepts POST requests without a password. Another blyg uses
@@ -167,6 +212,59 @@ mentions when you quote other people.
 When enabled, hourly rate limits apply to each source host, each registrable
 domain, and the endpoint as a whole. See
 [`src/mentions/store.ts`](src/mentions/store.ts) for the limits and their reasons.
+
+## AI models
+
+Every AI function (TK generation, changelog notes, later feed scoring) uses the
+model you choose for it in **Settings → AI models**. Studio has no default
+model and never falls back to another one: a function with no model chosen
+says so instead of generating. Every call counts against the daily AI budget
+(`AI_DAILY_CALL_LIMIT`, default 20), whichever provider serves it.
+
+The list comes from `models.json`, merged at build with your gitignored
+`models.local.json`. Each provider names an `api`:
+
+| `api` | Calls | Needs |
+|---|---|---|
+| `anthropic-messages` | Anthropic Messages | `key_secret` (shipped: `AI_PROVIDER_KEY`) |
+| `openai-responses` | OpenAI Responses | `key_secret` (shipped: `OPENAI_API_KEY`) |
+| `gemini-generate` | Gemini generateContent | `key_secret` (shipped: `GOOGLE_AI_KEY`) |
+| `workers-ai` | Cloudflare Workers AI, through the Worker's binding | an `ai` binding (`binding`, default `AI`); no key |
+| `openai-chat` | any OpenAI-compatible Chat Completions endpoint | `base_url`, and `key_secret` unless the endpoint is keyless |
+
+**Workers AI.** The shipped list includes Gemma 4 26B and a few other `@cf/…`
+models, and any `@cf/…` id typed in with *other…* runs there too. Inference is
+billed to the Cloudflare account the Worker runs on. To enable it, uncomment the
+`"ai": { "binding": "AI" }` line in `wrangler.jsonc` and redeploy; Settings shows
+the provider as *binding set*. Studio sends `max_tokens` and the model's
+`params` (Gemma 4 gets `chat_template_kwargs: { enable_thinking: false }`) and
+removes any reasoning a model inlines into its answer (`<think>` blocks,
+Gemma's thought channel). A separate reasoning field is never read.
+
+**OpenAI-compatible endpoints** (OpenRouter, Groq, Together, Cloudflare's
+OpenAI-compatible endpoint or AI Gateway, a local Ollama). Add a provider and
+its models in `models.local.json`; Studio posts to `{base_url}/chat/completions`
+with the key as a bearer token:
+
+```json
+{
+  "providers": {
+    "groq": { "label": "Groq", "api": "openai-chat", "base_url": "https://api.groq.com/openai/v1", "key_secret": "GROQ_API_KEY" }
+  },
+  "models": [
+    { "id": "qwen/qwen3-32b", "provider": "groq", "label": "Qwen3 32B", "params": { "reasoning_format": "hidden" } }
+  ]
+}
+```
+
+Then `npx wrangler@4 secret put GROQ_API_KEY` and redeploy. `key_secret` must
+name a Worker secret, never a value: keys stay out of the manifest, out of the
+URL and out of `GET /api/ai/models`, which reports names and whether each is
+set. `base_url` must be `https` (plain `http` only to `localhost`, for an
+Ollama under `wrangler dev`) with no credentials or query string, and the build
+refuses a manifest that breaks these rules. `params` (on a `workers-ai` or
+`openai-chat` provider or model) are extra request-body members; a model's
+merge over its provider's, and neither can replace the model or the messages.
 
 ## Releases and upgrading
 
@@ -209,14 +307,18 @@ const reading = await unwrap(BlyggerApi.listReading({ client, query: { offset: 0
 Sign into `/studio` first: API calls use its owner session cookie. The SDK does
 not create a login session. Node clients must supply a session cookie in
 `headers` or a custom transport. See [SDK usage](sdk/README.md). Never embed an
-owner cookie in browser source. Cross-origin apps and OAuth are not supported
-yet. Install the downloads locally. The SDK is not published to the npm registry.
+owner cookie in browser source. Cross-origin clients can use resource-bound bearer tokens from Studio’s access page. See [client access](docs/client-access.md) for scopes, revocation, and the mounted OAuth/MCP discovery profile. Install the downloads locally. The SDK is not published to the npm registry.
 
 The downloaded OpenAPI file describes `/api` paths. Its default server is
 `http://localhost:8787`. Select your deployed origin in the API tool or generator.
 The deployed contract is also available to a signed-in owner at
 `/api/openapi.json`. Downloading the spec does not grant access to the API.
 See [the owner API guide](docs/api.md) for resource routes, partial edits, creation, and pagination.
+
+Interface experiments that should not become the reference design ship as
+[Studio extensions](docs/extensions.md): first-party code an operator compiles
+in with `extensions.local.json` and the owner turns on in Settings. None is
+compiled in or on by default.
 
 ### Upgrade a Worker archive installation
 
@@ -368,7 +470,7 @@ extra asset binding. For a mounted installation, forward `{mount}/*` and
 `/api/*`, including `{mount}/studio/app.js` and `{mount}/studio/app.css`.
 
 See [the migration plan](docs/migration.md) for the completed SPA cutover and the
-queued OAuth and MCP work.
+OAuth and MCP client access.
 
 ## Browser tests
 

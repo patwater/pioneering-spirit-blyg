@@ -13,13 +13,14 @@ import { useLiveQuery } from '@tanstack/react-db';
 import { Link, useNavigate, useBlocker } from '@tanstack/react-router';
 import { formatDateIn } from '../dates.ts';
 import { renderMarkdown } from '../markdown.ts';
+import { linkInline } from '../grammar.ts';
 import { markImported, parseScopes, previewStrip } from '../tk.ts';
 import { extractDirectives } from '../directives.ts';
 import { previewFromHtml } from '../preview.ts';
 import type { ListItemsResponses, Version } from '../../sdk/dist/browser.js';
 import { BlyggerApi, unwrap } from '../../sdk/dist/browser.js';
 import type { Detail } from './data.ts';
-import { client, items, itemDetail, changed } from './data.ts';
+import { client, items, itemDetail, changed, refreshItems, createDraftAction, settings as settingsCollection, hoppers } from './data.ts';
 import {
   ActionBar,
   Button,
@@ -30,16 +31,20 @@ import {
   useChrome,
   usePoll,
   useSettings,
+  publicPath,
 } from './components.tsx';
 import { Sheet, confirm, menu, prompt, toast } from './sheets.tsx';
-import { paletteTrigger, paletteInsert } from '../palette.ts';
+import { BracketPicker } from './picker.tsx';
+import { setTextAt } from './caret.ts';
 import { Draft } from './draft.ts';
+
 import { stripStaleUploads, uploadToken } from './upload-tokens.ts';
 import { FRAGMENT_MAX_CHARS as MAX } from '../client.ts';
 import { insertLink, isUrl, linkToast } from './links.ts';
 import type { Resolve } from './plain-text.ts';
 import { itemTitle, permalink, plainText, textWithLink } from './plain-text.ts';
 import { OcrScan } from './ocr.tsx';
+import { addStubQuote, passageCount, stubQuoteForm, withStubQuote } from './stub-quote.ts';
 import './authoring.css';
 
 type Kind = 'fragment' | 'thread';
@@ -60,13 +65,34 @@ function useAction() {
   const [busy, setBusy] = useState(false);
   const [warning, setWarning] = useState<string>();
   const pending = useRef(0);
+  // Whether the error showing came from a background save, which the next
+  // successful one may clear; an action's error stays until the next action.
+  const backgroundError = useRef(false);
   return {
     error,
     warning,
     busy,
+    /**
+     * Autosave: reports a failure like an action, but never sets `busy`, so
+     * typing does not disable publish and save draft. Safe because draft
+     * writes are queued (createPacedDraftAction) and publish saves first.
+     */
+    background: async (fn: () => Promise<unknown>) => {
+      try {
+        await fn();
+        if (backgroundError.current) {
+          backgroundError.current = false;
+          setError(undefined);
+        }
+      } catch (error) {
+        backgroundError.current = true;
+        setError(error);
+      }
+    },
     run: async (fn: () => Promise<unknown>) => {
       pending.current++;
       setBusy(true);
+      backgroundError.current = false;
       setError(undefined);
       setWarning(undefined);
       try {
@@ -131,14 +157,6 @@ export function imageCommandAt(text: string, caret: number) {
 
 /* ---------------- text tools: links, brackets, TK, scan ---------------- */
 
-/** Move the caret once React has written the new value, and tell the palette. */
-function placeCaret(el: HTMLTextAreaElement, start: number, end = start) {
-  requestAnimationFrame(() => {
-    el.focus();
-    el.setSelectionRange(start, end);
-    el.dispatchEvent(new Event('selectionchange'));
-  });
-}
 /** Link `raw` over [start, end) of the textarea: the selected words, or an autolink. */
 function linkInto(
   el: HTMLTextAreaElement,
@@ -151,8 +169,7 @@ function linkInto(
     toast('That is not a URL.');
     return;
   }
-  change(result.text);
-  placeCaret(el, result.caret);
+  setTextAt(el, change, result.text, result.caret);
   toast(linkToast(result));
 }
 /**
@@ -219,9 +236,8 @@ function useTextTools(
   const replace = (start: number, end: number, insert: string, select?: [number, number]) => {
     const el = textarea.current;
     if (!el) return;
-    change(el.value.slice(0, start) + insert + el.value.slice(end));
     const caret = start + insert.length;
-    placeCaret(el, ...(select ?? [caret, caret]));
+    setTextAt(el, change, el.value.slice(0, start) + insert + el.value.slice(end), ...(select ?? [caret, caret]));
   };
   const focusAt = (at: { start: number; end: number }) => {
     const el = textarea.current;
@@ -342,8 +358,7 @@ function useTextTools(
                 .map((p) => `> ${p}`)
                 .join('\n>\n');
               const placed = insertBlock(el.value, at.start, at.end, quote);
-              change(placed.text);
-              placeCaret(el, placed.caret);
+              setTextAt(el, change, placed.text, placed.caret);
             } else replace(at.start, at.end, scanned);
             toast(`scanned ${words} word${words === 1 ? '' : 's'}`);
           }}
@@ -381,7 +396,13 @@ function ToolRow({
 }) {
   return (
     <div className={className}>
-      <Button id={attachId} className="tool sans" disabled={disabled} onClick={attach}>
+      <Button
+        id={attachId}
+        className="tool sans"
+        disabled={disabled}
+        title="Upload an image and insert it at the cursor"
+        onClick={attach}
+      >
         attach image
       </Button>
       <Button
@@ -407,6 +428,7 @@ function ToolRow({
         data-action="bracket-link"
         disabled={disabled}
         aria-label="[[ link an item"
+        title="Link to an item, inline anywhere: an ordinary link to its page that notifies no one"
         onClick={() => tools.bracket('[[')}
       >
         [[
@@ -417,6 +439,7 @@ function ToolRow({
           data-action="bracket-quote"
           disabled={disabled}
           aria-label="![[ quote an item"
+          title="Quote an item on its own line: bakes a snapshot of it into this thread and tells its author"
           onClick={() => tools.bracket('![[')}
         >
           ![[
@@ -427,6 +450,7 @@ function ToolRow({
         data-action="tk"
         disabled={disabled}
         aria-label="[TK] instruction"
+        title="Write an instruction for the model; the generated text publishes disclosed as machine-written"
         onClick={tools.tk}
       >
         [TK]
@@ -481,8 +505,6 @@ function useSharing() {
     },
   };
 }
-const publicPath = (item: { id: string; kind: string }) =>
-  `${mount}/${item.kind === 'thread' ? 't' : 'f'}/${item.id}/`;
 /** A row's published words: the working copy when it has no unpublished changes. */
 async function publishedOf(item: Row): Promise<Shareable> {
   const kind = item.kind === 'thread' ? 'thread' : 'fragment';
@@ -673,7 +695,7 @@ function textareaProps(upload: ReturnType<typeof useUpload>, tools: TextTools) {
  * confirmed text is exactly what the model drafted.
  */
 type NoteChoice = { note: string; generated: boolean };
-function useNoteConfirm() {
+function useNoteConfirm(write: ReturnType<typeof createDraftAction>) {
   const settings = useSettings();
   const [state, setState] = useState<{
     version: number;
@@ -695,7 +717,7 @@ function useNoteConfirm() {
     return new Promise((resolve) => {
       setState({ version: item.version + 1, text: typed, drafted, loading: auto, resolve });
       if (!auto) return;
-      unwrap(BlyggerApi.draftNote({ client, path: { id: item.id } }))
+      write({ type: 'draft-note' })
         .then((r) => setState((s) => s && { ...s, text: r.note, drafted: r.note, loading: false }))
         .catch((error) => setState((s) => s && { ...s, loading: false, error }));
     });
@@ -785,46 +807,21 @@ export function Compose() {
     query: (q) =>
       q.from({ item: items }).orderBy(({ item }) => item.updated, 'desc'),
   });
-  usePoll('items', items.utils.refetch);
+  usePoll('items', refreshItems);
   const current = useRef({ text, kind, id });
   current.current = { text, kind, id };
-  const queue = useRef(Promise.resolve<string | undefined>(undefined));
-  const save = () => {
-    const snapshot = current.current;
-    const pending = queue.current.then(async (existing) => {
-      const existingId = existing || current.current.id;
-      const item = existingId
-        ? await unwrap(
-            BlyggerApi.updateItem({
-              client,
-              path: { id: existingId },
-              body: { content_md: snapshot.text, kind: snapshot.kind },
-            }),
-          )
-        : await unwrap(
-            BlyggerApi.createItem({
-              client,
-              body: { content_md: snapshot.text, kind: snapshot.kind },
-            }),
-          );
-      setId(item.id);
-      current.current.id = item.id;
-      items.utils.writeUpsert(item);
-      if (
-        current.current.text === snapshot.text &&
-        current.current.kind === snapshot.kind
-      ) {
-        setSaved(true);
-      }
-      return item.id;
-    });
-    queue.current = pending.catch(() => current.current.id);
-    return pending.then((id) =>
-      current.current.text === snapshot.text &&
-      current.current.kind === snapshot.kind
-        ? id
-        : undefined,
-    );
+  const [draftKey, setDraftKey] = useState(0);
+  const write = useMemo(() => createDraftAction(), [draftKey]);
+  const save = async () => {
+    const snapshot = { text: current.current.text, kind: current.current.kind };
+    const result = await write({ type: 'save', text: snapshot.text, kind: snapshot.kind });
+    const savedId = result.id;
+    setId(savedId);
+    current.current.id = savedId;
+    if (current.current.text !== snapshot.text || current.current.kind !== snapshot.kind)
+      return undefined;
+    setSaved(true);
+    return savedId;
   };
   useBlocker({
     enableBeforeUnload: () => !!current.current.text && !saved,
@@ -848,7 +845,9 @@ export function Compose() {
   useEffect(() => {
     if (saved || !text.trim()) return;
     if (!id && (text.replace(/\s/g, '').length < 8)) return;
-    const timer = setTimeout(() => void action.run(save), id ? 400 : 3000);
+    // The first save creates the draft and holds the buttons while it does, so
+    // a publish cannot race it into a second item; later saves stay quiet.
+    const timer = setTimeout(() => void (id ? action.background(save) : action.run(save)), id ? 400 : 3000);
     return () => clearTimeout(timer);
   }, [text, kind, id, saved]);
   const change = (next: string) => {
@@ -868,17 +867,15 @@ export function Compose() {
   const publish = async () => {
     const savedId = await save();
     if (!savedId) return;
-    const result = await unwrap(
-      BlyggerApi.publishItem({ client, path: { id: savedId } }),
-    );
+    const result = await write({ type: 'publish', note: '', generated: false });
     setPublished({ id: savedId, kind, md: text, version: result.version });
     if (current.current.text === text) {
       setText('');
       setId(undefined);
-      queue.current = Promise.resolve(undefined);
+      current.current.id = undefined;
+      setDraftKey(key => key + 1);
       setSaved(false);
     }
-    await changed('items', 'reading');
     return result;
   };
   const rows = result.data ?? [];
@@ -939,7 +936,8 @@ export function Compose() {
             Full Editor →
           </Button>
           <span className={over ? 'counter over' : 'counter'} id="composer-count">
-            {text.length} / {MAX}
+            {/* Only fragments have a length limit; a thread shows its count alone. */}
+            {kind === 'thread' ? `${text.length} chars` : `${text.length} / ${MAX}`}
           </span>
         </ToolRow>
         {over ? (
@@ -1039,31 +1037,23 @@ function ItemRow({
   const settings = useSettings();
   const sharing = useSharing();
   const action = useAction();
-  const confirmNote = useNoteConfirm();
   const [expanded, setExpanded] = useState(false);
   const [open, setOpen] = useState(false);
   const [text, setText] = useState(item.content_md);
   const [saved, setSaved] = useState(false);
+  const write = useMemo(() => createDraftAction(item.id), [item.id]);
+  const confirmNote = useNoteConfirm(write);
   const draft = useRef<Draft | null>(null);
   if (!draft.current)
     draft.current = new Draft(item.content_md, async (content) => {
-      await items.update(item.id, (row) => {
-        row.content_md = content;
-      }).isPersisted.promise;
-      await changed('item', 'reading');
+      await write({ type: 'save', text: content });
     });
   const kind: Kind = item.kind === 'thread' ? 'thread' : 'fragment';
   const publishRow = async () => {
     const choice = await confirmNote.request(item, '');
     if (!choice) return;
     const md = draft.current!.text;
-    const result = await unwrap(
-      BlyggerApi.publishItem({
-        client,
-        path: { id: item.id },
-        body: { ...(choice.note ? { note: choice.note } : {}), note_generated: choice.generated },
-      }),
-    );
+    const result = await write({ type: 'publish', note: choice.note, generated: choice.generated });
     onPublished({ id: item.id, kind, md, version: result.version });
     return result;
   };
@@ -1097,13 +1087,33 @@ function ItemRow({
     parseScopes(withoutDirectives).scopes,
   );
   const html = renderMarkdown(stripped.text);
-  const preview = previewFromHtml(html);
+  const own = previewFromHtml(html);
+  // An item that only quotes or links has no prose of its own, and read
+  // "(empty draft)" here. Ask the preview endpoint once for what the reader
+  // and public pages show (quotes baked, links resolved); until it answers,
+  // say what the item does.
+  const LINK = linkInline();
+  const links = (item.content_md.match(LINK) ?? []).length;
+  // Bare [[id]] tokens are not prose: without them, is anything left?
+  const prose = links ? previewFromHtml(renderMarkdown(stripped.text.replace(LINK, ''))) : own;
+  const ownEmpty = !prose.title && !prose.body;
+  const [resolved, setResolved] = useState<ReturnType<typeof previewFromHtml> | null>(null);
+  useEffect(() => {
+    if (!ownEmpty || !(count || links)) return;
+    let live = true;
+    unwrap(BlyggerApi.preview({ client, body: { content_md: item.content_md, item_id: item.id, kind: item.kind === 'thread' ? 'thread' : 'fragment' } }))
+      .then((r) => live && setResolved(previewFromHtml(r.html)))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [ownEmpty, item.content_md]);
+  const preview = ownEmpty && resolved && (resolved.title || resolved.body) ? resolved : own;
+  const doesOnly = count ? `Only quotes ${count} item${count === 1 ? '' : 's'}` : links ? `Only links ${links} item${links === 1 ? '' : 's'}` : null;
   const mutate = (fn: () => Promise<unknown>) =>
     void action.run(async () => {
       if (draft.current!.dirty && !(await save())) return;
-      const result = await fn();
-      await changed('items', 'item', 'reading');
-      return result;
+      return fn();
     });
   const dot = rowDot(item);
   const pin = async () => {
@@ -1113,14 +1123,7 @@ function ItemRow({
         ok: `pin v${item.version}`,
       })
     )
-      mutate(() =>
-        unwrap(
-          BlyggerApi.pinItem({
-            client,
-            path: { id: item.id, version: item.version },
-          }),
-        ),
-      );
+      mutate(() => write({ type: 'pin', version: item.version }));
   };
   return (
     <li
@@ -1136,7 +1139,7 @@ function ItemRow({
         <span className={`dot ${dot}`} title={item.status} />
         <span className="item-main">
           <span className={preview.title || preview.body ? 'item-title' : 'item-title empty'}>
-            {preview.title || preview.body || '(empty draft)'}
+            {preview.title || preview.body || doesOnly || '(empty draft)'}
           </span>
           {preview.title && preview.body ? (
             <span className="item-excerpt">{preview.body}</span>
@@ -1273,7 +1276,11 @@ function ItemRow({
                       danger: true,
                     })
                   )
-                    mutate(() => items.delete(item.id).isPersisted.promise);
+                    void action.run(async () => {
+                      await write({ type: 'delete' });
+                      await changed('items', 'reading');
+                      toast('Draft discarded', { tone: 'ok' });
+                    });
                 }}
               >
                 discard
@@ -1314,14 +1321,7 @@ function ItemRow({
                         danger: true,
                       })
                     )
-                      mutate(() =>
-                        unwrap(
-                          BlyggerApi.withdrawItem({
-                            client,
-                            path: { id: item.id },
-                          }),
-                        ),
-                      );
+                      mutate(() => write({ type: 'withdraw' }));
                   }}
                 >
                   withdraw
@@ -1342,14 +1342,16 @@ function ItemRow({
 export function EditorPage({ id }: { id: string }) {
   useChrome({ tabs: false, framed: false });
   const collection = useMemo(() => itemDetail(id), [id]);
-  usePoll(`item:${id}`, collection.utils.refetch);
+  usePoll('items', refreshItems);
   const result = useLiveQuery({
     query: (q) => q.from({ item: collection }),
   });
   return result.data?.[0] ? (
     <Editor key={id} item={result.data[0]} />
   ) : (
-    <p>Loading editor…</p>
+    <p role={result.isReady ? 'alert' : undefined}>
+      {result.isReady ? 'Item not found.' : 'Loading editor…'}
+    </p>
   );
 }
 /** A collapsible card whose open state the screen can also set. */
@@ -1387,17 +1389,15 @@ const initiallyOpen = (hash: string) => location.hash === `#${hash}`;
 function Editor({ item }: { item: Detail }) {
   const navigate = useNavigate();
   const settings = useSettings();
+  const buckets =
+    useLiveQuery({ query: (q) => q.from({ hopper: hoppers }) }).data ?? [];
   const sharing = useSharing();
   const action = useAction();
-  const collection = itemDetail(item.id);
+  const write = useMemo(() => createDraftAction(item.id), [item.id]);
   const draft = useRef<Draft | null>(null);
   if (!draft.current) {
     draft.current = new Draft(item.content_md, async (text) => {
-      const transaction = collection.update(item.id, (row) => {
-        row.content_md = text;
-      });
-      await transaction.isPersisted.promise;
-      await changed('items', 'reading');
+      await write({ type: 'save', text });
     });
     const cleaned = stripStaleUploads(item.content_md);
     if (cleaned !== item.content_md) draft.current.edit(cleaned);
@@ -1407,7 +1407,7 @@ function Editor({ item }: { item: Detail }) {
   // The note the studio drafted (#40); `generated` is sent only while the
   // field still holds exactly that text — an edit makes the words the author's.
   const [drafted, setDrafted] = useState<string>();
-  const confirmNote = useNoteConfirm();
+  const confirmNote = useNoteConfirm(write);
   const [preview, setPreview] =
     useState<Awaited<ReturnType<typeof getPreview>>>();
   const [version, setVersion] = useState<Version>();
@@ -1448,7 +1448,7 @@ function Editor({ item }: { item: Detail }) {
     setText(text);
     setSaved(false);
     clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => void action.run(save), 400);
+    saveTimer.current = setTimeout(() => void action.background(save), 400);
   };
   useEffect(() => () => clearTimeout(saveTimer.current), []);
   useEffect(() => {
@@ -1480,20 +1480,11 @@ function Editor({ item }: { item: Detail }) {
   const operation = (fn: () => Promise<unknown>) =>
     void action.run(async () => {
       if (!(await save())) return;
-      const result = await fn();
-      await changed('item', 'items', 'reading');
-      return result;
+      return fn();
     });
-  const switchKind = async () => {
-    const next = item.authored_kind === 'fragment' ? 'thread' : 'fragment';
-    await unwrap(
-      BlyggerApi.updateItem({
-        client,
-        path: { id: item.id },
-        body: { kind: next },
-      }),
-    );
-  };
+  const switchKind = () => write({ type: 'update', changes: {
+    kind: item.authored_kind === 'fragment' ? 'thread' : 'fragment',
+  } });
   const restore = async (version: number, discardChanges = false) => {
     const question = discardChanges
       ? {
@@ -1513,22 +1504,10 @@ function Editor({ item }: { item: Detail }) {
     clearTimeout(saveTimer.current);
     setReplacing(true);
     try {
-      // Finish queued PATCHes before replacing the working copy on the server.
-      await draft.current!.settle();
-      await unwrap(
-        BlyggerApi.restoreItem({
-          client,
-          path: { id: item.id },
-          body: { version },
-        }),
-      );
-      const restored = await unwrap(
-        BlyggerApi.getItem({ client, path: { id: item.id } }),
-      );
+      const restored = await write({ type: 'restore', version });
       draft.current!.accept(restored.content_md);
       setText(restored.content_md);
       setSaved(true);
-      await changed('item', 'items', 'reading');
     } finally {
       setReplacing(false);
     }
@@ -1545,11 +1524,11 @@ function Editor({ item }: { item: Detail }) {
     clearTimeout(saveTimer.current);
     setReplacing(true);
     try {
-      await draft.current!.settle();
-      await unwrap(BlyggerApi.deleteItem({ client, path: { id: item.id } }));
-      await changed('items');
+      await write({ type: 'delete' });
       leaving.current = true;
       await navigate({ to: '/' });
+      await changed('items', 'reading');
+      toast('Draft discarded', { tone: 'ok' });
     } finally {
       setReplacing(false);
     }
@@ -1564,22 +1543,15 @@ function Editor({ item }: { item: Detail }) {
       }))
     )
       return;
-    operation(() =>
-      unwrap(BlyggerApi.withdrawItem({ client, path: { id: item.id } })),
-    );
+    operation(() => write({ type: 'withdraw' }));
   };
   const generate = async (scope: number) => {
     const revision = draft.current!.revision;
-    const result = await draft.current!.mutate(() =>
-      unwrap(
-        BlyggerApi.generateItem({
-          client,
-          path: { id: item.id },
-          body: { scope },
-        }),
-      ),
-    );
-    if (draft.current!.revision === revision) edit(result.text);
+    const result = await write({ type: 'generate', scope });
+    // `text` is the scope's output alone; the draft is the whole document with
+    // it spliced in, which the server has already saved. Replacing the draft
+    // with `text` threw away everything around the scope (0.10.0–0.27.1).
+    if (draft.current!.revision === revision) edit(result.content_md);
   };
   const pin = async (version: number) => {
     if (
@@ -1589,23 +1561,14 @@ function Editor({ item }: { item: Detail }) {
       }))
     )
       return;
-    await unwrap(
-      BlyggerApi.pinItem({ client, path: { id: item.id, version } }),
-    );
-    await changed('item', 'items');
+    await write({ type: 'pin', version });
   };
   const publish = () =>
     operation(async () => {
       const choice = await confirmNote.request(item, note, drafted);
       if (!choice) return;
       const md = draft.current!.text;
-      const result = await unwrap(
-        BlyggerApi.publishItem({
-          client,
-          path: { id: item.id },
-          body: { note: choice.note, note_generated: choice.generated },
-        }),
-      );
+      const result = await write({ type: 'publish', note: choice.note, generated: choice.generated });
       // A note describes one change; it must not ride along on the next.
       setNote('');
       setDrafted(undefined);
@@ -1614,6 +1577,30 @@ function Editor({ item }: { item: Detail }) {
     });
   const isThread = item.authored_kind === 'thread';
   const isPublic = item.status === 'public';
+  // Own items can go in hoppers beside what you read (session 47); "~own" is
+  // the store's marker for them (src/importer/store.ts OWN_SUBSCRIPTION).
+  const addToHopper = async () => {
+    const chosen = await menu({
+      title: '+ add to hopper…',
+      rows: [
+        ...buckets.map((bucket) => ({ key: `hopper:${bucket.id}`, icon: '▤', label: bucket.name })),
+        { key: 'new', icon: '＋', label: 'new hopper…' },
+      ],
+    });
+    if (!chosen) return;
+    let hopperId = chosen.slice('hopper:'.length);
+    let name = buckets.find((bucket) => bucket.id === hopperId)?.name;
+    if (chosen === 'new') {
+      const typed = await prompt({ title: 'Name the new hopper:' });
+      if (!typed?.trim()) return;
+      const hopper = await unwrap(BlyggerApi.createHopper({ client, body: { name: typed } }));
+      hopperId = hopper.id;
+      name = hopper.name;
+    }
+    await unwrap(BlyggerApi.addHopperItem({ client, path: { id: hopperId, sub: '~own', remoteId: item.id } }));
+    await changed('hoppers', 'hopper', 'hopper-preview');
+    toast(`added to ${name}`);
+  };
   const edited = !saved && text !== item.content_md;
   // Unpublished changes, discounting a working copy that already holds the
   // published words again (discard changes leaves `dirty` set on purpose).
@@ -1663,6 +1650,31 @@ function Editor({ item }: { item: Detail }) {
           icon: '⇪',
           label: 'share…',
           onSelect: () => void sharing.share(shareable),
+        },
+        // The static front page (session 47): a published thread at the public root.
+        isPublic && isThread && settings && {
+          icon: '⌂',
+          label: settings.front_page === item.id ? 'stop using as front page' : 'set as front page',
+          description:
+            settings.front_page === item.id
+              ? 'your public home page goes back to your latest items'
+              : `readers arriving at your blyg see this thread; your latest items move to /${settings.posts_path}/`,
+          disabled: action.busy,
+          onSelect: () =>
+            void action.run(async () => {
+              const front = settings.front_page === item.id ? '' : item.id;
+              await settingsCollection.update('settings', (row) => {
+                row.front_page = front;
+              }).isPersisted.promise;
+              toast(front ? 'This thread is now your front page' : 'Your home page shows your latest items again', { tone: 'ok' });
+            }),
+        },
+        item.status !== 'withdrawn' && {
+          icon: '▤',
+          label: 'add to hopper…',
+          description: isPublic ? undefined : 'it shows on a public hopper once published',
+          disabled: action.busy,
+          onSelect: () => void action.run(addToHopper),
         },
         isPublic && {
           icon: '📌',
@@ -1728,19 +1740,23 @@ function Editor({ item }: { item: Detail }) {
             className="btn btn-ghost btn-mini"
             onClick={() =>
               operation(async () => {
-                await unwrap(
-                  BlyggerApi.updateItem({
-                    client,
-                    path: { id: item.id },
-                    body: { stub_of: null },
-                  }),
-                );
+                await write({ type: 'update', changes: { stub_of: null } });
               })
             }
           >
             clear stub
           </Button>
         </p>
+      ) : null}
+      {item.stub_of && 'id' in item.stub_of && isThread ? (
+        <StubQuote
+          itemId={item.id}
+          target={item.stub_of.id}
+          text={text}
+          edit={edit}
+          input={input}
+          fresh={item.version === 0}
+        />
       ) : null}
       {item.forked_from ? (
         <p className="stub-head">
@@ -1863,9 +1879,7 @@ function Editor({ item }: { item: Detail }) {
                 title="Describe the change from the published version; you can edit it before publishing"
                 onClick={() =>
                   operation(async () => {
-                    const result = await unwrap(
-                      BlyggerApi.draftNote({ client, path: { id: item.id } }),
-                    );
+                    const result = await write({ type: 'draft-note' });
                     setNote(result.note);
                     setDrafted(result.note);
                   })
@@ -1900,6 +1914,23 @@ function Editor({ item }: { item: Detail }) {
                       >
                         {scope.hasOutput ? 'regenerate' : 'generate'}
                       </Button>
+                      {scope.sources?.length ? (
+                        <ul className="tk-sources">
+                          {scope.sources.map((source) =>
+                            source.ok ? (
+                              <li key={source.id}>
+                                draws on <strong>{source.from}</strong>
+                                {source.excerpt ? <> · <q>{source.excerpt}</q></> : null}
+                                {source.remote ? <span className="hint"> · its author is told when you publish</span> : null}
+                              </li>
+                            ) : (
+                              <li key={source.id} className="tk-source-bad">
+                                <code>![[{source.id}]]</code> cannot be used: {source.reason}
+                              </li>
+                            ),
+                          )}
+                        </ul>
+                      ) : null}
                     </>
                   )}
                 </li>
@@ -1931,6 +1962,43 @@ function Editor({ item }: { item: Detail }) {
               </Button>
             </div>
           ) : null}
+          <div className="field tk-highlight">
+            <span id="tk-highlight-label">
+              Highlight generated portions on the public page:
+            </span>
+            <div
+              className="segmented"
+              role="group"
+              aria-labelledby="tk-highlight-label"
+            >
+              {(
+                [
+                  [
+                    'default',
+                    `default (${settings?.highlight_generated_default ? 'on' : 'off'})`,
+                  ],
+                  ['show', 'on'],
+                  ['hide', 'off'],
+                ] as const
+              ).map(([value, label]) => (
+                <Button
+                  key={value}
+                  className={item.highlight === value ? 'seg is-active' : 'seg'}
+                  aria-pressed={item.highlight === value}
+                  disabled={action.busy}
+                  onClick={() =>
+                    item.highlight === value
+                      ? undefined
+                      : operation(() =>
+                          write({ type: 'update', changes: { highlight: value } }),
+                        )
+                  }
+                >
+                  {label}
+                </Button>
+              ))}
+            </div>
+          </div>
         </Card>
         <Card
           id="attachments"
@@ -2242,6 +2310,279 @@ function QuotedSnapshots({
     </Card>
   );
 }
+/** Per device, like the picker's choices: a dismissed explanation stays dismissed here. */
+const STUB_HELP_KEY = 'blygger.stub-help.dismissed';
+function stubHelpDismissed() {
+  try {
+    return localStorage.getItem(STUB_HELP_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+function dismissStubHelp() {
+  try {
+    localStorage.setItem(STUB_HELP_KEY, '1');
+  } catch {
+    // Storage blocked: the explanation just shows again next time.
+  }
+}
+/**
+ * The stub's quote, chosen in the editor (session 37). A stub opens quoting
+ * the whole post; selecting text in the quoted post below writes that passage
+ * under the directive (§10.1's partial grammar), and "quote whole post" takes
+ * it out again. Replaces select-to-quote in the reading view, where the
+ * passage had to be chosen before there was a draft to choose it for.
+ *
+ * The post is shown as publish would bake it whole — the preview of a lone
+ * directive — so a passage chosen from it is checked against the same text.
+ */
+function StubQuote({
+  itemId,
+  target,
+  text,
+  edit,
+  input,
+  fresh,
+}: {
+  itemId: string;
+  target: string;
+  text: string;
+  edit: (text: string) => void;
+  input: RefObject<HTMLTextAreaElement | null>;
+  fresh: boolean;
+}) {
+  const form = stubQuoteForm(text, target);
+  // More than one passage is a running commentary; the chooser then adds
+  // rather than replaces, and "quote whole post" would destroy it, so it goes.
+  const passages = passageCount(text, target);
+  const [open, setOpen] = useState(false);
+  const [post, setPost] = useState<{ html: string; error?: string }>();
+  const [chosen, setChosen] = useState<string | null>(null);
+  const [help, setHelp] = useState(() => fresh && !stubHelpDismissed());
+  const [never, setNever] = useState(false);
+  const panel = useRef<HTMLDivElement>(null);
+  const addButton = useRef<HTMLButtonElement>(null);
+  const replaceButton = useRef<HTMLButtonElement>(null);
+  const helpTop = useRef<HTMLParagraphElement>(null);
+  const latest = useRef({ text, chosen });
+  latest.current = { text, chosen };
+  useEffect(() => {
+    if (!open || post) return;
+    getPreview(`![[${target}]]`, itemId, 'thread')
+      .then((result) =>
+        setPost(
+          result.errors?.length
+            ? { html: '', error: result.errors[0].reason }
+            : { html: result.html },
+        ),
+      )
+      .catch((error) =>
+        setPost({ html: '', error: error instanceof Error ? error.message : String(error) }),
+      );
+  }, [open, post, target, itemId]);
+  useEffect(() => {
+    if (!open) return;
+    const inside = (node: Node | null) => !!node && !!panel.current?.contains(node);
+    const check = () => {
+      const selection = window.getSelection();
+      setChosen(
+        selection &&
+          !selection.isCollapsed &&
+          inside(selection.anchorNode) &&
+          inside(selection.focusNode) &&
+          selection.toString().trim()
+          ? selection.toString()
+          : null,
+      );
+    };
+    document.addEventListener('selectionchange', check);
+    return () => document.removeEventListener('selectionchange', check);
+  }, [open]);
+  const quotePassage = (how: 'replace' | 'add') => {
+    const { text, chosen } = latest.current;
+    if (!chosen) return;
+    const caret = input.current?.selectionStart ?? text.length;
+    edit(how === 'add' ? addStubQuote(text, target, chosen, caret) : withStubQuote(text, target, chosen));
+    window.getSelection()?.removeAllRanges();
+    setChosen(null);
+    setOpen(false);
+    toast(how === 'add' ? 'added another quote' : 'quoting the passage');
+  };
+  useEffect(() => {
+    // Pressing a button must not collapse the selection it quotes. React's
+    // touch listeners are passive, so these are native (as the old pill's were).
+    const cleanups = (
+      [
+        [addButton.current, 'add'],
+        [replaceButton.current, 'replace'],
+      ] as const
+    ).map(([element, how]) => {
+      if (!element) return () => {};
+      const touch = (event: TouchEvent) => {
+        event.preventDefault();
+        quotePassage(how);
+      };
+      const mouse = (event: MouseEvent) => event.preventDefault();
+      element.addEventListener('touchstart', touch, { passive: false });
+      element.addEventListener('mousedown', mouse);
+      return () => {
+        element.removeEventListener('touchstart', touch);
+        element.removeEventListener('mousedown', mouse);
+      };
+    });
+    return () => cleanups.forEach((cleanup) => cleanup());
+  });
+  const closeHelp = () => {
+    if (never) dismissStubHelp();
+    setHelp(false);
+  };
+  return (
+    <div className="stub-quote" data-form={form ?? 'none'}>
+      <p className="hint stub-hint">
+        {form === 'whole'
+          ? 'Quoting the whole post. Write above the quote for a quote post, below it for a reply, or nothing for a repost.'
+          : passages > 1
+            ? `Quoting ${passages} passages: a running commentary. Choose another to add it after the cursor.`
+            : form === 'passage'
+              ? 'Quoting a passage: the > lines under the quote. Write above it, below it, or both.'
+              : 'Not quoting the post: this is a response by link.'}{' '}
+        {passages <= 1 && form !== 'whole' ? (
+          <button
+            type="button"
+            className="link-btn"
+            data-action="quote-whole"
+            onClick={() => edit(withStubQuote(text, target, null))}
+          >
+            quote whole post
+          </button>
+        ) : null}{' '}
+        <button
+          type="button"
+          className="link-btn"
+          data-action="choose-passage"
+          aria-expanded={open}
+          onClick={() => setOpen((value) => !value)}
+        >
+          {open ? 'done choosing' : form === 'passage' ? 'quote another passage' : 'quote a passage instead'}
+        </button>{' '}
+        ·{' '}
+        <button
+          type="button"
+          className="link-btn"
+          data-action="stub-help"
+          onClick={() => setHelp(true)}
+        >
+          how stubs work
+        </button>
+      </p>
+      {open ? (
+        <div className="stub-chooser">
+          <p className="hint">
+            Select the passage to quote in the post below. It must be one
+            unbroken stretch of the original.
+          </p>
+          {post?.error ? (
+            <Failure error={post.error} />
+          ) : post ? (
+            <div ref={panel} className="stub-post preview">
+              <Html html={post.html} />
+            </div>
+          ) : (
+            <p className="hint">loading the post…</p>
+          )}
+          {chosen !== null ? (
+            <div className="quote-pills">
+              {passages > 0 ? (
+                <button
+                  ref={addButton}
+                  type="button"
+                  className="quote-pill"
+                  data-action="add-passage"
+                  onClick={() => quotePassage('add')}
+                >
+                  ❝ add as another quote
+                </button>
+              ) : null}
+              <button
+                ref={replaceButton}
+                type="button"
+                className={passages > 0 ? 'quote-pill quote-pill-alt' : 'quote-pill'}
+                data-action="quote-passage"
+                onClick={() => quotePassage('replace')}
+              >
+                {passages > 0 ? 'replace the first quote' : '❝ quote only this'}
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      <Sheet
+        open={help}
+        onClose={closeHelp}
+        title="How stubs work"
+        className="stub-help"
+        initialFocus={helpTop}
+      >
+        <div className="sheet-body prose">
+          <p ref={helpTop} tabIndex={-1}>
+            A stub is your post in response to one other post, and its author
+            is notified. One action covers what other platforms split into
+            four:
+          </p>
+          <table className="stub-grid">
+            <thead>
+              <tr>
+                <th />
+                <th>whole post</th>
+                <th>a passage</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th>your words above</th>
+                <td>quote post</td>
+                <td>commentary on an excerpt</td>
+              </tr>
+              <tr>
+                <th>your words below</th>
+                <td>reply</td>
+                <td>inline reply</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>Leave out your own words and a whole-post stub is a repost.</p>
+          <p>
+            <strong>Quoting part of a post.</strong> Put the passage right
+            under <code>![[id]]</code>, with <code>&gt;</code> at the start of
+            every line, blank ones included:
+          </p>
+          <pre><code>{'![[id]]\n> First paragraph you are quoting.\n>\n> Second paragraph.\n\nYour reply.'}</code></pre>
+          <p>
+            Or choose <em>quote a passage instead</em> and select it in the
+            post. A passage must be one unbroken stretch of the original, and
+            is published as plain text. Quote several passages, each under its
+            own <code>![[id]]</code>, for a running commentary.
+          </p>
+          <p>
+            Stubs are for responding: stubbing everything a source posts with
+            nothing to say about it is a misuse (§10.6).
+          </p>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={never}
+              onChange={(event) => setNever(event.target.checked)}
+            />{' '}
+            don&rsquo;t show this again
+          </label>
+        </div>
+        <div className="sheet-actions">
+          <Sheet.Close className="btn btn-primary">got it</Sheet.Close>
+        </div>
+      </Sheet>
+    </div>
+  );
+}
 const getPreview = (
   text: string,
   id: string,
@@ -2255,176 +2596,3 @@ const getPreview = (
       signal,
     }),
   );
-function BracketPicker({
-  input,
-  text,
-  change,
-  allowTransclude = false,
-}: {
-  input: React.RefObject<HTMLTextAreaElement | null>;
-  text: string;
-  change: (text: string) => void;
-  allowTransclude?: boolean;
-}) {
-  const [hits, setHits] = useState<
-    {
-      id: string;
-      excerpt: string;
-    }[]
-  >([]);
-  const [selected, setSelected] = useState(0);
-  const [total, setTotal] = useState(0);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<unknown>();
-  const request = useRef<AbortController | undefined>(undefined);
-  const [caret, setCaret] = useState(text.length);
-  useEffect(() => {
-    const element = input.current;
-    const update = () => setCaret(element?.selectionStart ?? text.length);
-    element?.addEventListener('selectionchange', update);
-    element?.addEventListener('keyup', update);
-    element?.addEventListener('click', update);
-    update();
-    return () => {
-      element?.removeEventListener('selectionchange', update);
-      element?.removeEventListener('keyup', update);
-      element?.removeEventListener('click', update);
-    };
-  }, [input, text]);
-  const trigger = paletteTrigger(text, caret, allowTransclude);
-  const query = trigger?.query;
-  const loadPage = async (
-    offset: number,
-    controller: AbortController,
-    query: string,
-  ) => {
-    if (controller.signal.aborted) return;
-    setLoading(true);
-    setError(undefined);
-    try {
-      const result = await unwrap(
-        BlyggerApi.search({
-          client,
-          query: { q: query, offset, limit: 20 },
-          signal: controller.signal,
-        }),
-      );
-      if (controller.signal.aborted || request.current !== controller) return;
-      setHits((current) =>
-        offset === 0
-          ? result.items
-          : [
-              ...current,
-              ...result.items.filter(
-                (item) => !current.some((hit) => hit.id === item.id),
-              ),
-            ],
-      );
-      setTotal(result.total);
-    } catch (failure) {
-      if (!controller.signal.aborted && request.current === controller)
-        setError(failure);
-    } finally {
-      if (request.current === controller) setLoading(false);
-    }
-  };
-  useEffect(() => {
-    setSelected(0);
-    setHits([]);
-    setTotal(0);
-    setError(undefined);
-    setLoading(false);
-    if (query === undefined) return;
-    const controller = new AbortController();
-    request.current = controller;
-    const timer = setTimeout(() => void loadPage(0, controller, query), 150);
-    return () => {
-      clearTimeout(timer);
-      controller.abort();
-      if (request.current === controller) request.current = undefined;
-    };
-  }, [query]);
-  const loadMore = () => {
-    const controller = request.current;
-    if (controller && query !== undefined)
-      void loadPage(hits.length, controller, query);
-  };
-  const pick = (id: string) => {
-    if (!trigger) return;
-    const next = paletteInsert(text, caret, trigger, id);
-    change(next.text);
-    request.current?.abort();
-    setHits([]);
-    requestAnimationFrame(() => {
-      input.current?.focus();
-      input.current?.setSelectionRange(next.caret, next.caret);
-    });
-  };
-  useEffect(() => {
-    const element = input.current;
-    if (!element) return;
-    const key = (event: KeyboardEvent) => {
-      if (!hits.length) return;
-      if (event.key === 'ArrowDown') {
-        event.preventDefault();
-        setSelected((i) => Math.min(i + 1, hits.length - 1));
-      }
-      if (event.key === 'ArrowUp') {
-        event.preventDefault();
-        setSelected((i) => Math.max(i - 1, 0));
-      }
-      if (event.key === 'Escape') {
-        request.current?.abort();
-        setHits([]);
-        setError(undefined);
-      }
-      if (event.key === 'Enter' && hits[selected]) {
-        event.preventDefault();
-        pick(hits[selected].id);
-      }
-    };
-    element.addEventListener('keydown', key);
-    return () => element.removeEventListener('keydown', key);
-  });
-  return trigger && (hits.length || error) ? (
-    <div className="palette">
-      <Failure error={error} />
-      <ul role="listbox" aria-label="items">
-        {hits.map((hit, i) => (
-          <li
-            role="option"
-            aria-selected={i === selected}
-            className={i === selected ? 'sel' : ''}
-            key={hit.id}
-            onMouseDown={(event) => {
-              event.preventDefault();
-              pick(hit.id);
-            }}
-          >
-            {hit.excerpt}
-          </li>
-        ))}
-      </ul>
-      {error ? (
-        <Button
-          className="btn btn-ghost btn-mini"
-          disabled={loading}
-          onMouseDown={(event) => event.preventDefault()}
-          onClick={loadMore}
-        >
-          retry search
-        </Button>
-      ) : null}
-      {hits.length < total ? (
-        <Button
-          className="btn btn-ghost btn-mini"
-          disabled={loading}
-          onMouseDown={(event) => event.preventDefault()}
-          onClick={loadMore}
-        >
-          load more ({hits.length} of {total})
-        </Button>
-      ) : null}
-    </div>
-  ) : null;
-}

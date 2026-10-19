@@ -47,12 +47,30 @@ describe("paletteTrigger — which bracket form the caret is in", () => {
     expect(at("  ![[frag|", false)).toBeNull();
   });
 
-  it("never offers anything for an inline `![[`, which is a TK source ref", () => {
-    // Inside a [TK] scope an inline `![[id]]` is a source reference, not a
-    // quote. Neither insertion is right for it, so the palette stays shut —
-    // which is what the thread editor did before this refactor too.
+  it("offers nothing for an inline `![[` outside a [TK] scope", () => {
     expect(at("see ![[|")).toBeNull();
-    expect(at("[TK]summarise ![[x|")).toBeNull();
+    expect(at("[TK]done[=]out[/TK] then ![[|")).toBeNull();
+  });
+
+  it("offers a source for `![[` in a [TK] scope's instruction, inline or own-line (#44, #60)", () => {
+    // Any item a directive may name is a source since G8, so the picker that
+    // lists them is the right one; the insertion is the `![[id]]` in place.
+    expect(at("[TK]summarise ![[x|")).toMatchObject({ form: "source", query: "x", start: 14 });
+    expect(at("intro\n[TK]compare ![[|")).toMatchObject({ form: "source", start: 18 });
+    // Own-line inside the instruction is a source too, not a quote of the thread.
+    expect(at("[TK]draw on\n![[|")).toMatchObject({ form: "source", start: 12 });
+    expect(at("[TK]draw on\n![[|", false)).toMatchObject({ form: "source" });
+    // In the output a directive is not a source (#60), and impyrt declares none.
+    expect(at("[TK]x[=]out ![[|")).toBeNull();
+    expect(at("[TK]impyrt=pasted ![[|")).toBeNull();
+  });
+
+  it("inserts a source in place", () => {
+    const id = "7c9wk2n4h6q1x8v0z3m5rjy2ke";
+    const text = "[TK]summarise ![[fr and more[/TK]";
+    const caret = "[TK]summarise ![[fr".length;
+    const t = trigger(text, caret, false)!;
+    expect(insert(text, caret, t, id)).toEqual({ text: `[TK]summarise ![[${id}]] and more[/TK]`, caret: `[TK]summarise ![[${id}]]`.length });
   });
 
   it("closes once the brackets are closed", () => {
@@ -92,6 +110,23 @@ describe("paletteInsert — the insertion matches the trigger", () => {
       text: `as I said in [[${id}]] and then some`,
       caret: `as I said in [[${id}]]`.length,
     });
+  });
+
+  it("writes the label after the id when given one, in every form (#70)", () => {
+    const line = "  ![[fr";
+    expect(insert(line, line.length, trigger(line, line.length, true)!, id, "Their title").text).toBe(`![[${id} | Their title]]`);
+    const text = "as I said in [[fr and then some";
+    const caret = "as I said in [[fr".length;
+    expect(insert(text, caret, trigger(text, caret, false)!, id, "“an excerpt”").text).toBe(
+      `as I said in [[${id} | “an excerpt”]] and then some`,
+    );
+  });
+
+  it("rewrites a label the grammar cannot hold, and omits an empty one", () => {
+    const text = "[[fr";
+    const t = trigger(text, text.length, false)!;
+    expect(insert(text, text.length, t, id, "a\nb ]] c").text).toBe(`[[${id} | a b ] ] c]]`);
+    expect(insert(text, text.length, t, id, "  ").text).toBe(`[[${id}]]`);
   });
 
   it("keeps everything before and after a multi-line insertion", () => {
@@ -148,6 +183,16 @@ describe("the candidate list pages, and says so", () => {
     }
     const empty = await apiJson(cookie, "GET", "/api/search?q=junkoffsettoken&offset=");
     expect(empty.json.offset).toBe(0); expect(empty.json.items).toHaveLength(1);
+  });
+
+  it("matches a word longer than D1's 50-byte LIKE cap, case-folded, with % and _ literal", async () => {
+    const cookie = await login();
+    const url = "https://longsearchtoken.example/some/deeply/nested/path/to_a/100%25/page";
+    await createAndPublish(cookie, `See ${url} for more.`);
+    await createAndPublish(cookie, "https://longsearchtoken.example/some/deeply/nested/path/toXa/100X/page");
+    const res = await search(cookie, encodeURIComponent(url.toUpperCase().replace("HTTPS", "https")));
+    expect(res.status).toBe(200);
+    expect(res.json.total).toBe(1);
   });
 
   it("the total counts matches, not the whole blyg", async () => {

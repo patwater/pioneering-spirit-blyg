@@ -1,3 +1,7 @@
+import { DEFAULT_FONT, isFont } from "./fonts.ts";
+import { DEFAULT_FEED_ORDER } from "./feeds/index.ts";
+import { DEFAULT_POSTS_PATH } from "./front-page.ts";
+import { parseCustomTheme } from "./themes.ts";
 // Data access + publish-flow semantics — v0.1-plan §3.1.
 
 import { renderMarkdown } from "./markdown.ts";
@@ -15,7 +19,8 @@ import {
 } from "./transclusion.ts";
 import type { ForkedFrom, ItemRow, MediaRow, ScopeProvenance, Settings, StubCite, StubOf, Transclusion, VersionRow } from "./types.ts";
 import { FRAGMENT_MAX_CHARS } from "./types.ts";
-import { absolutizeHtml, authoredText, contentHash, newId, nowIso } from "./util.ts";
+import { parseEnabledExtensions } from "./extensions/names.ts";
+import { absolutizeHtml, authoredText, contentHash, isFollowableUrl, newId, nowIso } from "./util.ts";
 
 export { TkPublishError, TransclusionResolveError };
 
@@ -72,19 +77,53 @@ export function defaultSiteTitle(siteUrl: string | undefined): string {
 
 export async function getSettings(db: D1Database): Promise<Settings> {
   const rows = await db.prepare("SELECT key, value FROM settings").all<{ key: string; value: string }>();
-  const map = Object.fromEntries(rows.results.map((r) => [r.key, r.value]));
-  let links: Settings["author_links"] = [];
+  return settingsFromMap(Object.fromEntries(rows.results.map((r) => [r.key, r.value])));
+}
+
+/**
+ * Every setting as it would read with nothing stored: what the setup wizard's
+ * "reset to default" restores. Derived by the same code as a real read, so the
+ * two cannot drift. `site_title` is the one derived default (from the address);
+ * resetting it stores an empty title, which reads as that derivation.
+ */
+export function settingDefaults(siteUrl: string): Settings {
+  return settingsFromMap({ site_url: siteUrl });
+}
+
+/** A stored list of label + url links; malformed JSON or unfollowable urls read as absent. */
+function parseLinkList(stored: string | undefined): Settings["author_links"] {
   try {
-    const parsed = JSON.parse(map.author_links ?? "[]");
-    if (Array.isArray(parsed)) links = parsed;
+    const parsed = JSON.parse(stored ?? "[]");
+    // Rows stored before 0.27 may hold any scheme; only followable links leave.
+    if (Array.isArray(parsed)) return parsed.filter((l) => typeof l?.label === "string" && typeof l?.url === "string" && isFollowableUrl(l.url));
   } catch {
     // ignore malformed settings JSON; treat as no links
   }
+  return [];
+}
+
+function parseIdList(stored: string | undefined): string[] {
+  try {
+    const parsed = JSON.parse(stored ?? "[]");
+    if (Array.isArray(parsed)) return parsed.filter((id): id is string => typeof id === "string");
+  } catch {
+    // malformed: no ids
+  }
+  return [];
+}
+
+export function settingsFromMap(map: Record<string, string>): Settings {
+  const links = parseLinkList(map.author_links);
   return {
     // `||` not `??`: an empty string is an unset title, not a chosen one.
     site_title: map.site_title || defaultSiteTitle(map.site_url),
     theme: map.theme ?? "auto",
+    custom_theme: parseCustomTheme(map.custom_theme),
+    custom_theme_dark: parseCustomTheme(map.custom_theme_dark),
+    custom_theme_name: map.custom_theme_name ?? "",
+    font: map.font && isFont(map.font) ? map.font : DEFAULT_FONT,
     author_name: map.author_name ?? "",
+    author_url: map.author_url ?? "",
     author_bio: map.author_bio ?? "",
     author_links: links,
     site_url: map.site_url ?? "",
@@ -108,11 +147,30 @@ export async function getSettings(db: D1Database): Promise<Settings> {
     // rather than silent, which is the property that actually matters.
     timezone: map.timezone ?? "",
     show_responses_default: map.show_responses_default === "on",
+    highlight_generated_default: map.highlight_generated_default === "on",
     auto_change_notes: map.auto_change_notes === "on",
+    picker_typing: map.picker_typing === "editor" || map.picker_typing === "panel" ? map.picker_typing : "auto",
+    feed_order: map.feed_order || DEFAULT_FEED_ORDER,
+    front_page: map.front_page ?? "",
+    posts_path: map.posts_path || DEFAULT_POSTS_PATH,
+    // Left by default (Venkat, session 47); "bottom" keeps the menu below the content.
+    links_position: map.links_position === "bottom" || map.links_position === "right" ? map.links_position : "left",
+    links_threads: parseIdList(map.links_threads),
+    links_external: parseLinkList(map.links_external),
+    links_collections: map.links_collections !== "off",
+    links_opml: map.links_opml !== "off",
+    links_blygger_org: map.links_blygger_org !== "off",
+    links_blygger_com: map.links_blygger_com !== "off",
     update_check: map.update_check !== "off",
     update_feed_url: map.update_feed_url ?? "",
     /** Cleared until the operator has seen the "alerts are on" notice once. */
     update_notice_ack: map.update_notice_ack === "on",
+    // Studio extensions this node has turned on (docs/extensions.md). Empty by default.
+    extensions: parseEnabledExtensions(map.extensions),
+    // The setup wizard (session 46): pending on a fresh install, a one-time
+    // notice on a node that had published before the wizard existed
+    // (migration 0029), done once either is finished or dismissed.
+    setup: map.setup === "done" || map.setup === "notice" ? map.setup : "pending",
   };
 }
 
@@ -133,12 +191,13 @@ export async function createDraft(
   contentMd: string,
   kind: "fragment" | "thread" = "fragment",
   stub: StubOf | null = null,
+  provenance: (ScopeProvenance | null)[] | undefined = undefined,
 ): Promise<ItemRow> {
   const id = newId();
   const now = nowIso();
   await db
-    .prepare("INSERT INTO items (id, kind, status, created, updated, version, content_md, dirty, stub_of) VALUES (?, ?, 'draft', ?, ?, 0, ?, 1, ?)")
-    .bind(id, kind, now, now, contentMd, stub ? JSON.stringify(stub) : null)
+    .prepare("INSERT INTO items (id, kind, status, created, updated, version, content_md, dirty, stub_of, tk_provenance_json) VALUES (?, ?, 'draft', ?, ?, 0, ?, 1, ?, ?)")
+    .bind(id, kind, now, now, contentMd, stub ? JSON.stringify(stub) : null, provenance === undefined ? null : JSON.stringify(provenance))
     .run();
   return (await getItem(db, id))!;
 }
@@ -328,7 +387,7 @@ export async function publish(db: D1Database, item: ItemRow, note: string | null
   const settings = await getSettings(db);
   const origin = ourOrigin ?? settings.site_url;
 
-  // `[[id]]` plain internal links (§16.2, decision #32) — substituted to
+  // `[[id]]` plain internal links (§10.1, decision #32) — substituted to
   // sentinels here and spliced back after rendering, like TK's inline spans.
   //
   // Run over the body *and* over each independently-rendered generated block,
@@ -355,7 +414,7 @@ export async function publish(db: D1Database, item: ItemRow, note: string | null
     const resolved = await resolveTransclusions(db, links.text, item.id);
     if (resolved.errors.length) throw new TransclusionResolveError(resolved.errors);
     contentHtml = spliceLinks(applyGeneratedWrappers(resolved.html, annotated));
-    // §16.1 / decision #30: every **remote** entry carries its frozen human
+    // §5.9 / decision #30: every **remote** entry carries its frozen human
     // half. Stored inside the entry rather than in a column of its own, which
     // is where a per-reference fact belongs in an array of references — and it
     // makes the wire emission the stored object, so a published citation and
@@ -374,7 +433,7 @@ export async function publish(db: D1Database, item: ItemRow, note: string | null
   }
 
   // Every URL in `content_html` is made absolute against our own origin, for
-  // the same reason `[[id]]` anchors are (§16.2): the HTML travels to
+  // the same reason `[[id]]` anchors are (§10.1): the HTML travels to
   // subscribers, and a host-rooted `/blyg/media/x.png` resolves against *their*
   // host there — a 404, or someone else's file (session 30, found on a live
   // import). Remote snapshots baked into a thread are already absolute against
@@ -404,8 +463,10 @@ export async function publish(db: D1Database, item: ItemRow, note: string | null
     db.prepare(
       "INSERT INTO versions (item_id, version, content_md, content_html, content_hash, published_at, note, transclusions, generated_json, stub_of, stub_cite, note_generated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     ).bind(item.id, version, strippedMd, contentHtml, hash, now, note, transclusionsJson, generatedJson, stubJson, citeJson, note && noteGenerated ? 1 : 0),
-    db.prepare("UPDATE items SET status = 'public', kind = ?, version = ?, dirty = 0, updated = ? WHERE id = ?")
-      .bind(kind, version, now, item.id),
+    // The agreed citation goes back into the working copy as well, or the copy
+    // keeps citing the older version and differs from what it just published.
+    db.prepare("UPDATE items SET status = 'public', kind = ?, version = ?, dirty = 0, updated = ?, stub_of = ? WHERE id = ?")
+      .bind(kind, version, now, stubJson, item.id),
   ]);
   // The owner's private interaction log (src/interactions.ts): stubs, forks and
   // quotes of other blygs' items that this version newly makes.
@@ -441,11 +502,14 @@ export async function withdraw(db: D1Database, item: ItemRow, note: string | nul
 }
 
 /** Hard-delete a never-published draft. Published items are withdrawn, never deleted. */
-export async function discardDraft(db: D1Database, item: ItemRow): Promise<void> {
-  await db.batch([
-    db.prepare("DELETE FROM items WHERE id = ?").bind(item.id),
-    db.prepare("DELETE FROM media WHERE item_id = ?").bind(item.id),
+export async function discardDraft(db: D1Database, item: ItemRow): Promise<boolean> {
+  // Authorize at the atomic write boundary. A publication after the caller's
+  // read must preserve both the public item and its media.
+  const results = await db.batch([
+    db.prepare("DELETE FROM media WHERE item_id = ? AND EXISTS (SELECT 1 FROM items WHERE id = ? AND version = 0)").bind(item.id, item.id),
+    db.prepare("DELETE FROM items WHERE id = ? AND version = 0").bind(item.id),
   ]);
+  return results[1].meta.changes > 0;
 }
 
 /** Thrown by restoreVersion() when the target version can't serve as a working copy. */
@@ -465,6 +529,15 @@ export class RestoreVersionError extends Error {}
  * scopes, and the provenance cache is positionally aligned to scope order —
  * keeping it would misattribute generation records to scopes that no longer
  * exist.
+ *
+ * Restoring the **current** version is "discard changes", and there the
+ * working copy becomes that version whole: its stub citation comes back too
+ * (publish version-agrees the citation, §2.2, so the published one can be
+ * ahead of the working copy's), and the copy is clean again — unless the
+ * version disclosed generated text, whose provenance a restore cannot carry
+ * back (`holdsPublishedWords`). Before this, discard left `dirty` set and the
+ * old citation in place, so a stub whose quote had moved on showed
+ * "unpublished changes" that neither discard nor publish could clear.
  */
 export async function restoreVersion(db: D1Database, item: ItemRow, version: number): Promise<void> {
   const row = await getVersion(db, item.id, version);
@@ -472,9 +545,10 @@ export async function restoreVersion(db: D1Database, item: ItemRow, version: num
   if (!row.content_md) {
     throw new RestoreVersionError(`v${version} is a withdrawal endcap and has no content to restore`);
   }
+  const discard = version === item.version;
   await db
-    .prepare("UPDATE items SET content_md = ?, tk_provenance_json = NULL, dirty = 1 WHERE id = ?")
-    .bind(row.content_md, item.id)
+    .prepare("UPDATE items SET content_md = ?, tk_provenance_json = NULL, stub_of = CASE WHEN ? THEN ? ELSE stub_of END, dirty = ? WHERE id = ?")
+    .bind(row.content_md, discard ? 1 : 0, row.stub_of, discard && !row.generated_json ? 0 : 1, item.id)
     .run();
 }
 
@@ -573,13 +647,16 @@ export async function feedEvents(db: D1Database, limit: number): Promise<FeedEve
 export async function insertMedia(
   db: D1Database,
   row: Omit<MediaRow, "created">,
-): Promise<MediaRow> {
+  unpublishedOnly = false,
+): Promise<MediaRow | null> {
   const created = nowIso();
-  await db
-    .prepare("INSERT INTO media (id, item_id, r2_key, mime, alt, created, inline) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .bind(row.id, row.item_id, row.r2_key, row.mime, row.alt, created, row.inline)
+  // Evaluate publication and insert in one statement. A publisher can run while
+  // the R2 upload awaits; a separate earlier read is not an authorization gate.
+  const result = await db
+    .prepare("INSERT INTO media (id, item_id, r2_key, mime, alt, created, inline) SELECT ?, ?, ?, ?, ?, ?, ? WHERE ? = 0 OR ? IS NULL OR EXISTS (SELECT 1 FROM items WHERE id = ? AND version = 0)")
+    .bind(row.id, row.item_id, row.r2_key, row.mime, row.alt, created, row.inline, unpublishedOnly ? 1 : 0, row.item_id, row.item_id)
     .run();
-  return { ...row, created };
+  return result.meta.changes ? { ...row, created } : null;
 }
 
 export async function getMedia(db: D1Database, id: string): Promise<MediaRow | null> {

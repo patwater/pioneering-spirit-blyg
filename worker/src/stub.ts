@@ -107,13 +107,16 @@ function parseCited(raw: unknown): { ok: true; cite: StubCite } | { ok: false; r
   if (typeof c.retrieved !== "string" || Number.isNaN(Date.parse(c.retrieved))) return { ok: false, reason: "stub_of.cited.retrieved is required (an ISO 8601 time)" };
   const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
   const excerpt = str(c.excerpt);
+  const url = str(c.url);
+  if (url !== undefined && !URL.canParse(url)) return { ok: false, reason: "stub_of.cited.url must be an absolute URL" };
+  if (url !== undefined && !["http:", "https:"].includes(new URL(url).protocol)) return { ok: false, reason: "stub_of.cited.url must be http(s)" };
   return {
     ok: true,
     cite: {
       source: str(c.source) ?? "",
       ...(str(c.author) ? { author: str(c.author) } : {}),
       ...(excerpt ? { excerpt: excerpt.length > CITED_EXCERPT_MAX ? graphemePrefix(excerpt, CITED_EXCERPT_MAX - 1) + "…" : excerpt } : {}),
-      url: str(c.url) ?? "",
+      url: url ?? "",
       retrieved: c.retrieved,
     },
   };
@@ -224,7 +227,7 @@ export async function composeStubCite(
 }
 
 /**
- * The frozen human half of one **remote** transclusion entry (§16.1, decision
+ * The frozen human half of one **remote** transclusion entry (§5.9, decision
  * #30) — the same composition as a stub's, from the same local knowledge, for
  * the reference type that never had one.
  *

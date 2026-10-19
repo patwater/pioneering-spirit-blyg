@@ -106,7 +106,7 @@ are single-account and the personal one has no D1 scope, so the migration prefli
 cannot run from either; an env token silently overrides the OAuth session, so **unset it**
 before deploying. One OAuth session reaches both accounts.
 
-## `/api` is a documented contract, still owner-cookie only
+## `/api` is a documented contract with owner and delegated access (OAuth/MCP merged 0.28.0, session 36)
 
 **Since 0.10.0** (#21, Kyle Mathews): 39 operations defined once in `src/contract/` (Zod →
 OpenAPI 3.1 → `openapi.json`, served to the owner at `/api/openapi.json`), resource-shaped
@@ -136,9 +136,11 @@ Password reset rides with his auth middleware (#31: after tokens, MUST offer rev
 Upstreaming Blygger Desktop's reading-rows and read-state extensions is fine — studio-private.
 Reasoning: `../blygger-spec/docs/v0.4-plan.md` §8.1.
 
-Auth is unchanged by all of the above: one owner cookie (`verifySession`, a 30-day HMAC over a single shared
-`OWNER_PASSWORD`). There is exactly one principal and no scopes, tokens, revocation or
-audit, and `/api` gets no CORS.
+The owner still signs in with the existing password and 30-day owner cookie.
+Delegated clients use scoped OAuth grants or named manual bearer tokens. Studio
+lists grants and supports individual revocation and revoke-all. REST and MCP
+share the same permission rules. See `docs/client-access.md` for the current
+contract and `docs/auth-security-oracles.md` for its security checks.
 
 **Third-party authoring tools are already writing to it** — a native macOS studio, a
 Drafts action, an Obsidian plugin. Making this a real contract (tokens, scopes,
@@ -153,7 +155,77 @@ saying so.
 
 ## Status
 
+**0.47.0** (session 49, 2026-10-17): labels `[[id | text]]`/`![[id | text]]` (#70, 0.4 §10.1): the bracket grammar now lives once in `src/grammar.ts` (directive, link, reserved, inline and own-line directive builders, `label()`, `labelText()`, `linkSource()`), used by transclusion, directives, tk, fork-flatten, plain-text, stub-quote and the editor; `src/link-label.ts` holds the heading-or-excerpt text shared by the bake, search hits (`label`), the picker and *copy [[id]]*. Generated output is stripped of inline grammar (`stripGeneratedGrammar`, row 67) and the prompt says so; own-line directives in output still quote (#60). Comments cite 0.4 sections. No migration.
+
+**0.46.3** (session 49, 2026-10-17): 0.46.2 re-released. Its tag could not pass Check because GitLab rebuilt `release-v5.3.2` and deleted the two pinned conformance-suite digests (`manifest unknown`); both are re-pinned, recipe in `docs/oauth-interop.md`. The nodes run the same code.
+
+**0.46.2** (session 49, 2026-10-17, tagged, never released): Kyle Mathews' #66 defaults an omitted OAuth `resource` to the mounted MCP resource at `/oauth2/authorize` (the `invalid_grant` behind #54; the default grant cannot reach REST), plus a pinned `oauth-interop` CI job (MCP Inspector + OpenID conformance, docker). Toolbar `title`s for #48. No migration.
+
+**0.46.1** (session 48, 2026-10-13): the public HTML cache key carries `publicHtmlRevision` (epoch + items/subscriptions/hoppers/settings/feed from `change_state`), read once per public request in the gateway, so a publish no longer waits out the 60 s edge window. A failed read falls back to the plain key. `mentions_in` has no change domain, so mention hide/show still lags. No migration.
+
+**0.46.0** (session 47, 2026-10-12): Settings is one page in sections (General, Feed, Appearance, Links: masthead menu + main menu, AI: model beside instructions per function, Network, Extensions) with a sidebar of anchors (`SettingsNav`, scroll-tracked, deep-linkable); `ModelSettings` split into `useAiModels`/`ModelIntro`/`ModelField`; `ThreadSearch` shared by the front page and the main menu; `links_position` defaults to left. No migration.
+
+**0.45.0** (session 47, 2026-10-12): own posts in hoppers (membership under `OWN_SUBSCRIPTION = "~own"`, existing routes, no migration; out of the interaction log); autosave runs outside the editor's busy flag (`useAction().background`; the composer's draft-creating first save still holds it); the side menu stacks one link per line, puts the masthead over the content, and folds behind a Menu button below 62rem (`LINKS_SCRIPT`); thread search in the links-section settings. No migration.
+
+**0.44.0** (session 47, 2026-10-12): the **links section** on every public page (`linksSection`, and `blygPage()` now frames every public page so none can miss it): `links_position` (bottom by default, or a left/right sidebar at ≥62rem), `links_threads`, `links_external`, and on-by-default `links_collections`/`links_opml`/`links_blygger_org`/`links_blygger_com` (ROADMAP row 5). Edited only in Settings, by Venkat's ruling: an exceptional action, not an item-menu one. Settings saves accept a stored value whose thread was since withdrawn. No migration.
+
+**0.43.0** (session 47, 2026-10-12): a **static front page** (`src/front-page.ts`): settings `front_page` (a published thread; falls back to the latest items if withdrawn) and `posts_path` (default `posts`, reserved names refused); the root renders the thread, `/{posts_path}/` the latest items without it, and the thread's pages name the root canonical (decision #69, Fable review pending); the edge-cache matcher admits any free single segment. Kyle's #71 keeps `CancelledError` out of the banner. No migration.
+
+**0.42.0** (session 46, 2026-10-11/12): the **pace-layered home page**, core and the fresh-install default (Venkat: the diachronic half of the premise, recommended to other clients): `src/feeds/` (contract, `pace-layered.ts`, `reverse-chronological.ts`, D1 history loader), wire-only inputs, worked fixtures in `test/fixtures/feeds/`, `climbFor()` the stub for changelog-driven climbing; the `feed_order` setting; **extensions may add orders** (`feeds` on `ServerExtension`, ids `<name>/…`, the core keeps published items only and renders every card; `extensions/feed-example`); the **setup walk-through** (`/studio/setup`, `setup` setting, server-served `defaults`); discard changes restores the stub citation and clears `dirty`. **Migration 0029** (`0028` stays reserved for #7). Plan: `docs/pace-layered-feed.md`.
+
+**0.41.1** (session 45, 2026-10-10): TK grammar quoted in code inside a scope is text (#68; every token search in `parseScopes` skips code, found when a changelog quoting `[TK]` failed to publish inside an impyrt scope); the public AI box's source links take `--pencil`. **CI reworked (#67, #69):** parallel jobs, `scripts/ci-scope.ts` scopes a PR's e2e and mutation suites to the files it touches, every `main` push runs everything in its own concurrency group, and Release publishes after the tagged commit's green Check instead of rerunning the suite (first used for v0.41.1). No migration. Deployed to all three nodes.
+
+**0.41.0** (session 44, 2026-10-10): **remote generation sources** (decision #44, gate G8): a [TK] scope draws on any item a directive may name (own threads, imported items), resolved by `resolveTarget`; remote sources carry `origin` + a frozen `cited` and send a mention verified as **`source`**; imports keep `generated` (**migration 0027**, `imported_items.generated_json`, with the change trigger recreated); a *source* picker inside TK instructions; preview scopes carry `sources`. **`PROTOCOL_VERSION` is `"0.4"`.** Exercised live PI → venkateshrao (ids in the devlog).
+
+**0.40.0** (session 44, 2026-10-10): six contributor PRs — #64 composer caret (the `compose-pwa:179` flake), #61 `GET /api/reading/imported`, #62 YouTube posters and failed-image links, #60 Workers AI and OpenAI-compatible providers, #53 lineage-glyph extension (operator-compiled), #58 custom theme and reading typeface. No migration. Not deployed on its own.
+
+**0.39.0** (session 43, 2026-10-09): read state for imported items (Aneesh's #44/#45: unread dots, select mode, mark all read, mark read on open; unread tombstones against stale reads; `readVersion` on `/api/reading`), under a new **`reading:state`** scope, which `owner:manage` no longer covers. **Migration 0026** (`read_state` + five triggers), applied to all three D1s before deploy and proven first on a throwaway remote D1.
+
+**0.38.0** (session 42, 2026-10-09): releases carry two browser-only extensions, both off until enabled in Settings → extensions: `reading-time` (byline estimate) and `inspect` (⋯ sheet: the stored record, bodies elided). `extensions.json` lists what ships; `test-ui/default-extensions.test.ts` keeps anything with `server.ts`/`contract.ts` out; `{"remove": [...]}` in `extensions.local.json` drops a shipped one. No migration.
+
+**0.37.0** (session 42, 2026-10-09): studio extensions (Aneesh's #52: catalog, build-time compile, per-node `extensions` setting, slots, GET-only `/api/ext/<name>/…`; read `docs/extensions.md`); init writes `nodejs_compat` (#46); paced autosave on TanStack DB (#47); shared item and hopper reads (#55). No migration.
+
+**0.36.1** (session 41, 2026-10-07): webmention receiver (roadmap row 11): the same source/target pair claimed again within 60 s is refused (429, stored row untouched; the hourly caps count rows, so repeats had escaped them and re-run verification), and new claims are refused while 30 are pending (rows touched in the last 10 min). Each 429 carries its own `Retry-After`. No migration.
+
+**0.36.0** (session 41, 2026-10-07): block-position detection treats document edges as blank lines, so a generated scope followed by one trailing newline renders as a block (row 2); `author_url` setting for `author.url`, blank = the blyg's own address (row 6); a `[[id]]` link takes the target's opening heading as its text (row 8). No migration.
+
+**0.32.2** (session 38, 2026-10-06): security fix for mention verification (#61): the item document must come from exactly `{origin}items/{id}.json`, so same-host path-mounted impostors and pinned stub files fail, and a target outside the mount is refused. TK sources come from the instruction only, and publish warns on an unrequested own-line directive in TK output (#60). `page` stability test (#56). No migrations.
+
+**0.32.1** (session 37, 2026-10-06): Kyle Mathews' #40, the D1 polling cache: Studio checks `/api/changes` revision counters (27 triggers, **migration 0024**) before reloading; `feed.xml` is served from R2 with ETags/304s, stale-while-revalidate, warmed by a minute cron. Three crons now (`* * * * *`, `*/15 * * * *`, `0 0 * * *`); a pre-0.32 `*/15`-only config still gets the daily work at 00:00 UTC. **0.32.0 was never released:** its 0024 used `SELECT CASE … END;` trigger guards, which D1's remote executor cuts at the first `END;` (local apply passes); `test/migration-remote-shape.test.ts` now rejects that shape. Before a D1 restore, see `docs/d1-polling-cache-operations.md`.
+
+**0.31.0** (session 37): one response action. *Quote selection* and the reading-view pill are gone; a stub opens quoting the whole post; passages are chosen in the stub editor (`src/ui/stub-quote.ts`), with further passages added after the cursor for a running commentary; a "How stubs work" sheet. No migration.
+
+**0.30.1** (session 37): a `304` poll skipped the daily index sync and name refresh, so ETag-honouring blygs whose first sync failed never synced again; live preview spends the read budget. No migration.
+
+**0.30.0** (session 36, 2026-10-05): subscription names follow their source (**migration 0023**, `subscriptions.title_auto`; manifest title at the daily sync, RSS channel title every poll, owner names protected); resync all feeds (`POST /api/subscriptions/poll`); "Draft discarded" toast; long stubs quote their opening; thread counter without the limit; quote-only compose rows resolved. The first release after 0.28.2: 0.28.3 and 0.29.0 were deployed but their tags failed `release:check` and were deleted.
+
+**0.29.0** (session 36): the `[[`/`![[` picker is a panel with full-text SQL search (`source`, `sub`, `sort`), and the `picker_typing` setting (automatic / editor / picker). No migration.
+
+**0.28.3** (session 36): the outbound DNS check used `redirect: 'error'`, which the Workers runtime rejects, so every poll and Webmention failed on both nodes for ~70 minutes after 0.28 deployed. Now `'manual'`. No migration.
+
+**0.28.0–0.28.2** (session 36): Kyle Mathews' #34 — OAuth grants, manual tokens, MCP, four scopes, the Access page, and a security pass (allowlist sanitizer, SVG sandbox, private draft media, outbound-destination checks, owner/grant work budgets; **migrations 0021, 0022**; needs `nodejs_compat`). 0.28.1 unwraps unlisted tags (0.28.0 deleted their content); 0.28.2 bakes transclusions verbatim again (sanitize at render). **The owner budgets bite in practice:** 120 writes/min throttled live preview (raised in the private config; preview moved to the read budget in 0.30.1) and 20 AI calls/day applied to the owner (interim 200). Follow-ups are on studio#39.
+
+**0.27.2** (session 35, 2026-10-05): the editor's TK generate kept only the scope's output since 0.10.0; the generate route now also returns the spliced `content_md`. No migration.
+
+**0.27.1** (session 35, 2026-10-05): 0.27.0 released. Every Release run since v0.21.2 had failed (an e2e screenshot to a machine-local path; the mutation tree missing `build/models.json`), so 0.21.2–0.27.0 have no downloads. No migration.
+
+**0.27.0** (session 35, 2026-10-05): highlight generated portions on public pages. A `highlight_generated_default` setting and a per-item `highlight` override (**migration 0020**, `items.highlight_override`). The default lives in `style.css` and an override is a `gen-on`/`gen-off` class on the `<article>`. Themes have `genBg`/`genRule`. Robot badge (Brady Dale's convention); `GEN_INFO_SCRIPT` opens a version-level disclosure box from `data-generated`.
+
+**0.26.1** (session 35, 2026-10-05): subscribe backfills under `waitUntil`; duplicate subscriptions 409; a source-URL citation line on every reading card; reading lands on the feed, with Feed/Sources tabs and one `ReadingHead` under every lens; Smart Feed "Coming soon". No migration.
+
+**0.26.0** (session 34, 2026-10-04): one model per AI function (`ai_model_tk`/`_changelog`/`_feed`, falling back to the pre-0.26 `ai_model`, kept one release as a write alias) from an editable **`models.json`** (gitignored `models.local.json` overrides, merged at build into `build/models.json`; releases ship the base list only); OpenAI Responses and Gemini generateContent adapters beside Anthropic, all raw HTTP (`src/ai/provider.ts`, `src/ai/models.ts`); secrets `AI_PROVIDER_KEY`/`OPENAI_API_KEY`/`GOOGLE_AI_KEY`; `GET /api/ai/models`; the `feed_prompt` setting (stored, unused until the smart feed's agent). No migration.
+
+**0.25.0** (session 34, 2026-10-04): reading lenses (All/Threads/Fragments filter by kind, `kind` on `/api/reading`; Background and Smart Feed placeholders); the private **interaction log** (**migration 0019**, backfilled; `src/interactions.ts`, logged at the store and at publish, never on the wire); `GET /api/interactions`, `GET /api/thumbs`; more → signals.
+
+**0.24.0** (session 34, 2026-10-04): public hoppers listed as Collections on the homepage and archive; the hopper page gets `pageTop`, metadata and a description (**migration 0018**, `hoppers.description`); its Home link no longer points at the host root on path mounts.
+
+**0.23.0** (session 34, 2026-10-04): stale quotes move from a compose banner to an *updates* tab, stalest first by `behind` (versions missed, summed over stale quotes); the batching norm stated on the page. No migration.
+
 **0.22.0** (2026-10-03, contributed): the studio redesigned for the phone after Thicket Console — wears the reading theme, tab bar, NetNewsWire-style reading, bottom sheets for every confirm, copy + link / share, link from clipboard, scan-text instructions (optional on-device Tesseract), installable PWA. No API, contract or data changes; no migration.
+
+**0.21.2** (session 34, 2026-10-04): five conformance-toolkit fixes (studio#27–#31): any feed gap reconciles; stub version agreement matches origin and id; forks keep a legacy author's `>` lines (partiality from `blyg-partial`); remote fork cites the pinned page when served; `<dc:creator>`. No migration.
+
+**0.21.1** (session 34, 2026-10-04): akashtattva's #33, feeds for strict RSS readers (batched feed queries, ~4 s → ~0.5 s; absolute titled discovery link; atom self-link), with the provenance loader shared between feed and pages. No migration.
 
 **0.21.0** (session 33, 2026-10-03): a *Version N / Change* confirmation dialog before every new version with a note (typed, drafted, or auto-drafted), and the `auto_change_notes` setting (off by default) that drafts one when the field is empty (#40). No migration.
 
@@ -457,7 +529,7 @@ was specified to do in both cases.
   copy-permalink, never as a peer of `stub ↗` in the response slot, never
   "respond"/"reply"/"answer". `stub ↗` stays the one affordance that means "I am responding".
 
-- [ ] **Remote generation sources** (decision #44, spec §16.3; 0.4). **Implementation plan:
+- [x] **Remote generation sources** — **done 0.41.0 (session 44)**, R1–R8; findings (migration 0027, thread sources fed as baked text) in `v0.4-plan.md` §7.2 R8. Original entry: (decision #44, spec §16.3; 0.4). **Implementation plan:
   `blygger-spec/docs/v0.4-plan.md` §7.2, tasks R1–R8 with acceptance checks — build from that;
   this entry is the shape.** Widen `resolveFragment`'s
   TK-source rule to `resolveTarget`'s (#26 order: local published item → imported item with a
@@ -538,3 +610,20 @@ Deferred when the session wrapped, not blocked on anything.
   task, and it found 28 call sites across six files. Wire unchanged and tested — feed dates
   RFC-822 in GMT, item documents ISO-8601 UTC. An invalid zone is rejected on save *and*
   falls back to UTC on render; the second half matters because a bad row is not a typo.
+
+## Anthropic keys for the production blygs (changed 2026-10-07)
+
+Each deployed blyg Worker has its own Anthropic key in its `AI_PROVIDER_KEY` secret (the name `models.json` maps to Anthropic): `blyg-venkateshrao` → `ANTHROPIC_KEY_BLYGS_VENKATESHRAO`, `blyg-blygger-org` → `ANTHROPIC_KEY_BLYGS_BLYGGER_ORG` (**new** — it had no AI key before, so [TK] generation is now available there), `blyg-protocol-institute` → `ANTHROPIC_KEY_BLYGS_PI` (PI account, PI workspace). All three live in `Code/.env.keys` / `protocol-institute/.env.keys`, service account `blygs`, one single-workspace key each. Coding/dev work uses `ANTHROPIC_KEY_BLYGGER`. **Exercised 2026-10-07 (session 41):** one [TK] generation per blyg succeeded on all three (the official blyg first needed `ai_model_tk` set to `claude-sonnet-5-5`); Venkat confirmed usage on all three keys in the Console on 2026-10-09 (session 43). Set secrets with `wrangler secret put AI_PROVIDER_KEY --name <worker>` (explicit `--name`; see `Code/warnings-node.md`). Plan: `Code/anthropic-key-plan.md`.
+
+## Session rituals
+
+**Base:** [`Code/devops/rituals.md`](../../devops/rituals.md) — v1.0. Startup is S1–S7, wrap-up is W0–W7 (IDs reserved). Everything below is this
+project's **local config**; it adds to the base and never replaces it.
+
+**Ritual config**
+- **Log:** `../blygger-spec/DEVLOG.md` (the one program log for all four repos; dated entry, non-skippable).
+- **Startup extras (S5):** new PRs and issues in all four repos, new blygger.com listings and the ecosystem census (S5b and S5c in `../blygger-spec/CLAUDE.md`)
+- **Verification (W2):** tests plus a real click-through on a node; for key changes see the Anthropic-keys section above.
+- **Wrap-up extras (after W5):** update `../blygger-spec/ROADMAP.md` (W5b in `../blygger-spec/CLAUDE.md`)
+- **Deploy policy:** `wrangler`-based; authenticate with `wrangler login`, always `--name` for secrets; only on request.
+- **Carry-overs (S6):** none

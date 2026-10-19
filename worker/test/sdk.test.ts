@@ -34,10 +34,11 @@ describe("generated SDK against the real Worker", () => {
     expect((await response.json<{ error: string }>()).error).toContain("content_md");
   });
   it("uploads a File and retains its MIME type through the SDK", async () => {
-    const client = clientFor(await login());
+    const cookie = await login(), client = clientFor(cookie);
     const media = await unwrap(BlyggerApi.uploadMedia({ client: client, body: { file: new File([new Uint8Array([1, 2, 3])], "image.png", { type: "image/png" }), alt: "sdk image" } }));
     expect(media.mime).toBe("image/png");
-    const response = await SELF.fetch(`${BASE}/blyg/${media.url}`);
+    expect((await SELF.fetch(`${BASE}/blyg/${media.url}`)).status).toBe(404);
+    const response = await SELF.fetch(`${BASE}/blyg/${media.url}`, { headers: { cookie } });
     expect(response.status).toBe(200);
     expect(new Uint8Array(await response.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]));
   });
@@ -142,6 +143,8 @@ describe("generated SDK against the real Worker", () => {
       expect(await res.json()).toMatchObject({ error: expect.any(String) });
     }
   });
+  // Asserts a query count, not a speed: it seeds a full page first, which took
+  // 5.05 s on a slow CI runner against the 5 s default (run 38097466156).
   it("loads a full own reading page within the Free-plan D1 query budget", async () => {
     const client = clientFor(await login());
     const ids: string[] = [];
@@ -169,6 +172,6 @@ describe("generated SDK against the real Worker", () => {
       expect(detail?.media).toEqual([]);
     }
     expect(queries).toBeLessThanOrEqual(ids.length);
-  });
+  }, 30_000);
 
 });

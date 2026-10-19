@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Page } from './fixture';
 import { answerSheet } from './sheets.ts';
 import { expandRow, openCard } from './editor.ts';
 
@@ -198,6 +198,33 @@ test('the composer tools: kind pills, the over-length hint, [[ and [TK]', async 
   await expect(page.getByRole('listbox', { name: 'items' })).toBeVisible();
 });
 
+test('a composer tool leaves the caret where it belongs before anything else can type', async ({ page }) => {
+  // The tools used to place the caret on the next animation frame. Until it
+  // came, React had reset the caret to the end, and when it came it moved the
+  // caret under whatever had selected or typed meanwhile — CI's fill() got
+  // "[TK]Summarise this[/TK]Linking [[" (studio, 2026-10). Each check below
+  // reads the textarea before the task that clicked ends: no frame can run.
+  await login(page);
+  await page.getByRole('radio', { name: 'thread', exact: true }).click();
+  const box = page.locator('#composer-text');
+  const clickNow = (text: string, from: number, to: number, action: string) =>
+    box.evaluate(async (el: HTMLTextAreaElement, [text, from, to, action]) => {
+      const setValue = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!;
+      setValue.call(el, text);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.focus();
+      el.setSelectionRange(from, to);
+      (document.querySelector(`[data-action="${action}"]`) as HTMLButtonElement).click();
+      // Let React finish its microtask work; a frame cannot run in between.
+      for (let i = 0; i < 10; i++) await null;
+      return { value: el.value, selected: el.value.slice(el.selectionStart, el.selectionEnd), caret: el.selectionStart, focused: document.activeElement === el };
+    }, [text, from, to, action] as const);
+  expect(await clickNow('Summarise this', 0, 14, 'tk')).toEqual({ value: '[TK]Summarise this[/TK]', selected: '', caret: 23, focused: true });
+  expect(await clickNow('Before after', 7, 7, 'tk')).toEqual({ value: 'Before [TK]an instruction[/TK]after', selected: 'an instruction', caret: 11, focused: true });
+  expect(await clickNow('Linking  here', 8, 8, 'bracket-link')).toEqual({ value: 'Linking [[ here', selected: '', caret: 10, focused: true });
+  expect(await clickNow('Quote\nthis', 5, 5, 'bracket-quote')).toEqual({ value: 'Quote\n![[\nthis', selected: '', caret: 9, focused: true });
+});
+
 test.describe('scan text', () => {
   test('instructs for this platform and loads no OCR unless opted in and a photo is chosen', async ({ page }) => {
     const cdn: string[] = [];
@@ -300,10 +327,10 @@ test('the editor ⋯ menu copies, pins and withdraws, and the Version-N dialog s
     const sheet = page.getByRole('dialog', { name: 'actions' });
     await sheet.getByRole('button', { name: new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`) }).click();
   };
-  // A draft: make this a…, discard draft — nothing that needs a public item.
+  // A draft: make this a…, add to hopper (session 47), discard draft — nothing that needs a public item.
   await page.getByRole('button', { name: 'more actions' }).click();
   const sheet = page.getByRole('dialog', { name: 'actions' });
-  await expect(sheet.locator('.ml')).toHaveText(['make this a thread', 'discard draft']);
+  await expect(sheet.locator('.ml')).toHaveText(['make this a thread', /^add to hopper…/, 'discard draft']);
   await page.keyboard.press('Escape');
   await expect(sheet).toHaveCount(0);
   await page.locator('#publish-btn').click();

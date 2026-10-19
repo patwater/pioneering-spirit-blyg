@@ -12,6 +12,7 @@ export const ItemRowSchema = z.object({
   tk_provenance_json: z.string().nullable(),
   show_responses: z.number(),
   responses_override: z.number().nullable(),
+  highlight_override: z.number().nullable(),
   stub_of: z.string().nullable(),
   forked_from: z.string().nullable(),
   fork_cite: z.string().nullable(),
@@ -60,6 +61,7 @@ export const SubscriptionRowSchema = z.object({
   in_blogroll: z.number(),
   flags: z.string(),
   created: z.string(),
+  title_auto: z.number(),
 }).openapi("SubscriptionRow");
 
 export const ImportedItemRowSchema = z.object({
@@ -82,6 +84,7 @@ export const ImportedItemRowSchema = z.object({
   page: z.string().nullable(),
   stub_of_json: z.string().nullable(),
   forked_from_json: z.string().nullable(),
+  generated_json: z.string().nullable().describe("The origin's `generated` array as published (0.4 adds remote sources); null when it discloses none."),
 }).openapi("ImportedItemRow");
 
 export const HopperRowSchema = z.object({
@@ -114,7 +117,7 @@ export const MentionInRowSchema = z.object({
   target: z.string(),
   target_item_id: z.string(),
   status: z.enum(["pending", "verified", "failed", "gone"]),
-  relation: z.enum(["stub", "transclusion", "fork"]).nullable(),
+  relation: z.enum(["stub", "transclusion", "fork", "source"]).nullable(),
   source_origin: z.string().nullable(),
   source_id: z.string().nullable(),
   source_kind: z.string().nullable(),
@@ -143,10 +146,29 @@ export const MentionOutRowSchema = z.object({
   created: z.string(),
 }).openapi("MentionOutRow");
 
+const hexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/, "a #rrggbb colour");
+/** An author-defined palette: the same nine values as a preset theme. Colours only. */
+export const CustomThemeSchema = z.object({
+  dark: z.boolean(),
+  page: hexColor,
+  paper: hexColor,
+  ink: hexColor,
+  inkSoft: hexColor,
+  rule: hexColor,
+  pencil: hexColor,
+  genBg: hexColor,
+  genRule: hexColor,
+}).strict().openapi("CustomTheme");
+
 export const SettingsSchema = z.object({
   site_title: z.string(),
   theme: z.string(),
+  custom_theme: CustomThemeSchema.nullable(),
+  custom_theme_dark: CustomThemeSchema.nullable(),
+  custom_theme_name: z.string(),
+  font: z.string(),
   author_name: z.string(),
+  author_url: z.string(),
   author_bio: z.string(),
   author_links: z.array(z.object({ label: z.string(), url: z.string() })),
   site_url: z.string(),
@@ -161,7 +183,23 @@ export const SettingsSchema = z.object({
   accept_mentions: z.boolean(),
   update_check: z.boolean(),
   show_responses_default: z.boolean(),
+  highlight_generated_default: z.boolean(),
   auto_change_notes: z.boolean(),
+  picker_typing: z.enum(["auto", "editor", "panel"]),
+  feed_order: z.string().describe("The public home page order: an id from feed_orders. pace-layered (the default) and reverse-chronological are core; extensions add orders named <extension>/<id>."),
+  front_page: z.string().describe("A published thread's id shown at the mount root instead of the latest items; empty for the latest items. A front page later withdrawn or deleted falls back to the latest items."),
+  posts_path: z.string().describe("Where the latest items live: {mount}/{posts_path}/, served whether or not a front page is set. Lowercase letters, digits and hyphens; names the blyg already uses are refused."),
+  links_position: z.enum(["bottom", "left", "right"]).describe("Where the links section (main menu) sits on public pages: left (the default) or right is a sidebar on wide screens and a Menu button under the masthead on narrow ones; bottom puts it below the content at every width."),
+  links_threads: z.array(z.string()).describe("Published threads listed first in the links section, in order. A thread later withdrawn is left out."),
+  links_external: z.array(z.object({ label: z.string(), url: z.string() })).describe("The owner's own links in the links section."),
+  links_collections: z.boolean().describe("List public collections in the links section."),
+  links_opml: z.boolean().describe("Link the blogroll's OPML file in the links section, when the blogroll is not empty."),
+  links_blygger_org: z.boolean().describe("Link blygger.org in the links section."),
+  links_blygger_com: z.boolean().describe("Link blygger.com, the directory of blygs, in the links section."),
+  setup: z.enum(["pending", "notice", "done"]).describe("The setup wizard: pending on a fresh install, notice on a node that published before it existed, done once finished or dismissed."),
+  defaults: z.record(z.string(), z.unknown()).optional().describe("Read-only: what each setting reads as with nothing stored, for \"reset to default\". site_title's default is the title derived from the address; store \"\" to keep it derived."),
+  feed_orders: z.array(z.object({ id: z.string(), title: z.string(), description: z.string() })).optional().describe("Read-only: the home page orders this node can use now (core, plus enabled extensions')."),
   update_feed_url: z.string(),
   update_notice_ack: z.boolean(),
+  extensions: z.array(z.string()).describe("Studio extensions enabled on this node (docs/extensions.md). Only names compiled into this build are accepted; every extension starts disabled."),
 }).openapi("Settings");

@@ -1,5 +1,5 @@
 // A fork descends from the pinned document, not from its composition
-// (decision #57, spec §16.6f; gate G11).
+// (decision #57, spec §5.6 rule 6; gate G11).
 //
 // A thread's `content_md` holds its quotes as `![[id]]` directives, which
 // re-resolve at publish in the *forker's* context — a later version, a
@@ -13,21 +13,24 @@
 //     attribution line linking the quoted item's page;
 //   - no `blyg-transclusion` class survives — the forker baked and verified
 //     nothing — and nothing is inherited into `transclusions[]`;
+//   - each inline `[[id]]` link in the own prose becomes an ordinary markdown
+//     link to the absolute page the pinned bake linked it to (decision #63):
+//     copied as-is it would re-resolve in the forker's context, and fail at
+//     publish for any origin the forker has not imported;
 //   - generated text (`blyg-tk-gen`) comes back as `[TK]impyrt=…[/TK]`, so a
 //     fork cannot launder a disclosure away (§5.7 rule 7). Fragments too: the
 //     old fork dropped `generated[]` for both kinds.
 //
 // When the own-prose path cannot be made exact — the directives in the
-// markdown do not line up with the baked quotes, or a generated span cannot be
-// found in the markdown — the whole fork is rebuilt from the pinned HTML
+// markdown do not line up with the baked quotes, a link cannot be found among
+// the bake's anchors, or a generated span cannot be found in the markdown — the whole fork is rebuilt from the pinned HTML
 // instead. Byte-exactness is given up before a disclosure is.
 
 import { codeRanges, inRanges, lineOffsets } from "./code-ranges.ts";
 import { attachedQuote } from "./directives.ts";
-import { ID_ALPHABET } from "./identity.ts";
+import { DIRECTIVE_LINE, LINK_INLINE } from "./grammar.ts";
 import type { ScopeProvenance } from "./types.ts";
 
-const DIRECTIVE_LINE = new RegExp(`^\\s*!\\[\\[([${ID_ALPHABET}]{26})\\]\\]\\s*$`);
 
 // ── A small, tolerant HTML tree for the dialect this client renders ─────────
 
@@ -215,9 +218,22 @@ function ownGenerated(nodes: Node[]): Extract<Node, object>[] {
   return out;
 }
 
+/** Anchors in the thread's own prose, in document order — a quote's links are its own. */
+function ownAnchors(nodes: Node[]): Extract<Node, object>[] {
+  const out: Extract<Node, object>[] = [];
+  for (const n of nodes) {
+    if (typeof n === "string" || isTransclusion(n)) continue;
+    if (n.tag === "a") out.push(n);
+    else out.push(...ownAnchors(n.children));
+  }
+  return out;
+}
+
 export async function flattenFork(input: ForkInput, ctx: FlattenContext): Promise<{ contentMd: string; exact: boolean }> {
   const tree = parseHtml(input.contentHtml);
   const quotes = topLevelQuotes(tree);
+  const anchors = ownAnchors(tree);
+  let a = 0;
 
   // 1. Own prose, byte-exact, with each directive (and its attached quote) replaced.
   const lines = input.contentMd.split("\n");
@@ -231,16 +247,31 @@ export async function flattenFork(input: ForkInput, ctx: FlattenContext): Promis
       const baked = quotes[q++];
       out.push(await flattenQuote(baked, ctx));
       // The `>` lines after a directive are an attached excerpt only if the
-      // bake says it was partial (§16.4's second class). A client without
+      // bake says it was partial (§10.1–§10.3's second class). A client without
       // partial grammar baked a whole quote, and those lines are the author's
-      // own prose, which §16.6f copies byte-exact (studio#29).
+      // own prose, which §5.6 rule 6 copies byte-exact (studio#29).
       if (hasClass(baked, "blyg-partial")) i = attachedQuote(lines, i).next - 1;
       // A blank line keeps the author's own blockquote from merging into the
       // flattened one, as it was a separate block in the pinned rendering.
       else if (/^\s{0,3}>/.test(lines[i + 1] ?? "")) out.push("");
       continue;
     }
-    out.push(lines[i]);
+    // #63: each inline link becomes the anchor the pinned bake rendered for
+    // it. The renderer marks nothing, but its href is the target's page,
+    // which names the id unless the target declared a `page` of its own —
+    // and then the whole fork comes from the HTML, whose anchors are absolute.
+    // A labelled link (#70) matches the same way; its label was the anchor
+    // text, so the flattened link keeps it.
+    let line = lines[i];
+    let unmatched = false;
+    line = line.replace(LINK_INLINE, (whole, id: string, _label: string | undefined, at: number) => {
+      if (inRanges(code, starts[i] + at)) return whole;
+      while (a < anchors.length && !(anchors[a].attrs.href ?? "").includes(id)) a++;
+      if (a >= anchors.length) { unmatched = true; return whole; }
+      return inline([anchors[a++]]);
+    });
+    if (unmatched) return { contentMd: await htmlToMarkdown(input.contentHtml, ctx), exact: false };
+    out.push(line);
   }
   if (q !== quotes.length) return { contentMd: await htmlToMarkdown(input.contentHtml, ctx), exact: false };
   let md = out.join("\n");

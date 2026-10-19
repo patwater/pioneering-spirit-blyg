@@ -92,7 +92,7 @@ export function plainTextFromHtml(html: string): string {
 }
 
 /**
- * The **selection normalizer** for partial transclusion (spec §16.4, decision
+ * The **selection normalizer** for partial transclusion (spec §10.1–§10.3, decision
  * #49, plan §7.3 P2). Written once and exported, because the publish-time check
  * and any read-side re-check MUST agree exactly: two normalizers that differ by
  * one space are a construct that verifies on one node and fails on another.
@@ -137,8 +137,9 @@ export function selectionText(html: string): string {
 /**
  * The same rule applied to text that is already text — a browser selection,
  * where `Selection.toString()` has already put a newline at each block
- * boundary. Studio-side only: it is how select-to-quote turns what the author
- * highlighted into the string `selectionText` will later have to match.
+ * boundary. Studio-side only: it is how the stub editor's passage chooser
+ * turns what the author highlighted into the string `selectionText` will later
+ * have to match.
  *
  * Separate entry point rather than a second implementation, because the two
  * *must* agree: this produces the quote, that checks it at publish, and a
@@ -147,6 +148,18 @@ export function selectionText(html: string): string {
  */
 export function normalizeSelection(text: string): string {
   return normalizeBlocks(text.split("\n"));
+}
+
+/**
+ * A normalized selection as an attached markdown blockquote: `>` on every
+ * line, a bare `>` between blocks, so it renders back to the same blocks.
+ * Shared by the stub API and the stub editor's passage chooser.
+ */
+export function quoteLines(selection: string): string {
+  return selection
+    .split("\n")
+    .map((line) => `> ${line}`)
+    .join("\n>\n");
 }
 
 /** First ~n chars of already-rendered HTML's plain text, ellipsized. */
