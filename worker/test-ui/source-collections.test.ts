@@ -20,7 +20,7 @@ let writeGate: Promise<void> | undefined;
 const requests: { path: string; params: URLSearchParams }[] = [];
 const views: { cleanup(): Promise<void> | void }[] = [];
 const item = () => ({ id: 'a', content_md: text, kind: 'fragment' as const, status: 'draft' as const, created: '2026-10-06', updated: '2026-10-06', version: 0, dirty: false, responses: 'default' as const, highlight: 'default' as const, provenance: [], stub_of: null, forked_from: null, fork_cite: null, pins: [] });
-const detail = (): Detail => ({ ...item(), authored_kind: 'fragment', media: [], versions: [], published: null });
+const detail = (): Detail => ({ ...item(), authored_kind: 'fragment', media: [], published_media: [], versions: [], published: null });
 const hopper = { id: 'h', name: 'Hopper', public: false, slug: null, created: '2026-10-06', slug_frozen: false, description: null };
 const contents = () => ({ hopper, items: Array.from({ length: 4 }, (_, i) => ({ subscription_id: 's', remote_id: String(i), content_html: `${text} ${i}`, content_md: text, kind: 'fragment', state: 'current', version: 1, created: null, updated: null, observed_at: '2026-10-06', content_hash: null, author_json: null, media_json: null, transclusions_json: null, l0: false, pinned_version_retained: null, page: null, stub_of_json: null, forked_from_json: null, generated_json: null })), memberships: Array.from({ length: 4 }, (_, i) => ({ hopper_id: 'h', subscription_id: 's', remote_id: String(i), added_at: '2026-10-06' })), total: 4, source_count: 1 });
 const entry = (key: string, kind = 'fragment') => ({ key, source: 'own', kind, withdrawn: false, l0: false, contentHtml: text, displayAt: '2026-10-06' });
@@ -33,7 +33,7 @@ beforeAll(async () => {
   vi.stubGlobal('fetch', async (request: Request) => {
     const url = new URL(request.url);
     requests.push({ path: url.pathname, params: url.searchParams });
-    if (url.pathname === '/api/changes') return json({ epoch, domains: Object.fromEntries(['items', 'reading', 'hoppers', 'subscriptions', 'signals', 'settings', 'feed'].map((domain) => [domain, revision])) });
+    if (url.pathname === '/api/changes') return json({ epoch, domains: Object.fromEntries(['items', 'reading', 'hoppers', 'subscriptions', 'signals', 'settings', 'feed', 'mentions', 'responses'].map((domain) => [domain, revision])) });
     if (url.pathname === '/api/items/a' && request.method === 'PATCH') {
       const body = await request.json();
       await writeGate;
@@ -64,6 +64,7 @@ beforeAll(async () => {
       return json({ items: entries, offset, limit: 25, selected: sub === 'invalid' ? 'all' : sub, read_state: true, read_state_clear: true, total: 30, counts: { all: 30, own: 30, subscriptions: {} } });
     }
     if (url.pathname === '/api/mentions/m/source') return json({ holder: 's', subscription: null });
+    if (url.pathname === '/api/mentions') return json({ items: [], total: 0, offset: 0, limit: 100, direction: url.searchParams.get('direction') });
     throw new Error(`Unexpected request: ${request.method} ${request.url}`);
   });
   db = await import('../src/ui/data.ts');
@@ -315,6 +316,21 @@ test('mention-source views reuse one on-demand source and requested keys', async
   await Promise.all([first.preload(), second.preload()]);
   expect(first.toArray[0].holder).toBe('s');
   expect(requests.filter((request) => request.path === '/api/mentions/m/source')).toHaveLength(1);
+});
+
+test('mention lists and source cards re-read only when their revisions move', async () => {
+  const view = db.mentionSource('m'); views.push(view);
+  await Promise.all([db.listViews.inbound.preload(), db.listViews.outbound.preload(), view.preload()]);
+  const reads = (path: string) => requests.filter((request) => request.path === path).length;
+  const counts = () => [reads('/api/mentions'), reads('/api/mentions/m/source')];
+  expect(counts()).toEqual([2, 1]);
+  // An unchanged tick answers from the cached responses after one revision check each.
+  await Promise.all([db.inbound.utils.refetch(), db.outbound.utils.refetch(), db.mentionSources.utils.refetch()]);
+  expect(counts()).toEqual([2, 1]);
+  revision++;
+  await Promise.all([db.inbound.utils.refetch(), db.outbound.utils.refetch(), db.mentionSources.utils.refetch()]);
+  expect(counts()).toEqual([4, 2]);
+  await Promise.all([db.inbound.cleanup(), db.outbound.cleanup()]);
 });
 
 test('a missing reading source keeps the requested identity for the router redirect', async () => {

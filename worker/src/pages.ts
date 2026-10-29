@@ -10,10 +10,11 @@ import { listBlogrollSubscriptions, listPublicHoppers } from "./importer/store.t
 import { listPublicResponses } from "./mentions/store.ts";
 import { sanitizeHtml } from "./importer/sanitize.ts";
 import { blygItemUrl } from "./importer/util.ts";
-import { parseStoredCite, parseStoredFork, parseStoredStub } from "./stub.ts";
+import { isBlygStub, parseStoredCite, parseStoredFork, parseStoredStub } from "./stub.ts";
+import { linkLabel } from "./link-label.ts";
 import { excerptFromHtml } from "./markdown.ts";
 import { clampText, leadingHeading, stripTransclusionQuotes } from "./preview.ts";
-import { authoredKind, getMedia, itemShowsResponses, listMediaForItem, publishedVersion } from "./model.ts";
+import { authoredKind, getMedia, itemShowsResponses, listVersionMedia, publishedVersion } from "./model.ts";
 import type { ItemRow, MediaRow, Settings, SubscriptionRow, Transclusion, VersionRow } from "./types.ts";
 import { loadFeedData, sourceKey, type FeedCardData, type FeedProvenance, type FeedItem } from "./public-feed.ts";
 import { WEBMENTION_PATH } from "./types.ts";
@@ -1156,7 +1157,7 @@ ${permalinkLink(item.id, false, mount)}
  */
 async function fragmentBlock(db: D1Database, item: FeedItem, mount: string, tz: string, titleLink = false, loaded?: FeedCardData): Promise<string> {
   const latest = loaded ? loaded.latest : await publishedVersion(db, item);
-  const media = loaded ? loaded.media : await listMediaForItem(db, item.id);
+  const media = loaded ? loaded.media : await listVersionMedia(db, item.id, item.version);
   const html = latest?.content_html ?? "";
   return renderFragment(
     item,
@@ -1273,6 +1274,80 @@ export function injectProvenance(html: string, provenance: string[]): string {
   return out + html.slice(last);
 }
 
+/**
+ * A provenance line on every *nested* baked quote, at any depth (0.49.0).
+ * `injectProvenance` names only the direct layer, because the document's
+ * `transclusions[]` records direct transclusions only; the layers a quoted
+ * thread already carried are inspectable in their own `data-blyg-*`
+ * attributes, which is all this reads. An absent `data-blyg-origin` means the
+ * origin of the layer that baked it (§10.2), not ours, so the origin is carried
+ * down the tree. Presentation only, like the direct line: never stored.
+ *
+ * The page a layer's link points at is looked up where we hold the item (its
+ * declared `page`, its kind), and otherwise falls back to the f/·t/ convention
+ * exactly as the direct line does for a source whose subscription has gone.
+ */
+export async function injectNestedProvenance(db: D1Database, html: string, mount: string): Promise<string> {
+  if (!html.includes("data-blyg-id=")) return html;
+  type Layer = { transclusion: boolean; id: string | null; version: string | null; origin: string | null; partial: boolean; nested: boolean };
+  const attr = (tag: string, name: string) => new RegExp(`\\b${name}="([^"]*)"`).exec(tag)?.[1] ?? null;
+  const stack: Layer[] = [];
+  const closes: Array<{ at: number; layer: Layer }> = [];
+  const re = /<blockquote\b[^>]*>|<\/blockquote>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html))) {
+    if (m[0].startsWith("</")) {
+      const layer = stack.pop();
+      if (layer?.transclusion && layer.nested && layer.id) closes.push({ at: m.index, layer });
+      continue;
+    }
+    const cls = attr(m[0], "class") ?? "";
+    const transclusion = /\bblyg-transclusion\b/.test(cls);
+    const enclosing = [...stack].reverse().find((l) => l.transclusion);
+    stack.push({
+      transclusion,
+      id: attr(m[0], "data-blyg-id"),
+      version: attr(m[0], "data-blyg-version"),
+      origin: attr(m[0], "data-blyg-origin") ?? (enclosing ? enclosing.origin : null),
+      partial: /\bblyg-partial\b/.test(cls),
+      nested: !!enclosing,
+    });
+  }
+  if (!closes.length) return html;
+  const lines = new Map<string, string>();
+  for (const { layer } of closes) {
+    const key = `${layer.origin ?? ""}\u0000${layer.id}`;
+    if (lines.has(key)) continue;
+    let href: string, label: string;
+    if (layer.origin) {
+      // The blyg's name needs only the subscription; kind and page need the held item.
+      const row = await db
+        .prepare(
+          `SELECT ii.kind AS kind, ii.page AS page, s.title AS title FROM subscriptions s
+           LEFT JOIN imported_items ii ON ii.subscription_id = s.id AND ii.remote_id = ?
+           WHERE s.kind = 'blyg' AND s.origin = ? LIMIT 1`,
+        )
+        .bind(layer.id, layer.origin)
+        .first<{ kind: string | null; page: string | null; title: string }>();
+      href = blygItemUrl(layer.origin, row?.kind ?? "fragment", layer.id!, row?.page ?? null);
+      label = row?.title ? `from <em>${escapeHtml(clampForeign(row.title))}</em> ↗` : `from ${escapeHtml(new URL(layer.origin).host)} ↗`;
+    } else {
+      const row = await db.prepare("SELECT * FROM items WHERE id = ?").bind(layer.id).first<ItemRow>();
+      const kind = row ? await authoredKind(db, row) : "fragment";
+      href = `${mount}/${kind === "thread" ? "t" : "f"}/${layer.id}/`;
+      label = `${kind} ↗`;
+    }
+    lines.set(key, `<a href="${escapeHref(href)}">${label}</a>`);
+  }
+  let out = html;
+  for (const { at, layer } of closes.sort((a, b) => b.at - a.at)) {
+    const link = lines.get(`${layer.origin ?? ""}\u0000${layer.id}`)!;
+    const what = layer.partial ? "excerpt of" : "snapshot of";
+    out = `${out.slice(0, at)}\n<p class="provenance nested">${link} · ${what} v${escapeHtml(layer.version ?? "?")}</p>${out.slice(at)}`;
+  }
+  return out;
+}
+
 function parseTransclusions(json: string | null | undefined): Transclusion[] {
   if (!json) return [];
   return JSON.parse(json) as Transclusion[];
@@ -1306,8 +1381,8 @@ async function threadCard(db: D1Database, item: FeedItem, mount: string, tz: str
   const latest = loaded ? loaded.latest : await publishedVersion(db, item);
   const href = `${mount}/t/${item.id}/`;
   const transclusions = parseTransclusions(latest?.transclusions);
-  const html = injectProvenance(await sanitizeHtml(latest?.content_html ?? ""), await transclusionProvenance(db, transclusions, mount, provenance));
-  const media = loaded ? loaded.media : await listMediaForItem(db, item.id);
+  const html = await injectNestedProvenance(db, injectProvenance(await sanitizeHtml(latest?.content_html ?? ""), await transclusionProvenance(db, transclusions, mount, provenance)), mount);
+  const media = loaded ? loaded.media : await listVersionMedia(db, item.id, item.version);
   // The kind line is apparatus, on its own line above the item, never inline
   // with the author's first sentence (session 30). The quote count says what
   // the card may be cutting off.
@@ -1329,8 +1404,8 @@ ${itemMeta(item, latest?.note ?? null, loaded ? loaded.pins : await pinnedVersio
 async function threadBlock(db: D1Database, item: ItemRow, mount: string, tz: string): Promise<string> {
   const latest = await publishedVersion(db, item);
   const transclusions = parseTransclusions(latest?.transclusions);
-  const html = injectProvenance(await sanitizeHtml(latest?.content_html ?? ""), await transclusionProvenance(db, transclusions, mount));
-  const media = await listMediaForItem(db, item.id);
+  const html = await injectNestedProvenance(db, injectProvenance(await sanitizeHtml(latest?.content_html ?? ""), await transclusionProvenance(db, transclusions, mount)), mount);
+  const media = await listVersionMedia(db, item.id, item.version);
   return `<article class="thread${highlightClass(item)}">
 ${stubCitation(latest, tz)}
 ${forkLineage(item, tz)}
@@ -1483,6 +1558,55 @@ export async function responsesSection(db: D1Database, item: ItemRow, settings: 
   });
   return `<section class="responses">
 <h2>Responses</h2>
+<ul>
+${lines.join("\n")}
+</ul>
+</section>`;
+}
+
+/**
+ * Local mentions (session 50, Venkat): this blyg's own published items that
+ * point at this one — stubs, quotes and forks. A same-origin reference sends no
+ * mention (§15.2), so they never reach the responses list; without this the
+ * quote is traversable only forwards, from the quoting post's "quoted from"
+ * line. Listed here, a transclusion is walkable both ways on the public site.
+ *
+ * Chrome, like the responses list: read from the live versions at request
+ * time, never in an item document, feed or hash. Always shown when there is
+ * one, unlike responses: the opt-in there guards against strangers' rows, and
+ * these are the author's own. Only each item's live version counts — a quote
+ * edited out is no longer a mention. The `items` change domain rolls the HTML
+ * cache key on every publish, so a new stub shows on its target at once.
+ */
+export async function localMentionsSection(db: D1Database, item: ItemRow, settings: Settings, mount: string, origin: string): Promise<string> {
+  const rows = (await db
+    .prepare(
+      `SELECT i.id, i.kind, i.forked_from, v.stub_of, v.transclusions, v.content_html, v.published_at
+       FROM items i JOIN versions v ON v.item_id = i.id AND v.version = i.version
+       WHERE i.status = 'public' AND i.id <> ?
+         AND (instr(COALESCE(v.stub_of, ''), ?) > 0 OR instr(COALESCE(v.transclusions, ''), ?) > 0 OR instr(COALESCE(i.forked_from, ''), ?) > 0)
+       ORDER BY v.published_at, i.rowid`,
+    )
+    .bind(item.id, item.id, item.id, item.id)
+    .all<{ id: string; kind: string; forked_from: string | null; stub_of: string | null; transclusions: string | null; content_html: string | null; published_at: string }>()).results;
+  const lines: string[] = [];
+  for (const row of rows) {
+    // instr() is a prefilter; the reference itself decides, origin included.
+    const stub = parseStoredStub(row.stub_of);
+    const quote = (JSON.parse(row.transclusions || "[]") as Transclusion[]).find((t) => t.id === item.id && (!t.origin || t.origin === origin));
+    const fork = parseStoredFork(row.forked_from);
+    const rel =
+      stub && isBlygStub(stub) && stub.id === item.id && stub.origin === origin ? (quote?.selector ? "stubbed a passage" : "stubbed this")
+      : quote ? (quote.selector ? "quoted a passage" : "quoted this")
+      : fork && fork.id === item.id && fork.origin === origin ? "forked this"
+      : null;
+    if (!rel) continue;
+    const href = settings.front_page === row.id ? `${mount}/` : `${mount}/${row.kind === "thread" ? "t" : "f"}/${row.id}/`;
+    lines.push(`<li><a href="${escapeHref(href)}">${escapeHtml(linkLabel(row.content_html ?? "", row.kind))}</a> <span class="rel">&middot; ${rel}</span> <span class="when">&middot; ${formatDate(row.published_at, settings.timezone)}</span></li>`);
+  }
+  if (!lines.length) return "";
+  return `<section class="responses local-mentions">
+<h2>Local mentions</h2>
 <ul>
 ${lines.join("\n")}
 </ul>
@@ -1843,9 +1967,10 @@ export async function permalinkPage(db: D1Database, settings: Settings, item: It
     );
   }
   const latest = await publishedVersion(db, item);
-  const media = await listMediaForItem(db, item.id);
+  const media = await listVersionMedia(db, item.id, item.version);
   const head = itemHead(latest?.content_html ?? "", settings);
   const body = `${await blygPage(db, settings, mount, `${await fragmentBlock(db, item, mount, settings.timezone)}
+${await localMentionsSection(db, item, settings, mount, origin)}
 ${await responsesSection(db, item, settings, mount)}`)}
 <script>${VERSION_NAV_SCRIPT}</script>`;
   return layout(head.title, body, mount, {
@@ -1878,9 +2003,10 @@ export async function threadPage(db: D1Database, settings: Settings, item: ItemR
     );
   }
   const latest = await publishedVersion(db, item);
-  const media = await listMediaForItem(db, item.id);
+  const media = await listVersionMedia(db, item.id, item.version);
   const head = itemHead(latest?.content_html ?? "", settings, respondsToLabel(latest));
   const body = `${await blygPage(db, settings, mount, `${await threadBlock(db, item, mount, settings.timezone)}
+${await localMentionsSection(db, item, settings, mount, origin)}
 ${await responsesSection(db, item, settings, mount)}`)}
 <script>${VERSION_NAV_SCRIPT}</script>`;
   // The front page is the blyg's home, so its tab reads as the blyg.

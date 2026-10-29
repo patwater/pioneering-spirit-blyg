@@ -27,7 +27,7 @@ Consult `openapi.json` for every field and response.
 | Signals | `GET /signals` | `PUT` or `DELETE /signals/{sub}/{remoteId}` |
 | Mentions | `GET /mentions?direction=inbound` or `outbound` | `PATCH /mentions/{id}` with `hidden` |
 | Settings | `GET /settings` | `PATCH /settings` |
-| Media | Included in item detail | `POST /media` with a multipart file (`inline=true` when the client places it in the text), `DELETE /media/{id}` (detaches; deletes the file only when no published version shows it) |
+| Media | Included in item detail: `media` is the working copy's attachments, `published_media` what the live version lists | `POST /media` with a multipart file (`inline=true` when the client places it in the text; the same file sent again to the same item in the same placement returns the existing row with `200` and `duplicate: true`). Attachments are per version: one added to a published item is listed from its next version on. `DELETE /media/{id}` detaches it from the working copy, so the next version goes without it while the versions that listed it keep it; the file is deleted only when no published version lists or shows it |
 | Imported items | `GET /imports/{sub}/{id}`, `GET /imports/{sub}/{id}/history`, `GET /imports/{sub}/{id}/versions/{v}` (history and public versions, read from the origin) | The subscription importer manages these items |
 | Reading | `GET /reading`, `GET /reading/imported` (imported items only, cursor-paged; see below) | Read only |
 | Read state | `readVersion` on each imported Reading entry | `PUT`/`DELETE /reading/{sub}/{remoteId}/read`, `POST /reading/read`, `POST /reading/unread` |
@@ -41,7 +41,70 @@ Publication, withdrawal, restoration, and generation remain explicit operations:
 - `POST /items/{id}/generate` generates one TK scope.
 - `POST /subscriptions/{id}/resync` refreshes a Blyg subscription.
 - `POST /items/{id}/note-draft` drafts a changelog note from the change between the published version and the working copy. It never publishes. When the published version is unpinned, the note must not reproduce wording that only that version had; a draft that does returns 422. Send `note_generated: true` with `POST /items/{id}/publish` only when the note is that draft, unedited: it becomes `changelog[].generated` on the wire.
+- `POST /items/{id}/classify` asks the optional change classifier what kind of change the working copy would publish. See [Change classifier](#change-classifier).
 - `POST /items/{id}/refresh` republishes a thread to re-bake quotes whose source has a newer version. See below.
+
+## Change classifier
+
+Optional and **off by default**: nothing below happens until Settings → AI
+names a decision model in `ai_model_classify`. A decision model (Cloudflare's
+Clef or Clef-flash on Workers AI, or TypeSafe's Jev) answers typed questions
+with probabilities and writes no text, so `GET /ai/models` marks it
+`kind: "decision"`, `ai_model_classify` accepts only a decision model, and the
+text functions (`ai_model_tk`, `ai_model_changelog`, `ai_model_feed`) refuse one
+(400).
+
+The category set is fixed: `refresh`, `typo`, `minor`, `major`.
+
+| Category | Meaning | Decided by |
+|---|---|---|
+| `refresh` | a republish of the same words (the new `content_hash` equals the published one) | locally, with no model call |
+| `typo` | spelling, punctuation, formatting or a link fixed; meaning unchanged | the model |
+| `minor` | small edits to wording or detail; a returning reader need not reread | the model |
+| `major` | the substance changed; a returning reader should read it again | the model |
+
+The model is asked one `choice` question over both versions and the word-level
+change between them; the instruction and option descriptions are
+`CLASSIFY_QUESTION` in `src/change-class.ts`.
+
+`POST /items/{id}/classify` (scope `owner:draft`, like `note-draft`) never
+publishes. It returns `{ version, category, model, probability, reason? }`:
+
+- `409` when the classifier is off, for a first version, or when the published
+  version is a withdrawal.
+- `200` with `category: null` and a `reason` when no category could be had: no
+  binding or key, a provider error, the daily AI budget (`AI_DAILY_CALL_LIMIT`;
+  every classify that calls a model counts, `refresh` does not), or an answer
+  that does not parse. **None of these is fatal**: publish as usual.
+
+The Studio calls it from the *Version N* publish dialog, which shows the answer
+as a chip the author can change or clear. With `change_category_in_note` (on by
+default; it matters only while the classifier is on) the dialog also writes the
+category into the note, where the author sees it before confirming:
+
+- an empty note becomes the bare word, `minor`;
+- a note becomes `minor: <note>`;
+- a note that already starts with a category word is left alone.
+
+The server never rewrites a note. Send `note_generated: true` only when the note
+is exactly the machine's text: a drafted note led by the classifier's own
+category, or the classifier's bare word on an empty note. A category changed by
+the author, or a category prefixed to the author's own words, is not generated.
+
+`POST /items/{id}/publish` takes an optional `change_category`: the category the
+author confirmed (`null` for cleared; omitted, a classification made for exactly
+these words stands). It is kept with the version in studio-private storage
+(migration 0030, `change_class`: category, model, probability, classified_at,
+overridden) and read back as `change_class` on each version in
+`GET /items/{id}`.
+
+**Nothing of this is on the wire.** Spec decision #19 / TN-1 refuses a
+version-significance marker, and decision #77 makes "ignore this version" a
+reader-side derivation from `content_hash`. So there is no new member in item
+documents, `changelog[]`, `feed.xml` or `blyg.json`; the category reaches
+readers only as words in the note the author confirmed.
+`test/change-class.test.ts` asserts that a classified publish emits the same
+document keys as an unclassified one.
 
 Preview and search use `/preview` and `/search`.
 `GET /changes` returns `{ epoch, domains }`, with revision counters for items,
@@ -88,6 +151,30 @@ A response creates a thread with a citation to the imported source.
 Creation returns the item, status 201, and a `Location` header.
 Hopper and media creation also return 201.
 Subscription creation returns 200 when the owner must accept the proposed subscription, then 201 when it creates the subscription.
+
+## Subscriptions
+
+`POST /subscriptions` takes `{ url, confirm?, title?, backfill? }`.
+Without `confirm` it resolves the URL and returns the proposal (200); with `confirm: true` it creates the subscription (201).
+A source that is already subscribed, by origin or by feed, is refused with 409.
+New subscriptions are not in the public `blogroll.opml`; `PATCH /subscriptions/{id}` with `in_blogroll: true` adds one.
+
+`backfill` (boolean, default `true`) applies with `confirm: true`.
+By default the server starts importing the source's archive as soon as it has answered.
+With `backfill: false` it creates the subscription and imports nothing yet: a subscription that has never been polled is always due, so the next quarter-hour poll imports it.
+Use it for bulk imports, so that many subscriptions do not each start an archive import at once:
+
+```ts
+const result = await BlyggerApi.createSubscription({
+  client,
+  body: { url: "https://example.com/feed.xml", confirm: true, backfill: false },
+});
+if (result.response?.status === 409) { /* already subscribed */ }
+if (result.response?.status === 429) { /* wait Retry-After seconds, then retry */ }
+```
+
+The Studio's OPML import works this way. It reads the file in the browser, flattens folders and sends one request at a time, about one a second, which stays under the owner's write budget of 120 writes a minute (`API_WRITE_LIMIT`).
+Delegated clients have less room: 120 a minute per grant, and 60 a minute shared by every grant (`API_DELEGATED_WRITE_LIMIT`), so a token-bearing importer should go slower than one a second and honour `Retry-After` on 429.
 
 ## Partial edits
 

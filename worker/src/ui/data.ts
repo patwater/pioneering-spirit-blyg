@@ -58,7 +58,7 @@ export const polling = new Polling(
 polling.start(window, document);
 function cachedQuery<S extends z.ZodType>(
   context: QueryFunctionContext,
-  domain: ChangeDomain,
+  domain: ChangeDomain | readonly ChangeDomain[],
   schema: S,
   load: (context: QueryFunctionContext, generation: Generation) => Promise<z.input<S>>,
 ) {
@@ -366,9 +366,9 @@ export const itemHistory = createCollection(
         const ids = subsetIds(context);
         if (!ids) throw new Error('Item history requires an id predicate');
         return existing(ids, async (id) => {
-          const { authored_kind, media, versions, published } =
+          const { authored_kind, media, published_media, versions, published } =
             await readItem(id, generation);
-          return { id, authored_kind, media, versions, published };
+          return { id, authored_kind, media, published_media, versions, published };
         });
       }),
     select: (response) => response.data,
@@ -399,11 +399,12 @@ export function createDraftAction(id?: string) {
         case 'restore':
           await unwrap(BlyggerApi.restoreItem({ client, path, body: { version: command.version } }));
           result = await unwrap(BlyggerApi.getItem({ client, path })); break;
-        case 'publish': result = await unwrap(BlyggerApi.publishItem({ client, path, body: { note: command.note, note_generated: command.generated } })); break;
+        case 'publish': result = await unwrap(BlyggerApi.publishItem({ client, path, body: { note: command.note, note_generated: command.generated, ...(command.category !== undefined ? { change_category: command.category } : {}) } })); break;
         case 'delete': result = await unwrap(BlyggerApi.deleteItem({ client, path })); break;
         case 'withdraw': result = await unwrap(BlyggerApi.withdrawItem({ client, path })); break;
         case 'pin': result = await unwrap(BlyggerApi.pinItem({ client, path: { ...path, version: command.version } })); break;
         case 'draft-note': result = await unwrap(BlyggerApi.draftNote({ client, path })); break;
+        case 'classify': result = await unwrap(BlyggerApi.classifyChange({ client, path })); break;
         case 'update': result = await unwrap(BlyggerApi.updateItem({ client, path, body: command.changes })); break;
       }
     }
@@ -431,6 +432,7 @@ export const lensKind = (lens: Lens | undefined): 'thread' | 'fragment' | undefi
  * unfiltered view (so every existing key is unchanged), `sub~kind` otherwise.
  */
 export const readingKey = (sub: string, lens?: Lens) => {
+  if (lens === 'background') return `${sub}~background`;
   const kind = lensKind(lens);
   return kind ? `${sub}~${kind}` : sub;
 };
@@ -461,11 +463,12 @@ export const reading = createCollection(
     queryFn: (context) =>
       cachedQuery(context, 'reading', readingResponseSchema, async ({ signal, meta }) => {
         const { view, offset, limit } = readingSubset({ meta });
-        const [sub, kind] = view.split('~') as [string, 'thread' | 'fragment' | undefined];
+        const [sub, filter] = view.split('~') as [string, 'thread' | 'fragment' | 'background' | undefined];
+        const kind = filter === 'background' ? undefined : filter;
         const page = await unwrap(
           BlyggerApi.listReading({
             client,
-            query: { sub, offset, limit, ...(kind ? { kind } : {}) },
+            query: { sub, offset, limit, ...(kind ? { kind } : {}), ...(filter === 'background' ? { background: 'true' as const } : {}) },
             signal,
           }),
         );
@@ -718,39 +721,45 @@ async function mentions(direction: 'inbound' | 'outbound', signal: AbortSignal) 
     client, query: { direction, offset, limit: 100 }, signal,
   })));
 }
+// Mentions views poll every tick, as before, but an unchanged `mentions`
+// counter (0032) answers from cache: before it, each tick re-read both lists
+// in full and every row's source card.
 export const inbound = createCollection(queryCollectionOptions({
   schema: sourceSchemas.inbound,
   id: 'mentions-in', syncMode: 'on-demand', queryKey: ['mentions-in'], queryClient,
   getKey: (row) => row.id,
-  queryFn: async ({ signal }) => {
-    const rows = (await mentions('inbound', signal))
-      .filter((row): row is Mention => 'hidden' in row);
-    return sourceSchemas.inbound.array().parse(rows);
-  },
+  queryFn: (context) =>
+    cachedQuery(context, 'mentions', sourceSchemas.inbound.array(), async ({ signal }) =>
+      (await mentions('inbound', signal)).filter((row): row is Mention => 'hidden' in row)),
+  select: (response) => response.data,
 }));
+inbound.createIndex(row => row.target_item_id, { indexType: BasicIndex });
 export const outbound = createCollection(queryCollectionOptions({
   schema: sourceSchemas.outbound,
   id: 'mentions-out', syncMode: 'on-demand', queryKey: ['mentions-out'], queryClient,
   getKey: (row) => row.id,
-  queryFn: async ({ signal }) => {
-    const rows = (await mentions('outbound', signal))
-      .filter((row): row is MentionOutRow => 'next_attempt_at' in row);
-    return sourceSchemas.outbound.array().parse(rows);
-  },
+  queryFn: (context) =>
+    cachedQuery(context, 'mentions', sourceSchemas.outbound.array(), async ({ signal }) =>
+      (await mentions('outbound', signal)).filter((row): row is MentionOutRow => 'next_attempt_at' in row)),
+  select: (response) => response.data,
 }));
+// A source card joins the mention to the Reading tables: whether an import of
+// the source is held (stub back) and whether its origin is subscribed. Both
+// tables advance `reading`, so the card follows mentions + reading.
 export const mentionSources = createCollection(queryCollectionOptions({
   schema: sourceSchemas.mentionSources,
   id: 'mention-sources', syncMode: 'on-demand', queryKey: ['mention-sources'], queryClient,
   getKey: (row) => row.key,
-  queryFn: async (context) => {
-    const ids = subsetIds(context, 'key');
-    if (!ids) throw new Error('Mention sources require a key predicate');
-    const rows = await existing(ids, async (id) => ({
-      ...(await unwrap(BlyggerApi.getMentionSource({ client, path: { id }, signal: context.signal }))),
-      key: id,
-    }));
-    return sourceSchemas.mentionSources.array().parse(rows);
-  },
+  queryFn: (context) =>
+    cachedQuery(context, ['mentions', 'reading'], sourceSchemas.mentionSources.array(), async ({ signal }) => {
+      const ids = subsetIds(context, 'key');
+      if (!ids) throw new Error('Mention sources require a key predicate');
+      return existing(ids, async (id) => ({
+        ...(await unwrap(BlyggerApi.getMentionSource({ client, path: { id }, signal }))),
+        key: id,
+      }));
+    }),
+  select: (response) => response.data,
 }));
 export const mentionSource = scoped((id) => createLiveQueryCollection({
   id: `mention-source-view:${id}`,

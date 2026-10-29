@@ -12,7 +12,8 @@ import { renderMarkdown, plainTextFromHtml } from "./markdown.ts";
 import { clampText } from "./preview.ts";
 import { applyInternalLinks, previewInternalLinks, previewTransclusions, resolveBlockLinks } from "./transclusion.ts";
 import { siteOrigin } from "./protocol.ts";
-import { MODELS, bindingName, configuredProviders } from "./ai/models.ts";
+import { MODELS, bindingName, configuredProviders, isDecisionModel } from "./ai/models.ts";
+import { changeClassesFor } from "./change-class.ts";
 import { INTERACTION_KINDS, listInteractions, listThumbs, type InteractionKind } from "./interactions.ts";
 import { normalizeMount } from "./util.ts";
 import type { Env, SignalRow, ImportedItemRow, ItemRow, SubscriptionRow, HopperRow, MentionInRow, MentionOutRow } from "./types.ts";
@@ -24,6 +25,8 @@ import { maybeCheckForUpdate } from "./update-check.ts";
 import { normalizeOrigin } from "./stub.ts";
 import { mentionFetchFor } from "./mentions/http.ts";
 import { platformFetchFor } from "./importer/http.ts";
+import { listBrowse, recordBrowse, clearBrowse, type BrowseVia } from "./browse-log.ts";
+import { classifyLinks, peekItem } from "./peek.ts";
 import { fetchImportedHistory, fetchPublicVersion } from "./imported-history.ts";
 import { readChanges } from './changes.ts';
 import { linkLabel } from "./link-label.ts";
@@ -56,7 +59,15 @@ async function presentVersion(row: Parameters<typeof versionResource>[0]) {
 }
 readApi.openapi(routes.getItem, async (c) => {
   const detail = await itemDetail(c.env.DB, c.req.param("id"));
-  return detail ? c.json({ ...itemResource(detail.item), authored_kind: detail.kind, media: detail.media.map(mediaResource), versions: await Promise.all(detail.versions.map(presentVersion)), published: detail.published ? await presentVersion(detail.published) : null }) : c.json({ error: "not found" }, 404);
+  if (!detail) return c.json({ error: "not found" }, 404);
+  // The change classifier's studio-private record rides on the owner's view of
+  // each version (migration 0030); protocol.ts never reads it.
+  const classes = await changeClassesFor(c.env.DB, detail.item.id, detail.item.version);
+  const withClass = async (row: Parameters<typeof versionResource>[0]) => {
+    const cls = classes.get(row.version);
+    return { ...(await presentVersion(row)), change_class: cls ? { category: cls.category, model: cls.model, probability: cls.probability, classified_at: cls.classified_at, overridden: cls.overridden === 1 } : null };
+  };
+  return c.json({ ...itemResource(detail.item), authored_kind: detail.kind, media: detail.media.map(mediaResource), published_media: detail.publishedMedia.map(mediaResource), versions: await Promise.all(detail.versions.map(withClass)), published: detail.published ? await withClass(detail.published) : null });
 });
 readApi.openapi(routes.getSettings, async (c) => c.json(settingsResource(await getSettings(c.env.DB))));
 readApi.openapi(routes.listSubscriptions, async (c) => {
@@ -111,14 +122,15 @@ readApi.openapi(routes.getAiModels, async (c) => {
       ...(p.api === "workers-ai" ? { binding: bindingName(p) } : {}),
       configured: configured[id] ?? false,
     })),
-    models: MODELS.models.map(({ id, provider, label, note }) => ({ id, provider, label, ...(note ? { note } : {}) })),
+    // A decision model is marked so Settings lists it only for the classifier.
+    models: MODELS.models.map(({ id, provider, label, note }) => ({ id, provider, label, ...(note ? { note } : {}), ...(isDecisionModel(id) ? { kind: "decision" as const } : {}) })),
     local: MODELS.local,
   });
 });
 readApi.openapi(routes.listThumbs, async (c) => c.json({ items: await listThumbs(c.env.DB) }));
 // `read_state: true` advertises that imported entries carry the owner's
 // readVersion, so a client can tell "unread" from "this server keeps none".
-readApi.openapi(routes.listReading, async (c) => c.json({ ...await readingData(c.env.DB, Number(c.req.query("offset") ?? 0), Number(c.req.query("limit") ?? 25), c.req.query("sub"), readingKind(c.req.query("kind"))), read_state: true as const, read_state_clear: true as const }));
+readApi.openapi(routes.listReading, async (c) => c.json({ ...await readingData(c.env.DB, Number(c.req.query("offset") ?? 0), Number(c.req.query("limit") ?? 25), c.req.query("sub"), readingKind(c.req.query("kind")), c.req.query("background") === "true"), read_state: true as const, read_state_clear: true as const }));
 // Imported items only, keyset-paged, for clients that author from what they read (studio#11).
 readApi.openapi(routes.listImportedReading, async (c) => {
   return c.json(await importedReading(c.env.DB, c.req.query("cursor"), Number(c.req.query("limit") ?? IMPORTED_READING_DEFAULT)));
@@ -147,6 +159,32 @@ readApi.openapi(routes.getImportedVersion, async (c) => {
   if (!sub) return c.json({ error: "not a blyg subscription" }, 404);
   const got = await fetchPublicVersion(platformFetchFor(c.env), sub, c.req.param("id"), Number(c.req.param("v")));
   return got.ok ? c.json(got.value) : c.json({ error: got.error }, got.status);
+});
+// Following links out of an entry (0.49.0). `peekItem` reads one item from its own blyg
+// without subscribing; `classifyLinks` says which of an entry's links name blyg items.
+readApi.openapi(routes.peekItem, async (c) => {
+  const got = await peekItem(c.env.DB, platformFetchFor(c.env), c.req.query("origin") ?? "", c.req.query("id") ?? "");
+  return got.ok ? c.json(got.value) : c.json({ error: got.error }, got.status);
+});
+readApi.openapi(routes.classifyLinks, async (c) => {
+  const { urls } = await readJson<{ urls: string[] }>(c);
+  const settings = await getSettings(c.env.DB);
+  const ourOrigin = siteOrigin(settings, c.req.url, normalizeMount(c.env.MOUNT));
+  return c.json({ links: await classifyLinks(c.env.DB, platformFetchFor(c.env), urls, ourOrigin, new Date().toISOString()) });
+});
+readApi.openapi(routes.listBrowse, async (c) => {
+  const offset = Math.max(0, Number(c.req.query("offset") ?? 0) || 0);
+  const limit = Math.min(100, Math.max(1, Number(c.req.query("limit") ?? 50) || 50));
+  return c.json({ ...(await listBrowse(c.env.DB, offset, limit, c.req.query("trail"))), offset, limit });
+});
+readApi.openapi(routes.logBrowse, async (c) => {
+  const b = await readJson<{ trail: string; parent_id?: number | null; origin: string; remote_id: string; version?: number | null; via: BrowseVia; title?: string | null }>(c);
+  const id = await recordBrowse(c.env.DB, { trail: b.trail, parentId: b.parent_id, origin: b.origin, remoteId: b.remote_id, version: b.version, via: b.via, title: b.title, at: new Date().toISOString() });
+  return c.json({ id }, 201);
+});
+readApi.openapi(routes.clearBrowse, async (c) => {
+  await clearBrowse(c.env.DB, c.req.query("trail"));
+  return c.json({ ok: true });
 });
 readApi.openapi(routes.getUpdateState, async (c) => {
   const [settings, map] = await Promise.all([getSettings(c.env.DB), getSettingsMap(c.env.DB)]);
@@ -179,7 +217,7 @@ readApi.openapi(routes.preview, async (c) => {
   const origin = siteOrigin(await getSettings(c.env.DB), c.req.url, mount);
   const links = await previewInternalLinks(c.env.DB, tk.text, origin);
   // Links inside generated blocks resolve here too, as at publish (studio#14).
-  const blocks = await resolveBlockLinks(tk.blocks, (html) => previewInternalLinks(c.env.DB, html, origin, true));
+  const blocks = await resolveBlockLinks(tk, (md) => previewInternalLinks(c.env.DB, md, origin));
   const html = [links, ...blocks.docs].reduce((acc, doc) => applyInternalLinks(acc, doc), tk.finish(renderMarkdown(links.text)));
   return c.json({ html, scopes: await scopeSummariesWithSources(c.env.DB, tk.scopes), link_errors: [...links.errors, ...blocks.errors] });
 });
@@ -285,7 +323,7 @@ async function threadPreview(c: Context<{ Bindings: Env }>) {
   const mount = normalizeMount(c.env.MOUNT);
   const origin = siteOrigin(await getSettings(c.env.DB), c.req.url, mount);
   const links = await previewInternalLinks(c.env.DB, tk.text, origin);
-  const blocks = await resolveBlockLinks(tk.blocks, (html) => previewInternalLinks(c.env.DB, html, origin, true));
+  const blocks = await resolveBlockLinks(tk, (md) => previewInternalLinks(c.env.DB, md, origin));
   const resolved = await previewTransclusions(c.env.DB, links.text, body.item_id);
   return c.json({
     html: [links, ...blocks.docs].reduce((acc, doc) => applyInternalLinks(acc, doc), tk.finish(resolved.html)),

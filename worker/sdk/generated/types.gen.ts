@@ -42,6 +42,8 @@ export type ChangeState = {
         signals: number;
         settings: number;
         feed: number;
+        mentions: number;
+        responses: number;
     };
 };
 
@@ -118,6 +120,14 @@ export type Settings = {
     ai_model_tk: string;
     ai_model_changelog: string;
     ai_model_feed: string;
+    /**
+     * The change classifier's decision model (Clef, Jev); empty, the default, is off. Studio-private: a category reaches readers only as words in a changelog note the author confirms.
+     */
+    ai_model_classify: string;
+    /**
+     * Lead the changelog note with the classifier's category, in the publish dialog where the author sees it. Matters only while ai_model_classify is set.
+     */
+    change_category_in_note: boolean;
     feed_prompt: string;
     ai_style_prompt: string;
     accept_mentions: boolean;
@@ -266,6 +276,22 @@ export type Version = {
         cited?: Citation;
     } | null;
     stub_cite: Citation | null;
+    /**
+     * The change classifier's studio-private record of this version, in an item's versions; absent elsewhere. Never on the wire.
+     */
+    change_class?: {
+        category: 'refresh' | 'typo' | 'minor' | 'major' | null;
+        /**
+         * Null for refresh (decided locally) and for a category the author set by hand.
+         */
+        model: string | null;
+        probability: number | null;
+        classified_at: string;
+        /**
+         * The author changed or cleared the classifier's category before publishing.
+         */
+        overridden: boolean;
+    } | null;
 };
 
 export type Transclusion = {
@@ -367,6 +393,10 @@ export type AiModels = {
         provider: string;
         label: string;
         note?: string;
+        /**
+         * A decision model (Clef, Jev): offered only for the change classifier (ai_model_classify), never for text generation.
+         */
+        kind?: 'decision';
     }>;
     local: boolean;
 };
@@ -506,6 +536,37 @@ export type ImportedReadingEntry = {
      * The origin's generated[] verbatim (GenerationProvenance shape, remote sources' origin and cited included); remote and unvalidated. Null when none.
      */
     generated: Array<unknown> | null;
+};
+
+export type PeekItem = {
+    origin: string;
+    id: string;
+    kind: 'fragment' | 'thread' | 'withdrawn';
+    version: number;
+    /**
+     * Sanitized, as a subscribed item's is.
+     */
+    content_html: string;
+    page: string | null;
+    url: string;
+    stub_of?: unknown;
+    forked_from?: unknown;
+    /**
+     * The subscription holding this origin, when there is one: open the held copy at /reading/{sub}/{id}.
+     */
+    subscription_id: string | null;
+};
+
+export type BrowseStep = {
+    id: number;
+    at: string;
+    trail: string;
+    parent_id: number | null;
+    origin: string;
+    remote_id: string;
+    version: number | null;
+    via: 'start' | 'stub' | 'quote' | 'link' | 'back';
+    title: string | null;
 };
 
 export type ThreadFreshness = {
@@ -1186,7 +1247,14 @@ export type GetItemResponses = {
         forked_from: VersionReference | null;
         fork_cite: Citation | null;
         authored_kind: 'fragment' | 'thread';
+        /**
+         * The working copy's attachments: what the next version lists.
+         */
         media: Array<Media>;
+        /**
+         * What the live version lists, including attachments removed from the working copy since (studio#7).
+         */
+        published_media: Array<Media>;
         versions: Array<Version>;
         published: Version | null;
     };
@@ -1279,6 +1347,10 @@ export type PublishItemData = {
     body?: {
         note?: string;
         note_generated?: boolean;
+        /**
+         * The change category the author confirmed in the publish dialog: kept with the version in studio-private storage (never on the wire). Omitted: a classification made for these words stands; null: cleared.
+         */
+        change_category?: 'refresh' | 'typo' | 'minor' | 'major' | null;
     };
     path: {
         id: string;
@@ -1352,6 +1424,95 @@ export type PublishItemResponses = {
 };
 
 export type PublishItemResponse = PublishItemResponses[keyof PublishItemResponses];
+
+export type ClassifyChangeData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/api/items/{id}/classify';
+};
+
+export type ClassifyChangeErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    405: ApiError;
+    /**
+     * Request failed
+     */
+    409: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    415: ApiError;
+    /**
+     * Request failed
+     */
+    422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+    /**
+     * Request failed
+     */
+    502: ApiError;
+};
+
+export type ClassifyChangeError = ClassifyChangeErrors[keyof ClassifyChangeErrors];
+
+export type ClassifyChangeResponses = {
+    /**
+     * Success
+     */
+    200: {
+        /**
+         * The version the working copy would publish as.
+         */
+        version: number;
+        /**
+         * Null when no category could be had; see reason.
+         */
+        category: 'refresh' | 'typo' | 'minor' | 'major' | null;
+        /**
+         * The decision model that answered; null for refresh, decided locally from content_hash.
+         */
+        model: string | null;
+        probability: number | null;
+        /**
+         * Why there is no category: a provider error, an exhausted AI budget, or an unusable answer. Never fatal: publish as usual.
+         */
+        reason?: string;
+    };
+};
+
+export type ClassifyChangeResponse = ClassifyChangeResponses[keyof ClassifyChangeResponses];
 
 export type DraftNoteData = {
     body?: never;
@@ -1801,6 +1962,15 @@ export type UploadMediaError = UploadMediaErrors[keyof UploadMediaErrors];
 
 export type UploadMediaResponses = {
     /**
+     * Already attached
+     */
+    200: {
+        id: string;
+        url: string;
+        mime: string;
+        duplicate: true;
+    };
+    /**
      * Success
      */
     201: {
@@ -1977,6 +2147,11 @@ export type UpdateSettingsData = {
         ai_model_tk?: string;
         ai_model_changelog?: string;
         ai_model_feed?: string;
+        /**
+         * The change classifier's decision model (Clef, Jev); empty, the default, is off. Studio-private: a category reaches readers only as words in a changelog note the author confirms.
+         */
+        ai_model_classify?: string;
+        change_category_in_note?: boolean;
         feed_prompt?: string;
         ai_style_prompt?: string;
         accept_mentions?: boolean;
@@ -2202,6 +2377,10 @@ export type CreateSubscriptionData = {
         url: string;
         confirm?: boolean;
         title?: string;
+        /**
+         * With confirm: start importing the archive at once (true, the default). false creates the subscription only; the next quarter-hour poll imports it, since a never-polled subscription is always due. For bulk imports such as OPML.
+         */
+        backfill?: boolean;
     };
     path?: never;
     query?: never;
@@ -4381,6 +4560,10 @@ export type ListReadingData = {
         limit?: number;
         sub?: string;
         kind?: 'thread' | 'fragment';
+        /**
+         * Only withdrawn items (the Background lens). Without it, withdrawn items are left out.
+         */
+        background?: 'true';
     };
     url: '/api/reading';
 };
@@ -4781,6 +4964,387 @@ export type GetImportedVersionResponses = {
 };
 
 export type GetImportedVersionResponse = GetImportedVersionResponses[keyof GetImportedVersionResponses];
+
+export type PeekItemData = {
+    body?: never;
+    path?: never;
+    query: {
+        origin: string;
+        id: string;
+    };
+    url: '/api/peek';
+};
+
+export type PeekItemErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    405: ApiError;
+    /**
+     * Request failed
+     */
+    409: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    415: ApiError;
+    /**
+     * Request failed
+     */
+    422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+    /**
+     * Request failed
+     */
+    502: ApiError;
+};
+
+export type PeekItemError = PeekItemErrors[keyof PeekItemErrors];
+
+export type PeekItemResponses = {
+    /**
+     * Success
+     */
+    200: PeekItem;
+};
+
+export type PeekItemResponse = PeekItemResponses[keyof PeekItemResponses];
+
+export type ClassifyLinksData = {
+    body: {
+        urls: Array<string>;
+    };
+    path?: never;
+    query?: never;
+    url: '/api/peek/links';
+};
+
+export type ClassifyLinksErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    405: ApiError;
+    /**
+     * Request failed
+     */
+    409: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    415: ApiError;
+    /**
+     * Request failed
+     */
+    422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+    /**
+     * Request failed
+     */
+    502: ApiError;
+};
+
+export type ClassifyLinksError = ClassifyLinksErrors[keyof ClassifyLinksErrors];
+
+export type ClassifyLinksResponses = {
+    /**
+     * Success
+     */
+    200: {
+        links: Array<{
+            url: string;
+            target: {
+                origin: string;
+                id: string;
+            } | null;
+        }>;
+    };
+};
+
+export type ClassifyLinksResponse = ClassifyLinksResponses[keyof ClassifyLinksResponses];
+
+export type ClearBrowseData = {
+    body?: never;
+    path?: never;
+    query?: {
+        trail?: string;
+    };
+    url: '/api/browse';
+};
+
+export type ClearBrowseErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    405: ApiError;
+    /**
+     * Request failed
+     */
+    409: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    415: ApiError;
+    /**
+     * Request failed
+     */
+    422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+    /**
+     * Request failed
+     */
+    502: ApiError;
+};
+
+export type ClearBrowseError = ClearBrowseErrors[keyof ClearBrowseErrors];
+
+export type ClearBrowseResponses = {
+    /**
+     * Success
+     */
+    200: {
+        ok: boolean;
+    };
+};
+
+export type ClearBrowseResponse = ClearBrowseResponses[keyof ClearBrowseResponses];
+
+export type ListBrowseData = {
+    body?: never;
+    path?: never;
+    query?: {
+        offset?: number | null;
+        limit?: number;
+        trail?: string;
+    };
+    url: '/api/browse';
+};
+
+export type ListBrowseErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    405: ApiError;
+    /**
+     * Request failed
+     */
+    409: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    415: ApiError;
+    /**
+     * Request failed
+     */
+    422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+    /**
+     * Request failed
+     */
+    502: ApiError;
+};
+
+export type ListBrowseError = ListBrowseErrors[keyof ListBrowseErrors];
+
+export type ListBrowseResponses = {
+    /**
+     * Success
+     */
+    200: {
+        items: Array<BrowseStep>;
+        total: number;
+        offset: number;
+        limit: number;
+    };
+};
+
+export type ListBrowseResponse = ListBrowseResponses[keyof ListBrowseResponses];
+
+export type LogBrowseData = {
+    body: {
+        trail: string;
+        parent_id?: number | null;
+        origin: string;
+        remote_id: string;
+        version?: number | null;
+        via: 'start' | 'stub' | 'quote' | 'link' | 'back';
+        title?: string | null;
+    };
+    path?: never;
+    query?: never;
+    url: '/api/browse';
+};
+
+export type LogBrowseErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    405: ApiError;
+    /**
+     * Request failed
+     */
+    409: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    415: ApiError;
+    /**
+     * Request failed
+     */
+    422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+    /**
+     * Request failed
+     */
+    502: ApiError;
+};
+
+export type LogBrowseError = LogBrowseErrors[keyof LogBrowseErrors];
+
+export type LogBrowseResponses = {
+    /**
+     * Success
+     */
+    201: {
+        id: number;
+    };
+};
+
+export type LogBrowseResponse = LogBrowseResponses[keyof LogBrowseResponses];
 
 export type GetUpdateStateData = {
     body?: never;
