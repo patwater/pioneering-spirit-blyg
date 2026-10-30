@@ -14,6 +14,8 @@ await db.prepare("INSERT INTO subscriptions (id, kind, origin, feed_url, title, 
 for (const [sub, id, state, pin, l0, md, html, page] of [
   ['parity-native', '00000000000000000000000001', 'current', null, 0, '# Native title\n\nFrozen source text.', '<h1>Native title</h1><p>Frozen source text.</p><blockquote class="blyg-transclusion">Frozen quote from a prior version.</blockquote>', 'native'],
   ['parity-native', '00000000000000000000000002', 'tombstone', 1, 0, 'Pinned retained text.', '<p>Pinned retained text.</p>', 'retained'],
+  // A second live entry: withdrawn posts are background, so the feed needs another row to hold two.
+  ['parity-native', '00000000000000000000000004', 'current', null, 0, 'Second live text.', '<p>Second live text.</p>', 'second'],
   ['parity-rss', 'l0-parity', 'current', null, 1, '[Legacy title](https://legacy.example/post)', '<p><a href="https://legacy.example/post">Legacy title</a></p><p>Legacy body.</p>', 'https://legacy.example/post'],
 ] as const) await db.prepare('INSERT INTO imported_items (subscription_id, remote_id, kind, state, version, observed_at, content_md, content_html, pinned_version_retained, l0, page) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)').bind(sub, id, 'fragment', state, '2026-10-01T00:00:00Z', md, html, pin, l0, page).run();
 // Lineage (the lineage-glyph extension): the native item quotes its sibling and stubs a plain URL.
@@ -74,6 +76,20 @@ const proxy = createServer(async (request, response) => {
       const escaped = target.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;");
       response.writeHead(200, { "Content-Type": "text/html" });
       response.end('<iframe src="' + escaped + '"></iframe>');
+      return;
+    }
+    // Disposable stand-in for a sender whose claim this blyg has just verified:
+    // writes one verified inbound mention straight into the 8787 fixture
+    // database, as verifyMention's UPDATE would. Fixture-only; the Worker ships
+    // no such route (e2e/polling-cache.spec.ts, live mentions).
+    if (path === "/__fixture/verified-mention" && request.method === "POST") {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      const { id, item, origin } = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { id: string; item: string; origin: string };
+      const now = new Date().toISOString(), source = `${origin}t/${id}/`;
+      await db.prepare("INSERT INTO mentions_in (id, source, target, target_item_id, status, relation, source_origin, source_id, source_kind, source_version, source_author_json, source_page, first_seen, last_seen, verified_at, hidden) VALUES (?, ?, ?, ?, 'verified', 'stub', ?, ?, 'thread', 1, ?, ?, ?, ?, ?, 0)")
+        .bind(id, source, `http://127.0.0.1:8787/t/${item}/`, item, origin, id, JSON.stringify({ name: "Live responder" }), source, now, now, now).run();
+      response.writeHead(204); response.end();
       return;
     }
     if (!path.startsWith("/notes/b/") && !path.startsWith("/api/")) { response.writeHead(404); response.end("outside forwarding ranges"); return; }

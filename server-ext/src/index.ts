@@ -7,18 +7,20 @@
 //   3. reading, mentions, settings, hoppers                reads.ts
 //   4. client-recorded TK provenance                       provenance.ts
 //   5. read-state sync (optional)                          readstate.ts
-//   +  media de-duplication and removal                   media.ts
 //   +  legacy write routes the studio removed in 0.9       compat.ts
 //
 // Everything else, including every public protocol surface, goes to the
 // reference Worker unchanged. The extensions only add owner-only /api
 // routes; nothing here changes what a reader or another blyg sees.
+//
+// Media de-duplication and removal were extensions too until studio 0.48 did
+// both itself, keeping every published version's attachments, so POST and
+// DELETE /api/media now reach the studio for every client.
 
 import reference from "../../worker/src/index.ts";
 import { authenticate, withSession } from "./auth.ts";
 import { translateLegacy } from "./compat.ts";
 import { type Env, json } from "./http.ts";
-import { deleteMedia, duplicateUpload } from "./media.ts";
 import { getProvenance, putProvenance } from "./provenance.ts";
 import { hoppers, listItems, listSubscriptions, mentions, oneItem, reading, settings } from "./reads.ts";
 import { postReads, putRead } from "./readstate.ts";
@@ -38,9 +40,6 @@ const routes: [string, RegExp, Handler][] = [
   ["GET", /^\/api\/mentions$/, (_req, env) => mentions(env)],
   ["GET", /^\/api\/settings$/, (_req, env) => settings(env)],
   ["GET", /^\/api\/hoppers$/, (_req, env) => hoppers(env)],
-  ["DELETE", new RegExp(`^/api/media/${seg}$`), (_req, env, [id]) => deleteMedia(env, id)],
-  // Falls through (null) to the reference upload unless it's a duplicate.
-  ["POST", /^\/api\/media$/, (req, env) => duplicateUpload(req.clone(), env)],
 ];
 
 function match(method: string, path: string): { handler: Handler; params: string[] } | null {

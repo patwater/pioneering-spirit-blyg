@@ -42,6 +42,10 @@
   // The workers.dev address keeps answering too, which is handy for testing a
   // deploy, but the blyg names itself by the custom domain above.
   "workers_dev": true,
+  // `npm run dev` would otherwise present each request as coming to the
+  // first route's host over http, and the studio refuses /studio and /api
+  // over http on any host but a loopback one ("HTTPS required").
+  "dev": { "host": "localhost" },
   // Keep variables set in the Cloudflare dashboard across deploys. Without
   // this, every deploy from main deletes dashboard "Variables" that aren't
   // listed here (Secrets always survive), which silently logs Blygger

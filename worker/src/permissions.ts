@@ -3,15 +3,17 @@ import { routes } from './contract/routes.ts';
 import type { OwnerScope } from './auth-scopes.ts';
 export { OWNER_SCOPES, SCOPE_DESCRIPTIONS } from './auth-scopes.ts';
 export interface OwnerAccess { scope: string[]; clientId: string; userId: string; grantId?: string }
-const draft = new Set(['createItem', 'updateItem', 'deleteItem', 'restoreItem', 'uploadMedia', 'generateItem', 'draftNote', 'preview']);
+const draft = new Set(['createItem', 'updateItem', 'deleteItem', 'restoreItem', 'uploadMedia', 'generateItem', 'draftNote', 'classifyChange', 'preview']);
 const publish = new Set(['publishItem', 'withdrawItem', 'pinItem', 'refreshItem', 'deleteMedia']);
 // Read state is low-stakes, reversible bookkeeping: a sync-only reader app should not
 // need the grant that can also delete subscriptions (studio#45, session 43).
-const readState = new Set(['markRead', 'markUnread', 'markReadBatch', 'markUnreadBatch']);
+const readState = new Set(['markRead', 'markUnread', 'markReadBatch', 'markUnreadBatch', 'logBrowse', 'clearBrowse']);
+// A POST that only looks things up: reading another blyg's pages needs no more than reading.
+const lookup = new Set(['classifyLinks']);
 export function operationScopes(operation: string): OwnerScope[] {
   const route = routes[operation as keyof typeof routes];
   if (!route) throw new Error(`Unknown operation: ${operation}`);
-  if (route.method === 'get') return ['owner:read'];
+  if (route.method === 'get' || lookup.has(operation)) return ['owner:read'];
   if (draft.has(operation)) return ['owner:draft'];
   if (publish.has(operation)) return ['owner:publish'];
   if (readState.has(operation)) return ['reading:state'];

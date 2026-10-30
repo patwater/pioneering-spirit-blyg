@@ -4,7 +4,10 @@ import { ErrorSchema, route } from "./route.ts";
 import { extensionRoutes } from "../../extensions/catalog.ts";
 import { SettingsSchema, HopperItemRowSchema, SignalRowSchema, MentionOutRowSchema } from "./schemas.ts";
 import { CHANGE_DOMAINS } from '../change-state.ts';
+import { CHANGE_CATEGORIES } from "../change-category.ts";
 import { READ_BATCH_MAX, READ_ID_MAX, READ_VERSION_MAX } from '../importer/read-state.ts';
+import { BROWSE_VIA } from "../browse-log.ts";
+import { CLASSIFY_MAX } from "../peek.ts";
 import { IMPORTED_READING_MAX, READING_CURSOR_MAX, decodeReadingCursor } from '../imported-reading.ts';
 
 const json = (schema: z.ZodType) => ({ "application/json": { schema } });
@@ -20,8 +23,9 @@ export const ItemCreateSchema = z.union([
   z.object({ mode: z.literal("response"), source: z.object({ subscription_id: z.string().min(1), remote_id: z.string().min(1) }).strict(), selection: z.string().optional() }).strict(),
 ]);
 const toggle = z.boolean();
-const settingsBody = SettingsSchema.partial().extend({ accept_mentions: toggle.optional(), update_check: toggle.optional(), show_responses_default: toggle.optional(), highlight_generated_default: toggle.optional(), auto_change_notes: toggle.optional(), update_notice_ack: toggle.optional() }).strict();
+const settingsBody = SettingsSchema.partial().extend({ accept_mentions: toggle.optional(), update_check: toggle.optional(), show_responses_default: toggle.optional(), highlight_generated_default: toggle.optional(), auto_change_notes: toggle.optional(), change_category_in_note: toggle.optional(), update_notice_ack: toggle.optional() }).strict();
 const note = z.object({ note: z.string().optional() });
+const changeCategory = z.enum(CHANGE_CATEGORIES);
 const version = z.object({ version: z.number().int().positive() });
 const page = z.object({ offset: z.coerce.number().int().min(0).optional(), limit: z.coerce.number().int().min(1).max(100).optional() });
 const collection = (schema: z.ZodType) => z.object({ items: z.array(schema), total: z.number().int().nonnegative(), offset: z.number().int().nonnegative(), limit: z.number().int().positive() });
@@ -53,6 +57,8 @@ const quoteFreshness = z.object({ id: z.string(), origin: z.string().optional(),
 export const ThreadFreshnessSchema = z.object({ id: z.string(), version: z.number().int(), dirty: z.boolean(), quotes: z.array(quoteFreshness), stale: z.number().int().nonnegative(), blocking: z.number().int().nonnegative(), behind: z.number().int().nonnegative() }).openapi("ThreadFreshness");
 const interactionKind = z.enum(["thumb_up", "thumb_down", "thumb_clear", "hopper_add", "hopper_remove", "stub", "fork", "quote"]);
 /** The owner's private interaction log (0.25.0). Never on the wire. */
+export const PeekItemSchema = z.object({ origin: z.string(), id: z.string(), kind: z.enum(["fragment", "thread", "withdrawn"]), version: z.number().int().positive(), content_html: z.string().describe("Sanitized, as a subscribed item's is."), page: z.string().nullable(), url: z.string(), stub_of: z.unknown().nullable(), forked_from: z.unknown().nullable(), subscription_id: z.string().nullable().describe("The subscription holding this origin, when there is one: open the held copy at /reading/{sub}/{id}.") }).openapi("PeekItem");
+export const BrowseStepSchema = z.object({ id: z.number().int(), at: z.string(), trail: z.string(), parent_id: z.number().int().nullable(), origin: z.string(), remote_id: z.string(), version: z.number().int().nullable(), via: z.enum(BROWSE_VIA), title: z.string().nullable() }).openapi("BrowseStep");
 export const InteractionSchema = z.object({ id: z.number().int(), at: z.string(), kind: interactionKind, origin: z.string(), remote_id: z.string(), version: z.number().int().nullable(), own_item_id: z.string().nullable(), own_version: z.number().int().nullable(), hopper_id: z.string().nullable(), hopper_name: z.string().nullable(), backfilled: z.number().int(), subscription_id: z.string().nullable(), label: z.string().nullable() }).openapi("Interaction");
 export const ThumbSchema = z.object({ thumb: z.union([z.literal(1), z.literal(-1)]), at: z.string(), origin: z.string(), remote_id: z.string(), subscription_id: z.string().nullable(), label: z.string().nullable() }).openapi("Thumb");
 /** The model manifest for Settings (0.26.0): which models exist, and which providers have a key. Never a key's value. */
@@ -64,7 +70,7 @@ export const AiModelsSchema = z.object({
     binding: z.string().optional().describe("Workers AI only: the Worker binding the provider calls (studio#8)."),
     configured: z.boolean().describe("The key secret is set, the binding is bound, or the provider needs neither."),
   })),
-  models: z.array(z.object({ id: z.string(), provider: z.string(), label: z.string(), note: z.string().optional() })),
+  models: z.array(z.object({ id: z.string(), provider: z.string(), label: z.string(), note: z.string().optional(), kind: z.literal("decision").optional().describe("A decision model (Clef, Jev): offered only for the change classifier (ai_model_classify), never for text generation.") })),
   local: z.boolean(),
 }).openapi("AiModels");
 const readVersion = z.number().int().min(1).max(READ_VERSION_MAX);
@@ -79,7 +85,8 @@ export const routes = {
   getChanges: route('getChanges', 'get', '/changes', z.object({ epoch: z.string().min(1), domains: z.object(Object.fromEntries(CHANGE_DOMAINS.map(domain => [domain, z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)])) as Record<typeof CHANGE_DOMAINS[number], z.ZodNumber>) }).openapi('ChangeState')),
   createItem: route("createItem", "post", "/items", created, ItemCreateSchema, 201, undefined, true),
   updateItem: route("updateItem", "patch", "/items/{id}", ItemSchema, ItemEditSchema),
-  publishItem: route("publishItem", "post", "/items/{id}/publish", ok.extend({ version: z.number(), warning: z.string().optional() }), note.extend({ note_generated: z.boolean().optional() }), 200, undefined, true),
+  publishItem: route("publishItem", "post", "/items/{id}/publish", ok.extend({ version: z.number(), warning: z.string().optional() }), note.extend({ note_generated: z.boolean().optional(), change_category: changeCategory.nullable().optional().describe("The change category the author confirmed in the publish dialog: kept with the version in studio-private storage (never on the wire). Omitted: a classification made for these words stands; null: cleared.") }), 200, undefined, true),
+  classifyChange: route("classifyChange", "post", "/items/{id}/classify", z.object({ version: z.number().int().describe("The version the working copy would publish as."), category: changeCategory.nullable().describe("Null when no category could be had; see reason."), model: z.string().nullable().describe("The decision model that answered; null for refresh, decided locally from content_hash."), probability: z.number().nullable(), reason: z.string().optional().describe("Why there is no category: a provider error, an exhausted AI budget, or an unusable answer. Never fatal: publish as usual.") })),
   draftNote: route("draftNote", "post", "/items/{id}/note-draft", z.object({ note: z.string(), model: z.string(), pinned_prior: z.boolean() })),
   generateItem: route("generateItem", "post", "/items/{id}/generate", z.object({ text: z.string(), model: z.string(), content_md: z.string() }), z.object({ scope: z.number().int().min(0) })),
   withdrawItem: route("withdrawItem", "post", "/items/{id}/withdraw", ok.extend({ version: z.number() }), note, 200, undefined, true),
@@ -89,7 +96,7 @@ export const routes = {
   uploadMedia: createRoute({ ...route("uploadMedia", "post", "/media", z.object({ id: z.string(), url: z.string(), mime: z.string() }), undefined, 201), request: { body: { required: true, content: { "multipart/form-data": { schema: z.object({ file: z.custom<File>((value) => value instanceof File, "file field required (multipart)").openapi({ type: "string", format: "binary" }), item_id: z.string().optional(), alt: z.string().optional(), inline: z.enum(["true", "false"]).optional() }) } } } } }),
   deleteMedia: route("deleteMedia", "delete", "/media/{id}", ok.extend({ outcome: z.enum(["deleted", "detached"]) })),
   updateSettings: route("updateSettings", "patch", "/settings", SettingsSchema, settingsBody),
-  createSubscription: route("createSubscription", "post", "/subscriptions", confirmation, z.object({ url: z.string(), confirm: z.boolean().optional(), title: z.string().optional() })),
+  createSubscription: route("createSubscription", "post", "/subscriptions", confirmation, z.object({ url: z.string(), confirm: z.boolean().optional(), title: z.string().optional(), backfill: z.boolean().optional().describe("With confirm: start importing the archive at once (true, the default). false creates the subscription only; the next quarter-hour poll imports it, since a never-polled subscription is always due. For bulk imports such as OPML.") })),
   updateSubscription: route("updateSubscription", "patch", "/subscriptions/{id}", SubscriptionSchema, z.object({ in_blogroll: z.boolean().optional(), title: z.string().trim().min(1).nullable().optional().describe("A name of your own; null hands the name back to the source, refreshed while polling."), paused: z.boolean().optional() }).strict()),
   pollAllSubscriptions: route("pollAllSubscriptions", "post", "/subscriptions/poll", z.object({ polling: z.number().int().nonnegative() })),
   resyncSubscription: route("resyncSubscription", "post", "/subscriptions/{id}/resync", ok.extend({ changed: z.number() })),
@@ -108,7 +115,7 @@ export const routes = {
   markUnreadBatch: route("markUnreadBatch", "post", "/reading/unread", ok.extend({ received: z.number().int().nonnegative() }), z.object({ items: z.array(unreadMark).max(READ_BATCH_MAX) })),
   updateMention: route("updateMention", "patch", "/mentions/{id}", ok.extend({ hidden: z.boolean() }), z.object({ hidden: z.boolean() })),
   listItems: route("listItems", "get", "/items", z.object({ items: z.array(ItemSchema.extend({ pins: z.array(z.object({ version: z.number().int().positive(), kind: z.enum(["fragment", "thread"]) })).optional() })), total: z.number(), offset: z.number(), limit: z.number() }), undefined, 200, page),
-  getItem: route("getItem", "get", "/items/{id}", z.object({ ...ItemSchema.shape, authored_kind: z.enum(["fragment", "thread"]), media: z.array(MediaSchema), versions: z.array(VersionSchema), published: z.union([VersionSchema, z.null()]) })),
+  getItem: route("getItem", "get", "/items/{id}", z.object({ ...ItemSchema.shape, authored_kind: z.enum(["fragment", "thread"]), media: z.array(MediaSchema).describe("The working copy's attachments: what the next version lists."), published_media: z.array(MediaSchema).describe("What the live version lists, including attachments removed from the working copy since (studio#7)."), versions: z.array(VersionSchema), published: z.union([VersionSchema, z.null()]) })),
   getSettings: route("getSettings", "get", "/settings", SettingsSchema),
   listSubscriptions: route("listSubscriptions", "get", "/subscriptions", collection(SubscriptionSchema), undefined, 200, page),
   getSubscription: route("getSubscription", "get", "/subscriptions/{id}", SubscriptionSchema),
@@ -122,11 +129,18 @@ export const routes = {
   preview: route("preview", "post", "/preview", preview, z.object({ content_md: z.string().optional(), item_id: z.string().optional(), kind: z.enum(["fragment", "thread"]).optional() })),
   search: route("search", "get", "/search", z.object({ items: z.array(z.object({ id: z.string(), excerpt: z.string(), label: z.string().openapi({ description: "The text a `[[id]]` link to this item shows: its opening heading, else a short quoted excerpt. Written as the label by the picker (0.4 §10.1)." }), version: z.number(), updated: z.string(), badge: z.string(), source: z.enum(["mine", "imported"]), kind: z.enum(["fragment", "thread"]), subscription_id: z.string().nullable(), source_title: z.string().nullable() })), total: z.number(), offset: z.number(), limit: z.number() }), undefined, 200, page.extend({ q: z.string().optional(), source: z.enum(["all", "mine", "imported"]).optional(), sub: z.string().optional(), sort: z.enum(["newest", "oldest"]).optional() })),
   getVersion: route("getVersion", "get", "/items/{id}/versions/{v}", VersionSchema),
-  listReading: route("listReading", "get", "/reading", z.object({ items: z.array(ReadingEntrySchema), counts, total: z.number(), offset: z.number(), limit: z.number(), selected: z.string(), read_state: z.literal(true).describe("This server stores read state: each imported entry's readVersion is meaningful."), read_state_clear: z.literal(true).describe("Read state can be cleared: DELETE /reading/{sub}/{remoteId}/read, POST /reading/unread, and read_at on reads.") }), undefined, 200, page.extend({ limit: z.coerce.number().int().min(1).max(50).optional(), sub: z.string().optional(), kind: z.enum(["thread", "fragment"]).optional() })),
+  listReading: route("listReading", "get", "/reading", z.object({ items: z.array(ReadingEntrySchema), counts, total: z.number(), offset: z.number(), limit: z.number(), selected: z.string(), read_state: z.literal(true).describe("This server stores read state: each imported entry's readVersion is meaningful."), read_state_clear: z.literal(true).describe("Read state can be cleared: DELETE /reading/{sub}/{remoteId}/read, POST /reading/unread, and read_at on reads.") }), undefined, 200, page.extend({ limit: z.coerce.number().int().min(1).max(50).optional(), sub: z.string().optional(), kind: z.enum(["thread", "fragment"]).optional(), background: z.enum(["true"]).optional().describe("Only withdrawn items (the Background lens). Without it, withdrawn items are left out.") })),
   listImportedReading: route("listImportedReading", "get", "/reading/imported", z.object({ items: z.array(ImportedReadingEntrySchema), next: z.string().nullable().describe("Pass as cursor for the next page; null on the last page."), limit: z.number().int().positive() }), undefined, 200, z.object({ cursor: readingCursor.optional(), limit: z.coerce.number().int().min(1).max(IMPORTED_READING_MAX).optional() })),
   getImportedItem: route("getImportedItem", "get", "/imports/{sub}/{id}", ImportedItemSchema),
   getImportedHistory: route("getImportedHistory", "get", "/imports/{sub}/{id}/history", z.object({ current: z.number().int(), withdrawn: z.boolean(), changelog: z.array(z.object({ version: z.number().int(), at: z.string(), note: z.string().nullable(), pinned: z.boolean(), generated: z.boolean() })) })),
   getImportedVersion: route("getImportedVersion", "get", "/imports/{sub}/{id}/versions/{v}", z.object({ version: z.number().int(), content_md: z.string(), note: z.string().nullable(), pinned: z.boolean() })),
+  // Following a link out of an entry (0.49.0): the item fetched from its own blyg, which
+  // links in an entry name a blyg item, and the owner's private browsing path.
+  peekItem: route("peekItem", "get", "/peek", PeekItemSchema, undefined, 200, z.object({ origin: z.string(), id: z.string() })),
+  classifyLinks: route("classifyLinks", "post", "/peek/links", z.object({ links: z.array(z.object({ url: z.string(), target: z.union([z.object({ origin: z.string(), id: z.string() }), z.null()]) })) }), z.object({ urls: z.array(z.string().max(2048)).max(CLASSIFY_MAX) })),
+  listBrowse: route("listBrowse", "get", "/browse", collection(BrowseStepSchema), undefined, 200, page.extend({ trail: z.string().optional() })),
+  logBrowse: route("logBrowse", "post", "/browse", z.object({ id: z.number().int() }), z.object({ trail: z.string().min(8).max(64), parent_id: z.number().int().nullable().optional(), origin: z.string().min(1).max(2048), remote_id: z.string().min(1).max(256), version: z.number().int().positive().nullable().optional(), via: z.enum(BROWSE_VIA), title: z.string().max(400).nullable().optional() }), 201),
+  clearBrowse: route("clearBrowse", "delete", "/browse", ok, undefined, 200, z.object({ trail: z.string().optional() })),
   getUpdateState: route("getUpdateState", "get", "/update-state", z.record(z.string(), z.string())),
   getMentionSource: route("getMentionSource", "get", "/mentions/{id}/source", z.object({ holder: z.string().nullable(), subscription: z.union([SubscriptionSchema, z.null()]) })),
   listStaleThreads: route("listStaleThreads", "get", "/freshness", z.object({ items: z.array(ThreadFreshnessSchema) })),
@@ -136,5 +150,7 @@ export const routes = {
   // Read routes contributed by the extensions in this repository (extensions/catalog.ts).
   ...extensionRoutes,
 };
+// An identical file uploaded again to the same item returns the existing row (studio#7).
+routes.uploadMedia.responses[200] = { description: "Already attached", content: json(z.object({ id: z.string(), url: z.string(), mime: z.string(), duplicate: z.literal(true) })) };
 // The resolve/confirm operation has two successful response shapes and statuses.
 routes.createSubscription.responses[201] = { description: "Subscribed", content: json(subscribed) };

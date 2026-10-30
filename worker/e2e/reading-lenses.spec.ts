@@ -19,7 +19,7 @@ const api = (page: Page, method: string, path: string, body?: unknown) =>
     { method, path, body },
   );
 
-test('lenses filter by kind, keep themselves across screens, and show the two placeholders', async ({ page }) => {
+test('lenses filter by kind, keep themselves across screens, keep withdrawn posts to Background, and show the Smart Feed placeholder', async ({ page }) => {
   await login(page);
   const stamp = Date.now();
   const frag = (await api(page, 'POST', '/items', { content_md: `Lens fragment ${stamp}` })).json.id;
@@ -46,11 +46,24 @@ test('lenses filter by kind, keep themselves across screens, and show the two pl
   await expect(fragmentEntry).toBeVisible();
   await expect(page.locator('.reading-entry').filter({ hasText: `Lens thread ${stamp}` })).toHaveCount(0);
 
+  // Withdrawn posts are background: out of every other lens, and the only thing in this one.
+  await api(page, 'POST', `/items/${thread}/withdraw`, {});
+  await page.reload(); // the withdrawal came by API, not through the UI that would refresh its cache
+  const withdrawn = page.locator(`.reading-entry[data-key="own:${thread}"]`);
   await bar.getByRole('button', { name: 'Background' }).click();
-  await expect(page.locator('.lens-placeholder')).toContainText('with ignyr in the changelog');
+  await expect(page).toHaveURL(/lens=background/);
+  await expect(page.locator('.view-sub').first()).toContainText('Withdrawn posts');
+  await expect(withdrawn).toBeVisible();
+  await expect(withdrawn).toContainText('withdrawn');
+  await expect(page.locator(`.reading-entry[data-key="own:${frag}"]`)).toHaveCount(0);
+  await bar.getByRole('button', { name: 'All' }).click();
+  await expect(page.locator(`.reading-entry[data-key="own:${frag}"]`)).toBeVisible();
+  await expect(withdrawn).toHaveCount(0);
+  await bar.getByRole('button', { name: 'Threads' }).click();
+  await expect(withdrawn).toHaveCount(0);
   await bar.getByRole('button', { name: 'Smart Feed' }).click();
   await expect(page.locator('.lens-placeholder')).toContainText('Coming soon. Feed sorted and filtered by your AI agent.');
-  // The placeholders keep the screen's head: tabs, title and count, ＋.
+  // The placeholder keeps the screen's head: tabs, title and count, ＋.
   await expect(page.getByRole('group', { name: 'reading view' })).toBeVisible();
   await expect(page.getByRole('heading', { name: /^my blyg/ })).toContainText(/\d+ items/);
   await expect(page.getByRole('button', { name: 'subscribe', exact: true })).toBeVisible();
@@ -81,7 +94,7 @@ test('settings: a model per AI function from the manifest, other…, a reserved 
   try {
     await page.goto('/studio/settings');
     await expect(page.locator('.model-hint')).toContainText('models.json');
-    await expect(page.locator('.provider-keys li')).toHaveCount(4);
+    await expect(page.locator('.provider-keys li')).toHaveCount(5);
     // Workers AI (studio#8) is a binding, not a key; the e2e server binds none.
     await expect(page.locator('.provider-keys li').nth(3)).toContainText('Cloudflare Workers AI no binding (AI)');
     await page.locator('#ai_model_tk').selectOption('claude-sonnet-5-5');
@@ -102,4 +115,24 @@ test('settings: a model per AI function from the manifest, other…, a reserved 
   } finally {
     await api(page, 'PATCH', '/settings', { ai_model_tk: before.ai_model_tk, ai_model_changelog: before.ai_model_changelog, ai_model_feed: before.ai_model_feed, feed_prompt: before.feed_prompt });
   }
+});
+
+test('own items in the reading feed: stub ↗ opens a quoting stub, and fork is offered', async ({ page }) => {
+  await login(page);
+  const stamp = Date.now();
+  const own = (await api(page, 'POST', '/items', { content_md: `Own feed item ${stamp}` })).json.id;
+  await api(page, 'POST', `/items/${own}/publish`, {});
+  await page.goto('/studio/reading?sub=all');
+  const entry = page.locator('.reading-entry').filter({ hasText: `Own feed item ${stamp}` });
+  await expect(entry).toBeVisible();
+  await expect(entry.getByRole('button', { name: 'add to hopper' })).toBeVisible();
+  await entry.getByRole('button', { name: 'more actions' }).click();
+  await expect(page.getByText('fork', { exact: true })).toBeVisible();
+  await page.keyboard.press('Escape');
+  const created = page.waitForResponse((r) => r.url().endsWith('/api/items') && r.request().method() === 'POST');
+  await entry.locator(`[data-action="stub"][data-remote="${own}"]`).click();
+  const response = await created;
+  expect(response.status()).toBe(201);
+  expect(response.request().postDataJSON()).toMatchObject({ mode: 'response', source: { subscription_id: '~own', remote_id: own } });
+  await expect(page.locator('#md-input')).toHaveValue(`![[${own}]]\n\n`);
 });

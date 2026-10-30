@@ -18,6 +18,151 @@ not have its own repo until session 26.
 
 ---
 
+## 0.49.0 — 2026-10-29
+
+**Migrations: 0033** (`browse_log`, `link_probe`; both studio-private). Apply it to every D1 before deploying.
+
+- **Browse the thicket from the reader.** Every quoted layer in an entry, at
+  any depth, now says whose it is and opens in the reader; so does any ordinary
+  link that names a blyg item (the server looks at the page the link points to,
+  §5.8's `rel="alternate"` item document, and remembers the answer for a
+  week). An item of a blyg you hold opens at its own address; one you do not
+  hold opens at `/peek`, read from its origin with nothing stored, with a
+  *subscribe* button. A stub opened that way shows what it responds to, and
+  that opens too. Back retraces the descent one entry at a time, and a
+  breadcrumb shows the path.
+- **Browsing history.** The walk is logged privately (`browse_log`, a tree: each
+  step names the step it was reached from) and a *history* pane beside the
+  reader (a bottom sheet on a phone) shows this walk and earlier ones, with
+  *clear history*. Never on the wire or a public page.
+- **Public pages name every nested quote.** `injectNestedProvenance`: the
+  provenance line, with a link, now appears on quotes inside quotes too; an
+  absent `data-blyg-origin` takes the origin of the layer that baked it. Links
+  behave as ordinary links.
+- **Links that are not blyg items open in a new tab**, so reading your place is
+  kept; and opening an item of a blyg you do not subscribe to shows an alert,
+  *You're not subscribed to this blyg — subscribe?*, with the subscribe sheet
+  prefilled.
+- **Withdrawn posts are background.** The Background lens, a placeholder until
+  now, lists withdrawn posts (your own endcaps and the blygs you read); every
+  other lens, the sources counts and hopper timelines leave them out.
+  `GET /reading` takes `background=true`.
+- **A revised post leads with its latest changelog entry.** On a feed card for
+  an imported blyg item past its first version the line `V3: …` comes first,
+  read from the origin's changelog once the card is on screen (nothing new is
+  stored); with no note for that version it says `V3: No changelog entry
+  available`.
+- New operations: `peekItem`, `classifyLinks` (both `owner:read`), `listBrowse`
+  (`owner:read`), `logBrowse` and `clearBrowse` (`reading:state`).
+
+- **A stub's passage is selected in the editor's own preview.** The separate
+  chooser pane, which showed the quoted post a second time, is gone. Select
+  text inside the stub's quote in the preview and press *quote only this*; the
+  passage is written under that quote's `![[id]]`, whichever of several it is.
+  On a phone the button *select a passage in the preview* switches panes, and
+  the draft returns after the choice. *Quote another passage* adds a whole-post
+  quote after the cursor to select from, replacing *add as another quote* and
+  *replace the first quote*. Selections inside a nested quote, or while the
+  preview is out of step with the draft, offer nothing.
+
+## 0.48.2 — 2026-10-20
+
+**Migrations: none.** Implements protocol 0.4.
+
+- **A mention without the target's page names its item document** (decision
+  #85, [blygger-spec#17](https://github.com/blygger/blygger-spec/issues/17),
+  Robert Peake's follow-up). §15.2's sixth revision says a sender targets the
+  item's `page` when it holds one and otherwise the item document, expanded
+  from the target origin's `item` template or the default `items/{id}.json`;
+  it must never guess the `f/{id}/`·`t/{id}/` convention. The studio used to
+  guess, and called every item of unknown kind a fragment, which a 0.48.1
+  receiver refuses for a thread and Soapbox refuses always. Now a subscribed
+  origin's stored surface supplies the template with no network; for an
+  origin we do not subscribe to, the publish path reads `{origin}blyg.json`
+  once per origin with the bounded mention fetch, takes its `item` template
+  and its `webmention` endpoint, and falls back to the default address when
+  the manifest is missing or says nothing. The endpoint is recorded on the
+  outbound row, because delivery finds endpoints through subscriptions and an
+  item document carries no `rel="webmention"` for W3C discovery. Stubs,
+  transclusions, links, generation sources and forks all take the same path;
+  the re-send test on the target's version is unchanged. Mentions already
+  queued keep the target they were queued with.
+
+## 0.48.1 — 2026-10-20
+
+**Migrations: none.** Implements protocol 0.4.
+
+- **A Webmention may name a pinned version of an item** (decision #84,
+  [blygger-spec#17](https://github.com/blygger/blygger-spec/issues/17), Robert
+  Peake). §15.3 step 1 now tests a target by membership: it must resolve, by
+  the receiver's own published data, to one of its items. The endpoint
+  already accepted an item's page and its item document; it now also accepts
+  a pinned version's document (`items/{id}/v{n}.json`) and page
+  (`f/{id}/v{n}/`, `t/{id}/v{n}/`, under the version's authored kind). Each
+  resolves to the item, and the mention is recorded against the item, never
+  a version. A version that is not pinned, or an unknown id, is still 400.
+  So is a live page named under the wrong kind (a fragment at `t/{id}/`, a
+  thread at `f/{id}/`): the studio answers 404 there, so it is not an address
+  this receiver serves. A withdrawn item keeps its authored kind, and the
+  item document stays accepted for either kind.
+  The mount-prefix check stays, with a comment saying why it is a membership
+  test here (this studio never relocates its surface or emits an absolute
+  `page`) and what a client that does either must check instead.
+
+## 0.48.0 — 2026-10-19
+
+**Migrations: 0028, 0030, 0031, 0032** — apply them before deploying
+(`wrangler d1 migrations apply DB --remote`). 0031 backfills
+`version_media` so no live document changes at upgrade. Optional new secret
+`TYPESAFE_API_KEY`, needed only to use Jev as the change classifier.
+Implements protocol 0.4.
+
+- **Own items in the reading feed get stub ↗, add to hopper and fork**
+  (Venkat). Your own entries offered only edit and link post. A stub of your
+  own post quotes its live version and cites it with a same-origin `stub_of`,
+  which sends no mention (§15.2); a withdrawn post is cited without a quote.
+  The lineage sheet now offers these actions on your own posts and says what
+  differs.
+- **Local mentions on public pages** (Venkat). A fragment or thread page lists
+  this blyg's own published items that stub, quote or fork it, each linked
+  back, so a transclusion is walkable in both directions on your site. Like
+  Responses it is page chrome, never in a document, feed or hash; unlike
+  Responses it needs no opt-in, because every row is your own. Only live
+  versions count: a quote edited out, or a withdrawn quoter, leaves the list.
+- **Attachments per version** (studio#7, Aneesh Sathe; migration 0031). Each
+  published version records the attachments it showed. Removing an attachment
+  drops it from the next version only; earlier versions keep listing it and
+  its bytes keep serving. Before, an attachment appended below a post could
+  have its bytes deleted while a published version still listed it.
+- **Duplicate uploads return the existing file** (studio#7, Aneesh Sathe;
+  migration 0028). The same bytes, type and placement on the same item store
+  nothing new; `POST /api/media` answers `200` with `duplicate: true`.
+- **Optional change classifier** (Aneesh Sathe; migration 0030). Off unless
+  Settings → AI → change classifier names a decision model (Clef or Clef-flash
+  on Workers AI, or TypeSafe's Jev). It suggests `typo`, `minor` or `major`
+  for a new version in the publish dialog, `refresh` for a republish of the
+  same words with no model call, and can lead the change note with that word.
+  The label is kept privately with the version; readers see it only as words
+  in your note, and no client gives it meaning (decision #83).
+- **OPML import** (studio#63, Aneesh Sathe). Import subscriptions from an OPML
+  file in Sources, with a preview, per-feed choice, an optional add-to-blogroll,
+  and a per-row result. Imported feeds are fetched by the next background poll.
+- **Mentions show up as they arrive** (Aneesh Sathe; migration 0032). Verified
+  responses, and hiding or showing one, now refresh the public page at once
+  instead of after the edge cache expired (up to about six minutes), and the
+  studio's mention views re-read only when something changed.
+- **Newest Webmention responses first** (Kyle Mathews). Response groups on the
+  Webmentions page had come back in random id order.
+- **Label grammar: six edge cases fixed** (#70, Aneesh Sathe), found porting
+  the renderer to another client, among them a label escaped twice inside a
+  generated block and a backtick in one label disabling a later link.
+- **Studio on the phone** (Aneesh Sathe): no more random zoom on iOS (fields
+  under 16px, double-tap), compact reading cards, full-screen reading, and a
+  quieter composer and editor.
+- TanStack DB packages updated (Kyle Mathews).
+
+---
+
 ## 0.47.0 — 2026-10-17
 
 **Migrations: none.** No config change. Implements protocol 0.4, opened today.

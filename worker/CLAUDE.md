@@ -155,6 +155,14 @@ saying so.
 
 ## Status
 
+**0.49.0** (session 53, 2026-10-29): browse the thicket from the reader — every quoted layer at any depth and every link that names a blyg item opens in the reader (`src/ui/reader-links.tsx`), items of unsubscribed blygs are read from their origin at `/peek` (`src/peek.ts`, nothing stored), back retraces the descent, and the walk is logged privately (`browse_log`, `src/browse-log.ts`) and shown in a *history* pane; public pages give nested quotes a provenance line (`injectNestedProvenance`); a stub's passage is selected in the editor's preview. **Migration 0033** (`browse_log`, `link_probe`).
+
+**0.48.2** (session 52, 2026-10-20): a mention without the target's page names its item document (decision #85, blygger-spec#17) — `remoteTarget` in `mentions/send.ts` replaces `remotePermalink`: `page` when held, else `itemUrl` under the subscription's stored surface or, for an unsubscribed origin, a manifest read once per origin at enqueue (template and `webmention` endpoint, the endpoint stored on the `mentions_out` row); never `f/`·`t/`. No migration.
+
+**0.48.1** (session 52, 2026-10-20): mention targets by membership (decision #84, blygger-spec#17) — `targetItemId` accepts a pinned version's document and page, each resolving to the item, and refuses a live page under the wrong kind (keyed on `authoredKind`, so a withdrawn item's page still resolves). No migration.
+
+**0.48.0** (session 50, 2026-10-19): nine contributor PRs merged — Aneesh Sathe's #74 (OPML import), #75 (duplicate-upload guard, migration 0028), #77 (optional change classifier on decision models, 0030), #78 (six label-grammar edge cases), #79 (mentions and responses change domains, 0032), #80 (attachments per version, `version_media`, 0031), #81 (phone PWA fixes); Kyle Mathews' #76 (newest responses first) and #82 (TanStack DB bump). Merge fixes: a `rowid` tie-break on every attachment list (same-second uploads sorted randomly through the `version_media` join), both withdrawal mutants extended to the new `version_media` route, #77's settings e2e (five provider rows). Venkat's two features: own items in the reading feed get stub ↗ / hopper / fork (`~own` in `createResponseDraft`, same-origin `stub_of`, the lineage sheet's own-post note), and **local mentions** (`localMentionsSection` in `pages.ts`): a public page lists the blyg's own live items that stub, quote or fork it, chrome beside Responses, always on. `[[id]]` links join it once item o stores `links[]`.
+
 **0.47.0** (session 49, 2026-10-17): labels `[[id | text]]`/`![[id | text]]` (#70, 0.4 §10.1): the bracket grammar now lives once in `src/grammar.ts` (directive, link, reserved, inline and own-line directive builders, `label()`, `labelText()`, `linkSource()`), used by transclusion, directives, tk, fork-flatten, plain-text, stub-quote and the editor; `src/link-label.ts` holds the heading-or-excerpt text shared by the bake, search hits (`label`), the picker and *copy [[id]]*. Generated output is stripped of inline grammar (`stripGeneratedGrammar`, row 67) and the prompt says so; own-line directives in output still quote (#60). Comments cite 0.4 sections. No migration.
 
 **0.46.3** (session 49, 2026-10-17): 0.46.2 re-released. Its tag could not pass Check because GitLab rebuilt `release-v5.3.2` and deleted the two pinned conformance-suite digests (`manifest unknown`); both are re-pinned, recipe in `docs/oauth-interop.md`. The nodes run the same code.
@@ -327,6 +335,14 @@ was specified to do in both cases.
   withdrawn item counts as published, because its endcap and its versions are both out
   there. A stub thread is refused (409) rather than silently losing its citation; "clear
   stub" is the way through.
+- [ ] **The changelog AI judges the change: trivial / minor / major, in the note** (Venkat,
+  session 50, after Fable's #83 ruling dropped the `ignyr`-in-changelog idea). When AI change
+  notes are on, the same call that drafts the note also judges how big the change is and
+  leads the note with it in words, shown in the confirm dialog to edit or clear. The
+  change classifier (studio#77, Aneesh) already does this with a *decision* model
+  (`ai_model_classify`, `change_category_in_note`); this item gives the text-model path the
+  same result when no decision model is configured, sharing `composeNote`. Under #83 it is
+  prose only: no reader parses it, and the studio never routes on it, inbound or outbound.
 - [ ] **Bulk-update stale transcluded snapshots in a stub.** **Unblocked (decision #33):**
   freshness is direct and needs nothing new on the wire — fetch `{origin}items/{id}.json`
   and compare `version` to the reference's. Build the probe and the UI against that.

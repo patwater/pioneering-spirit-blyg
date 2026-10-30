@@ -10,7 +10,6 @@ This folder is the Worker entry point (`main` in `wrangler.jsonc`). It wraps the
 | 4 | `GET`/`PUT /api/items/:id/tk-provenance`: text and position-keyed provenance written in one statement, validated first, never storing the instruction | `provenance.ts`, `provenance-check.ts` |
 | 5 | Read-state sync: `read_state`/`read_version` on the reading list, `PUT /api/reading/:sub/:remoteId/read`, `POST /api/reading/read` | `readstate.ts` |
 | 6 | Legacy writes that Studio 0.9 removed with no aliases (`PUT /api/items/:id`, `POST /api/fork`, `POST /api/items/:id/pin`, `PUT /api/settings`, and the rest of the table in `worker/docs/upgrading-to-0.11.md`) are rewritten into their replacements, so Blygger Desktop keeps working. | `compat.ts` |
-| + | `POST /api/media` de-duplicates identical bytes on the same item; `DELETE /api/media/:id` removes an attachment (409 for the avatar or a file a pinned version uses) | `media.ts` |
 
 Extension 5's table, `ext_read_state`, is created on first use rather than by a migration, because `worker/migrations` belongs to Blygger Studio. The `ext_` prefix keeps it from colliding with a future upstream `read_state` table.
 
