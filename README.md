@@ -142,7 +142,9 @@ Blygger Desktop, Aneesh Sathe's native reading-and-writing app, is ported to Win
 
 **Connecting it.** Set the `BLYG_OWNER_TOKEN` secret (step 3), then enter your blyg's address and that token in the app's **Connect your blyg** screen. The app talks to this blyg through the owner API in `server-ext/`.
 
-**Burrow 0.13 and later** (Aneesh's own app, now on Windows too) needs no extension and no `BLYG_OWNER_TOKEN`: it expects a stock studio 0.47 or later. Choose **Sign in with the browser** in Burrow, or paste an API token made in Studio → More → Client access. `server-ext/` passes those tokens to the studio untouched. Do not give Burrow the `BLYG_OWNER_TOKEN`, because that token gets the old Desktop shapes, which Burrow reads as a server older than studio 0.9.
+**Burrow** (Aneesh's own app, on Windows and macOS) is the client to use now. It needs no extension and no `BLYG_OWNER_TOKEN`, because it speaks the studio's own API. Burrow 0.16 and later speak only API contract 5, which means studio 0.49.12 or later, and older Burrows cannot sync with this blyg, so keep Burrow current alongside the studio. Choose **Sign in with the browser** in Burrow, or paste an API token made in Studio → More → Client access. `server-ext/` passes those tokens to the studio untouched. Do not give Burrow the `BLYG_OWNER_TOKEN`, because that token gets the old Desktop shapes.
+
+**The older Windows port can no longer save posts.** Studio 0.49.8 and 0.49.9 made every item write name the revision it was made against and moved the API to camelCase fields, and the port's legacy writes, which `server-ext/src/compat.ts` rewrites, carry neither. It can still read through `server-ext/`. Use Burrow instead.
 
 **Testing the pair.** Aneesh's end-to-end suite drives the real client against two local copies of this Worker, which is the best check that the app and `server-ext/` still agree. Run it from a checkout of the app, pointing it at this repository:
 
@@ -159,6 +161,8 @@ npm install && npm test         # install rebuilds the studio app
 npm run migrate                 # only if worker/migrations gained files
 npm run deploy
 ```
+
+Some releases add a one-time data step that runs after the migrations and before the deploy, and their entry in `worker/CHANGELOG.md` says so. Studio 0.49.10's is `npm run repair-import-dates`, which normalizes the dates stored on imported items. It is safe to run more than once, but it reads every imported item, so it is not part of the regular deploy command: those reads count against D1's daily limit on the free plan.
 
 The script follows release tags rather than the tip of `main`, because Studio's own update notice compares against its releases. It checks the fetched release before it deletes anything in `worker/`, and it records the new tag and commit in `upstream.json`. Each release states its migrations and any `/api` changes in `worker/CHANGELOG.md`; read those before deploying, because `server-ext/compat.ts` only translates the routes that 0.9 removed.
 
