@@ -12,8 +12,8 @@ import {
 } from '@tanstack/react-router';
 import { Layout, basepath } from './components.tsx';
 import { Compose, EditorPage } from './authoring.tsx';
-import { ReadingArticle, ReadingPage } from './reading.tsx';
-import { PeekPage } from './peek.tsx';
+import { ReadingArticle, ReadingPage, loadArticleEntry } from './reading.tsx';
+import { PeekPage, loadPeek } from './peek.tsx';
 import { AuthorizationsPage } from './authorizations.tsx';
 import { SettingsPage } from './settings.tsx';
 import {
@@ -25,18 +25,24 @@ import {
 } from './catalog.tsx';
 import {
   itemDetail,
-  hopperDetail,
+  hopperInfo,
   readingView,
   readingKey,
+  readingSummaryView,
   LENSES,
   type Lens,
   queryClient,
   listViews,
   preloadView,
   preloadDetail,
+  preloadHopperPreviews,
+  preloadHopperInfos,
+  preloadHopperManagement,
+  preloadMentions,
+  preloadStaleThreads,
+  preloadSignals,
 } from './data.ts';
 import { Button } from './components.tsx';
-import type { CachedResponse } from './revision-query.ts';
 import { SyntaxPage } from './syntax.tsx';
 import { MorePage } from './more.tsx';
 import { UpdatesPage } from './updates.tsx';
@@ -49,7 +55,10 @@ import { applyCachedTheme } from './theme.ts';
 // repaint it once they load (see theme.ts).
 applyCachedTheme();
 const rootRoute = createRootRoute({
-  loader: () => preloadView(listViews.settings),
+  loader: () => Promise.all([
+    preloadView(listViews.settings),
+    preloadView(listViews.updates),
+  ]),
   pendingComponent: () => <p>Loading Studio…</p>,
   errorComponent: ({ error }) => (
     <div role="alert">
@@ -136,33 +145,35 @@ const reading = createRoute({
   loader: async ({ deps }) => {
     if (deps.hopper) {
       await Promise.all([
-        preloadDetail(hopperDetail(deps.hopper), 'Hopper'),
+        preloadDetail(hopperInfo(deps.hopper), 'Hopper'),
+        preloadView(readingSummaryView(readingKey('hopper:' + deps.hopper, deps.lens))),
+        ...(deps.lens === 'smart' ? [] : [preloadView(readingView(readingKey('hopper:' + deps.hopper, deps.lens), deps.offset))]),
         preloadView(listViews.subscriptions),
         preloadView(listViews.hoppers),
         preloadView(listViews.signals),
       ]);
+      const summary = readingSummaryView(readingKey('hopper:' + deps.hopper, deps.lens)).toArray[0];
+      if (deps.offset > 0 && summary && deps.offset >= summary.total) throw redirect({ to: '/reading', search: { hopper: deps.hopper, offset: 0, ...(deps.lens ? { lens: deps.lens } : {}) } });
       return;
     }
-    // The feed and the sources list (whose counts come from the first page
-    // of "all") both read "all". The placeholder lenses read the unfiltered
-    // key too, for the count in their header.
+    // The feed and sources list share a summary under the selected lens.
+    // The sources list needs counts without loading a feed page.
     const sub = deps.sub ?? 'all';
     const offset = deps.view === 'sources' ? 0 : deps.offset;
     const key = readingKey(sub, deps.lens);
     const view = readingView(key, offset);
     await Promise.all([
-      preloadView(view),
+      preloadView(readingSummaryView(key)),
+      ...(deps.view === 'sources' ? [] : [preloadView(view)]),
       preloadView(listViews.subscriptions),
       preloadView(listViews.hoppers),
-      preloadView(listViews.signals),
+      ...(deps.view === 'sources' ? [] : [preloadView(listViews.signals)]),
+      ...(deps.view === 'sources' && deps.lens !== 'background' && deps.lens !== 'smart'
+        ? [preloadHopperInfos()]
+        : []),
     ]);
     if (deps.sub === undefined || deps.lens === 'smart') return;
-    const page = queryClient
-      .getQueriesData<
-        CachedResponse<import('../../sdk/dist/browser.js').ListReadingResponses[200]>
-      >({ queryKey: ['reading', key] })
-      .map(([, data]) => data?.data)
-      .find((data) => data?.offset === offset);
+    const page = readingSummaryView(key).toArray[0];
     if (
       page &&
       (page.selected !== sub || (offset > 0 && offset >= page.total))
@@ -185,12 +196,15 @@ const reading = createRoute({
 const article = createRoute({
   getParentRoute: () => rootRoute,
   path: '/reading/$sub/$id',
-  loader: () =>
-    Promise.all([
+  loader: async ({ params }) => {
+    await Promise.all([
       preloadView(listViews.subscriptions),
       preloadView(listViews.hoppers),
       preloadView(listViews.signals),
-    ]),
+    ]);
+    // The article keeps its inline failure and held-item fallback UI.
+    await loadArticleEntry(params.sub, params.id).catch(() => undefined);
+  },
   component: () => {
     const { sub, id } = article.useParams();
     return <ReadingArticle key={`${sub}/${id}`} sub={sub} id={id} />;
@@ -207,6 +221,11 @@ const peek = createRoute({
     origin: typeof search.origin === 'string' ? search.origin : '',
     id: typeof search.id === 'string' ? search.id : '',
   }),
+  loaderDeps: ({ search }) => search,
+  loader: ({ deps }) => Promise.all([
+    preloadView(listViews.subscriptions),
+    loadPeek(deps.origin, deps.id).catch(() => undefined),
+  ]),
   component: () => {
     const { origin, id } = peek.useSearch();
     return <PeekPage key={`${origin}/${id}`} origin={origin} id={id} />;
@@ -242,14 +261,14 @@ const subs = createRoute({
 const hoppers = createRoute({
   getParentRoute: () => rootRoute,
   path: '/hoppers',
-  loader: () => preloadView(listViews.hoppers),
+  loader: () => Promise.all([preloadHopperPreviews(), preloadView(listViews.subscriptions)]),
   component: HoppersPage,
 });
 const hopper = createRoute({
   getParentRoute: () => rootRoute,
   path: '/hoppers/$id',
   loader: ({ params }) =>
-    Promise.all([preloadDetail(hopperDetail(params.id), 'Hopper'), preloadView(listViews.subscriptions)]),
+    Promise.all([preloadHopperManagement(params.id), preloadView(listViews.subscriptions)]),
   component: () => {
     const { id } = hopper.useParams();
     return <HopperPage id={id} />;
@@ -258,25 +277,21 @@ const hopper = createRoute({
 const mentions = createRoute({
   getParentRoute: () => rootRoute,
   path: '/mentions',
-  loader: () =>
-    Promise.all([
-      preloadView(listViews.inbound),
-      preloadView(listViews.outbound),
-      preloadView(listViews.items),
-    ]),
+  loader: preloadMentions,
   component: MentionsPage,
 });
 // Quotes that have fallen behind their sources, stalest first (0.23.0).
 const updates = createRoute({
   getParentRoute: () => rootRoute,
   path: '/updates',
-  loader: () => preloadView(listViews.items),
+  loader: preloadStaleThreads,
   component: UpdatesPage,
 });
 // Thumbs and the private interaction log (0.25.0).
 const signalsPage = createRoute({
   getParentRoute: () => rootRoute,
   path: '/signals',
+  loader: preloadSignals,
   component: SignalsPage,
 });
 const fork = createRoute({

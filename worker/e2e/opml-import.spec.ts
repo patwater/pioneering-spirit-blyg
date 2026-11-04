@@ -34,9 +34,9 @@ const OPML = `<?xml version="1.0" encoding="UTF-8"?>
 </opml>`;
 
 const subscription = (url: string) => ({
-  id: `sub-${new URL(url).hostname}`, kind: 'rss', origin: url, feed_url: url, title: new URL(url).hostname, status: 'active',
-  last_poll_at: null, fail_count: 0, last_index_sync_at: null, created: '2026-10-18T00:00:00Z',
-  title_follows_source: true, in_blogroll: false, flags: [],
+  id: `sub-${new URL(url).hostname}`, kind: 'rss', origin: url, feedUrl: url, title: new URL(url).hostname, status: 'active',
+  lastPollAt: null, failCount: 0, lastIndexSyncAt: null, created: '2026-10-18T00:00:00Z',
+  titleFollowsSource: true, inBlogroll: false, flags: [],
 });
 
 test('an OPML file is previewed, imported one feed at a time, and summarised', async ({ page }) => {
@@ -56,9 +56,9 @@ test('an OPML file is previewed, imported one feed at a time, and summarised', a
     try {
       const host = new URL(body.url).hostname;
       if (host === 'alpha.example' || host === 'beta.example') return await route.fulfill({ status: 201, json: subscription(body.url) });
-      if (host === 'gamma.example' && gammaTries++ === 0) return await route.fulfill({ status: 429, headers: { 'Retry-After': '1' }, json: { error: 'API work budget exceeded' } });
-      if (host === 'gamma.example') return await route.fulfill({ status: 409, json: { error: 'already subscribed to Gamma' } });
-      return await route.fulfill({ status: 422, json: { error: 'could not resolve this URL to a blyg or a feed', tried: [body.url] } });
+      if (host === 'gamma.example' && gammaTries++ === 0) return await route.fulfill({ status: 429, headers: { 'Retry-After': '1' }, json: { code: 'rate-limit', message: 'API work budget exceeded' } });
+      if (host === 'gamma.example') return await route.fulfill({ status: 409, json: { code: 'conflict', message: 'already subscribed to Gamma' } });
+      return await route.fulfill({ status: 422, json: { code: 'unprocessable', message: 'could not resolve this URL to a blyg or a feed', details: { tried: [body.url] } } });
     } finally {
       inFlight--;
     }
@@ -66,7 +66,7 @@ test('an OPML file is previewed, imported one feed at a time, and summarised', a
   await page.route('**/api/subscriptions/sub-*', async (route) => {
     if (route.request().method() !== 'PATCH') return route.fallback();
     patches.push(route.request().url());
-    await route.fulfill({ json: { ...subscription('https://x.example/'), in_blogroll: true } });
+    await route.fulfill({ json: { ...subscription('https://x.example/'), inBlogroll: true } });
   });
 
   await page.locator('#opml-open').click();
@@ -116,7 +116,7 @@ test('the blogroll box adds each new subscription with PATCH, and a malformed fi
   await page.route('**/api/subscriptions/sub-*', async (route) => {
     if (route.request().method() !== 'PATCH') return route.fallback();
     patched.push(route.request().postDataJSON());
-    await route.fulfill({ json: { ...subscription('https://one.example/feed'), in_blogroll: true } });
+    await route.fulfill({ json: { ...subscription('https://one.example/feed'), inBlogroll: true } });
   });
 
   await page.locator('#opml-open').click();
@@ -131,5 +131,30 @@ test('the blogroll box adds each new subscription with PATCH, and a malformed fi
   await sheet.getByRole('checkbox', { name: 'add these to my blogroll' }).check();
   await sheet.getByRole('button', { name: 'import 1 feed' }).click();
   await expect(sheet.locator('.opml-summary')).toContainText('1 added · 0 already subscribed · 0 failed');
-  expect(patched).toEqual([{ in_blogroll: true }]);
+  expect(patched).toEqual([{ inBlogroll: true }]);
+});
+
+test('a failed final refresh preserves the import summary and leaves the running phase', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await login(page);
+  await page.goto('/studio/reading?view=sources');
+  await page.waitForLoadState('networkidle');
+  await page.route('**/api/changes', route => route.fulfill({ status: 503,
+    json: { code: 'internal', message: 'subscription refresh unavailable' } }));
+  await page.route('**/api/subscriptions**', async route => {
+    if (route.request().method() === 'POST') return route.fulfill({ status: 201, json: subscription('https://one.example/feed') });
+    return route.fulfill({ status: 503, json: { code: 'internal', message: 'subscription refresh unavailable' } });
+  });
+  await page.locator('#opml-open').click();
+  const sheet = page.getByRole('dialog', { name: 'import OPML' });
+  await sheet.locator('#opml-file').setInputFiles({ name: 'one.opml', mimeType: 'text/x-opml',
+    buffer: Buffer.from('<opml version="2.0"><body><outline text="One" xmlUrl="https://one.example/feed"/></body></opml>') });
+  await sheet.getByRole('button', { name: 'import 1 feed' }).click();
+  await expect(sheet.locator('.opml-summary')).toContainText('1 added · 0 already subscribed · 0 failed');
+  await expect(sheet.getByRole('alert')).toContainText('subscription refresh unavailable');
+  await expect(sheet.getByRole('button', { name: 'stop after this feed' })).toHaveCount(0);
+  await sheet.getByRole('button', { name: 'done', exact: true }).click();
+  await expect(sheet).toHaveCount(0);
+  expect(errors).toEqual([]);
 });

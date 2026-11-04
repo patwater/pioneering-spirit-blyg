@@ -18,6 +18,304 @@ not have its own repo until session 26.
 
 ---
 
+## 0.52.0 — Collection read batches and smaller Mentions loads
+
+Mentions opens with 10 groups and 10 receipts per group. Each list keeps its
+own cursor and full counts. Corrected page sizes avoid extra continuation
+requests, and simultaneous freshness checks share one pending read.
+
+Studio batches independent reads by collection operation while retaining the
+existing endpoints, query validation, permissions, and work budgets. Each child
+keeps its own status and retry hints. Within each server read batch, ready SQL
+and admission statements share D1 calls without a timer window or query rewrites.
+Logical read charges stay unchanged. Batch results are not cached, and a mutation
+starts a fresh revision check.
+
+Browser batches dispatch in microtasks, so they do not wait for timers that can
+be throttled in background tabs.
+
+The group query aggregates counts and uses indexed winner lookups instead of
+ranking every receipt with window functions. No rollup table or trigger is added.
+
+Private contract **5.3.0** (additive `POST /read-batch`); SDK **0.9.0**.
+Protocol version unchanged (`"0.4"`).
+
+**Subscribing to a collection no longer needs your own collection feeds on**
+(Aneesh Sathe, #112). Pasting the page or feed URL of another blyg's public
+collection now proposes a collection subscription on every node; the
+`hopper_feeds` setting governs only publishing this node's own collection feeds.
+API clients that want the whole blyg send `wholeBlyg: true`.
+
+**Two lookups no longer read whole tables** (#113, reported by patwater).
+Resolving an imported item by id alone, and listing each reading entry's
+collections, each scanned a table on free-plan D1, where the reads count against
+a daily limit. Both now use an index. (The reader inbox's own ordering index
+shipped in 0.49.12; nodes older than that should upgrade for it.)
+
+**Migrations:** **0040** (one covering expression index on `mentions_in`) and
+**0041** (indexes on `imported_items(remote_id)` and `hopper_items` membership).
+Indexes only. Apply before deploying.
+
+## 0.51.0 — Faster Studio actions, paged Mentions
+
+**Buttons act at once** (Kyle Mathews, #111). Saving, read marks, thumbs and
+other row actions now change the row you are looking at straight away, and the
+server's answer confirms it. They used to wait for the server and then reload
+whole collections, which is why many buttons felt slow. A write that fails puts
+the row back. Rapid clicks on one row are applied in order. Each view now loads
+only what it shows: the editor asks for one item, Updates only the stale ones.
+
+**Mentions opens quickly on a busy blyg.** It loads 25 posts at a time, each
+with its first 10 mentions, and "load more" fetches the rest. Totals are still
+complete. Source cards load as they scroll into view and never hold up
+navigation.
+
+Private contract **5.2.0** (additive: `GET /mention-groups`,
+`GET /mentions/summary`, `GET /mentions?targetItemId=…`); SDK **0.8.0**.
+TanStack DB 1.0.0-rc.1.2. Protocol version unchanged (`"0.4"`).
+
+**Migrations:** **0039** (one index on `mentions_in`, no data change). Apply
+before deploying.
+
+## 0.50.0 — Hopper feeds, and two quoting fixes
+
+**Hopper feeds** (Aneesh Sathe, #84; spec 0.4 §16.12, decision #86). Off until
+you turn on **Settings → Network → hopper feeds**. With it on:
+
+- Each **public** hopper gets an RSS feed at `{mount}/h/{slug}/feed.xml`. The
+  feed is the whole list, newest-joined first. Each entry is an excerpt that
+  links to the member's own page, with `<source>` naming the member's blyg.
+  It carries no `blyg:` markup, so blyg-aware readers never take it for a
+  second feed of your blyg. The hopper page links to it.
+- Your manifest gains a `hoppers` list naming your public hoppers. A private
+  hopper is never listed, and its feed answers 404.
+- **Subscribing**: paste a hopper's page or feed URL from another blyg, and
+  the subscribe sheet offers that hopper, with "whole blyg instead" beside it.
+  A hopper subscription lives next to a whole-blyg subscription to the same
+  blyg. Its entries are summaries and links: they are never quoted or used as
+  a source, and they never stand in for the blyg's own citation. An entry that
+  leaves the hopper leaves your reading at the next poll. If the blyg stops
+  listing the hopper, the subscription pauses and says so. It never turns into
+  a whole-blyg subscription on its own.
+- Your feed, item documents and archive index are byte-identical with the
+  setting on or off.
+
+**Partial quotes follow CommonMark's blockquote** (Aneesh Sathe, #106, fixes
+#104; decision #76). A line written directly under a quote, without its own
+`>`, is now part of the quoted passage, as it is when the quote renders. It
+used to publish as your own words. An unprefixed `![[id]]` line still ends the
+quote. If you have a draft that relied on the old reading, add a blank line
+after the quote.
+
+**Quotes in generated text with provenance** (Aneesh Sathe, #107, fixes #105;
+decision #60). An own-line `![[id]]` in the output of a generated block that
+records its sources is now quoted at publish, inside the generated block. It
+used to stay literal text, while the publish warning said it had been quoted.
+The thread preview does the same.
+
+Private contract **5.1.0** (additive: `Subscription.hopperFeedUrl`, hopper
+subscribe proposals, `wholeBlyg` on `createSubscription`, the `hopperFeeds`
+setting); SDK **0.7.0**. Protocol version unchanged (`"0.4"`).
+
+**Migrations:** **0038** (`subscriptions.hopper_feed`, a unique index on hopper
+subscriptions, the subscriptions change trigger recreated). Apply before
+deploying. 0037 is left unused on purpose. It is reserved for a later
+migration, and applying 0038 first is safe.
+
+## 0.49.12 — Host-root `/api` alias for mounted nodes
+
+0.49.7 moved REST to `{mount}/api` with no alias. A node mounted at a path
+(`/blyg` is one of the two recommended mounts) broke every tool still calling
+host-root `/api`. The old address answers again, for two releases: requests to
+`/api/…` on a mounted node are served as `{mount}/api/…`, with
+`Deprecation: true` and a `Link: <…{mount}/api>; rel="successor-version"`
+header. Bearer tokens issued for the old `{origin}/api` audience are accepted
+on both addresses, and a stored grant for it can still refresh. Discovery
+(capabilities, OpenAPI `servers`, resource metadata, `data-api-base`) names only
+the mounted address. Root-mounted nodes are unchanged. Move tools to
+`{mount}/api` before the alias is removed.
+
+**Migrations:** none.
+
+## 0.49.11 — Digest media URLs
+
+New uploads use media/{id}/{sha256}.{ext}, including unattached files. A verified
+digest URL retained by a published version uses immutable public caching. Legacy
+URLs, current avatars, and later attachments without a published reference keep
+ETag revalidation. Private bytes stay private and no-store.
+
+Discarding a draft preserves media rows used by published posts or the current
+avatar. Digest URL text wraps in Studio attachment cards on phones. Private API
+preflight explicitly sends no-store. Existing duplicate uploads retain their URL
+and revision, including legacy URLs.
+
+**Migrations:** None. Existing media URLs and publication bytes need no rewrite.
+This release uses private contract5.0.0 and SDK0.6.0 from0.49.10.
+
+## 0.49.10 — Bounded cursor pages
+
+Private collection reads use opaque cursor pages. Studio loads bounded item,
+history, hopper, signal and browse windows through the native TanStack pager.
+Item and hopper detail no longer include whole historical/member collections.
+Named summary reads provide counts. Relevant mutations expire continuations
+with409 cursor-expired so clients restart the acquisition.
+
+This is a hard private contract cutover to5.0.0 and SDK0.6.0. Update clients and
+API together. HTTP offset, imported-feed next, embedded history and hopper preview
+inputs are removed. Public protocol representations do not change.
+
+Imported created/updated dates normalize to ISO8601 UTC at storage. Invalid dates
+become null. Existing timestamps need the bundled resumable metadata repair before
+deployment. It preserves content, versions, observation times and read state.
+Finish pending writes and generation, then avoid edits through repair/deployment.
+
+**Migrations:**0036_cursor_generations.sql adds interactions/browse change domains
+and cursor indexes. After schema migration, run
+`node --import tsx scripts/normalize-import-dates.ts --remote` for source installs,
+or `node normalize-import-dates.mjs --remote` for Worker archives, before deploying.
+The current updater and deploy-all run this step. Older running updaters need the
+explicit command after declining their deploy prompt. See README upgrade steps.
+
+## 0.49.9 — Explicit private resources
+
+The private API and SDK use camelCase fields and explicit resources. Imported
+metadata contains structured values, retains unknown remote members, and falls
+back per damaged stored column. Item kind stays fragment or thread after
+withdrawal, with publication state in status. Media URLs are absolute and
+include the deployment mount. Private errors use code, message, and optional
+details. Studio and SDK0.5.0 use private contract4.0.0 together.
+
+This is a hard private API cutover. Update clients with the server. Storage and
+public Blygger protocol formats stay intact, including legacy media URLs.
+Finish pending writes and generation before upgrading, and avoid edits until
+deployment finishes.
+
+**Migrations:** none in this release. Earlier stack releases include0035.
+
+## 0.49.8 — Conditional item writes
+
+Item reads and creation return a private revision. Item commands require
+`expectedRevision` and return the resulting revision. Stale commands return409
+with `code: "revision-conflict"`. Text, generation provenance, attachment
+membership, and publication changes share the same conditional transition.
+Studio keeps the revision tied to its accepted text and serializes its writes.
+Private contract version:3.0.0. SDK version:0.4.0.
+
+**Migrations:**0035 adds the private revision and updates private item polling
+invalidation. Finish pending writes, including generation, before this upgrade.
+Avoid edits until deployment finishes. Old in-flight writes do not participate
+in the new revision checks.
+
+## 0.49.7 — Mounted private API
+
+REST now lives at `{mount}/api`. Set SDK base URLs to that full address. Mounted nodes remove host-root `/api`; replace old REST tokens or request new OAuth consent. MCP audiences stay the same. Private contract version: 2.0.0. SDK version: 0.3.0.
+
+**Migrations:** none.
+
+## 0.49.6 — 2026-10-31
+
+**Migrations: none.**
+
+- REST and MCP invoke shared domain operations after identity verification.
+  The shared runner applies scopes, conditional permissions, live extension
+  gates, validation, and work budgets. MCP no longer creates internal REST
+  requests or multipart forms.
+- Both upload adapters supply the same decoded media bytes and metadata.
+  Existing duplicate handling, published-item permissions, rollback, retained
+  bytes, publication warnings, and background effects remain part of the
+  shared operations.
+- Server extension read handlers receive a domain context and validated input,
+  and return typed outcomes. See `docs/extensions.md` for the callback change.
+  Private API payloads, paths, and generated SDK stay stable in this part.
+
+## 0.49.5 — 2026-10-31
+
+**Migrations: none.**
+
+- Authenticated clients can read `/api/capabilities` for canonical endpoints,
+  the contract version, available operations, and extension state. Each grant
+  can inspect its own capabilities, including a grant with only `reading:state`.
+- REST and MCP use each operation's declared scopes and conditional permission
+  rules. MCP discovery filters disabled and uncompiled extensions. Execution
+  checks current feature state again. Static OpenAPI and SDKs retain all routes.
+- MCP hints describe effects rather than HTTP verbs. Live previews spend the
+  read budget. Link classification retains read authority and spends the write
+  budget because it can fetch remote pages and store its probe cache.
+
+## 0.49.4 — 2026-10-31
+
+**Migrations: 0034** (`versions.kind`, nullable for unresolved legacy rows).
+
+- Normal empty and media-only publications retain their authored kind. They can
+  be pinned, restored, forked, and compared without being mistaken for withdrawal
+  endcaps. Studio history offers the same pin and restore actions.
+- New publications and withdrawals store explicit version state. The migration
+  backfills facts supported by retained data and leaves ambiguous old rows
+  unclassified. Those rows keep each reader's existing legacy interpretation.
+  Frozen publication fields remain unchanged. Old Workers can still insert rows
+  during the migration/deploy window.
+- Authored-kind reads use stored version state across private reading, public
+  pages, feeds, provenance, forks, and mentions. Publishing-history ordering
+  includes explicit empty publications and excludes withdrawals.
+
+## 0.49.3 — 2026-10-31
+
+**Migrations: none.**
+
+- Public JSON, OPML, CSS, Studio assets, and legacy media URLs provide ETags
+  and conditional GET/HEAD responses. JSON validators cover all emitted data,
+  including changelog pin flags and mutable author/origin metadata on pins.
+  Legacy random-ID media URLs revalidate rather than promise immutable caching.
+- CORS and cache policy apply to actual OAuth responses, public wire errors,
+  explicit conditional preflight, and bearer-authenticated private media reads.
+  Browser clients can inspect validators, retry delays, supported methods,
+  returned locations, and authentication challenges where CORS permits reads.
+- Authorization endpoints exclude CORS on canonical and trailing-slash routes,
+  including preflight. Early private size-limit errors and MCP origin denials
+  have an explicit no-store policy. Native OAuth discovery retains its public
+  cache lifetime, and signing-key metadata has an explicit revalidation policy.
+- Wrong-method responses include owner grant administration, schema delivery,
+  and MCP in their Allow headers. Enabled Webmention reports POST as its method;
+  disabled Webmention remains absent.
+
+## 0.49.2 — 2026-10-31
+
+**Migrations: none.**
+
+- Restoring an item version restores its attachment membership with its text.
+  Discard restores detached published attachments and excludes unpublished
+  additions. Earlier versions retain their media and bytes. A stale restore
+  returns 409 without changing text or membership.
+- A provenance-only PATCH guards the stored text used to validate its TK scopes.
+  A concurrent text change returns 409. A PATCH supplying replacement text and
+  matching provenance keeps its existing behavior.
+
+## 0.49.1 — 2026-10-30
+
+**Migrations: none.**
+
+Two contributed Studio changes (Kyle Mathews' #85 and #86) and two end-to-end test fixes. No API, contract or data changes.
+
+- **The studio title links to the reading page** (#86). The site name and
+  "blygger studio" in the top bar are now a link, with a visible keyboard focus
+  outline.
+- **Preloads and polling use TanStack Query's own machinery** (#85). Hovering or
+  focusing a Studio link now completes the preload: route loaders warm hopper
+  previews, mention source details and reader targets before the page renders.
+  The custom polling scheduler and its per-component hooks are gone; live
+  collections opt into Query's 15-second polling with visibility handling, and
+  Settings and Authorizations refresh on return, reconnect or write without a
+  timer. Reader links (quoted layers, body links, breadcrumbs, history, peek
+  sources) are router links, so they open in new tabs and preload on intent.
+  Hover and focus do not change the browsing trail or log a visit. DB and
+  React DB move to 1.0.0-rc.1, Query Collection to 1.5.0 and Query Core to
+  5.105.0; DB is now an explicit dependency.
+- **`AGENTS.md` is the project instructions file** (#85), with `CLAUDE.md`
+  kept as a symlink to it.
+- Tests: `reader-browse` waits for the feed to end the walk before re-entering
+  an item, and `generated-highlight` runs under the per-test edge identity and
+  resets its setting in `afterEach`.
+
 ## 0.49.0 — 2026-10-29
 
 **Migrations: 0033** (`browse_log`, `link_probe`; both studio-private). Apply it to every D1 before deploying.

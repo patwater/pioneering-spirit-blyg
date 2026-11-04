@@ -13,6 +13,7 @@
     "typecheck": "npm run typecheck --prefix worker && cd server-ext && ../worker/node_modules/.bin/tsc -p tsconfig.json",
     "migrate:local": "wrangler d1 migrations apply pioneering-spirit-blyg --local",
     "migrate": "wrangler d1 migrations apply pioneering-spirit-blyg --remote",
+    "repair-import-dates": "worker/node_modules/.bin/tsx worker/scripts/normalize-import-dates.ts --remote",
     "predeploy": "npm run build --prefix worker && node tools/build-archive.mjs",
     "deploy": "wrangler deploy",
     "blyg": "node tools/blyg.mjs",

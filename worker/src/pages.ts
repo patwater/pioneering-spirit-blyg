@@ -554,6 +554,8 @@ export interface PageMeta {
    * the W3C-standard *source page* to the document it actually checks.
    */
   alternateJson?: string;
+  /** Absolute manifest URL for `<link rel="blyg">` (§12.1 step 4); hopper pages carry it while hopper feeds are on (§12.1 step 7). */
+  blygManifest?: string;
   /**
    * Absolute URL of this deployment's Webmention endpoint — `<link
    * rel="webmention">` (§2.3.1). W3C discovery is how a *non-blyg* sender
@@ -951,7 +953,7 @@ export function layout(title: string, body: string, mount: string, meta: PageMet
 <title>${escapeHtml(title)}</title>
 ${metaTags({ ...meta, ogTitle: meta.ogTitle ?? title })}<link rel="stylesheet" href="${mount}/style.css">
 <link rel="alternate" type="application/rss+xml"${feedTitle} href="${escapeHtml(feedHref)}">
-${meta.webmention ? `<link rel="webmention" href="${meta.webmention}">\n` : ""}${meta.alternateJson ? `<link rel="alternate" type="application/json" href="${meta.alternateJson}">\n` : ""}${meta.canonical ? `<link rel="canonical" href="${meta.canonical}">\n` : ""}${meta.hasBlogroll ? `<link rel="blogroll" href="${mount}/blogroll.opml">\n` : ""}</head>
+${meta.webmention ? `<link rel="webmention" href="${meta.webmention}">\n` : ""}${meta.alternateJson ? `<link rel="alternate" type="application/json" href="${meta.alternateJson}">\n` : ""}${meta.canonical ? `<link rel="canonical" href="${meta.canonical}">\n` : ""}${meta.blygManifest ? `<link rel="blyg" href="${escapeHtml(meta.blygManifest)}">\n` : ""}${meta.hasBlogroll ? `<link rel="blogroll" href="${mount}/blogroll.opml">\n` : ""}</head>
 <body>
 ${body}
 ${body.includes("blyg-tk-gen") || body.includes("version-line") ? `<script>${GEN_INFO_SCRIPT}</script>\n` : ""}${body.includes("<article") ? `<script>${EMBED_SCRIPT}</script>\n` : ""}</body>
@@ -1033,9 +1035,8 @@ export async function pageTop(db: D1Database, settings: Settings, mount: string,
  */
 async function masthead(db: D1Database, settings: Settings, mount: string, loadedAvatar?: MediaRow | null): Promise<string> {
   const bits: string[] = [];
-  // The avatar's URL is its `r2_key` (`media/{id}.{ext}`), not `media/{id}` —
-  // the `/media/:file` route matches on the full key including the extension,
-  // so an id alone 404s. Same lookup `mediaHtml` does for item images.
+  // Use the complete stored key, including any digest and extension.
+  // An id alone is not a media URL. Item images use the same lookup.
   const avatar = loadedAvatar !== undefined ? loadedAvatar : settings.avatar_media_id ? await getMedia(db, settings.avatar_media_id) : null;
   if (avatar) {
     bits.push(`<img class="avatar" src="${mount}/${avatar.r2_key}" alt="" width="48" height="48">`);
@@ -1203,7 +1204,7 @@ export async function transclusionProvenance(db: D1Database, transclusions: Tran
         .prepare(
           `SELECT ii.kind AS kind, ii.page AS page, s.title AS title
            FROM imported_items ii JOIN subscriptions s ON s.id = ii.subscription_id
-           WHERE ii.remote_id = ? AND s.origin = ?`,
+           WHERE ii.remote_id = ? AND s.origin = ? AND s.hopper_feed IS NULL`,
         )
         .bind(t.id, t.origin)
         .first<{ kind: string; page: string | null; title: string }>();
