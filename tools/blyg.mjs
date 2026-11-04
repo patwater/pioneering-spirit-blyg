@@ -148,25 +148,35 @@ async function push(file, { quiet = false } = {}) {
     }
   }
   const stub = stubOf(meta, kind);
+  let revision;
   if (!meta.id) {
-    const created = await request("POST", "/api/items", { kind, content_md: body, ...(stub !== undefined ? { stub_of: stub } : {}) });
+    const created = await request("POST", "/api/items", { mode: "blank", kind, contentMd: body, ...(stub !== undefined ? { stubOf: stub } : {}) });
     meta.id = created.id;
     meta.kind = kind;
     meta.version ??= "0";
+    revision = created.revision;
     writeDraft(file, meta, body);
     if (!quiet) console.log(`Created ${kind} draft ${meta.id}.`);
   } else {
     if (!ID_RE.test(meta.id)) fail(`${file}: front-matter id "${meta.id}" is not a blyg id`);
-    await request("PATCH", `/api/items/${meta.id}`, { content_md: body, ...(stub !== undefined ? { stub_of: stub } : {}) });
+    // Every item write names the revision it was made against (studio 0.49.8),
+    // so an edit made in the browser meanwhile is refused rather than lost.
+    const current = await request("GET", `/api/items/${meta.id}`);
+    const saved = await request("PATCH", `/api/items/${meta.id}`, {
+      contentMd: body,
+      ...(stub !== undefined ? { stubOf: stub } : {}),
+      expectedRevision: current.revision,
+    });
+    revision = saved.revision;
     if (!quiet) console.log(`Saved working copy of ${meta.id}.`);
   }
-  return { meta, body, kind };
+  return { meta, body, kind, revision };
 }
 
 async function publish(file, note) {
-  const { meta, body, kind } = await push(file, { quiet: true });
+  const { meta, body, kind, revision } = await push(file, { quiet: true });
   const versionNote = note ?? meta.note ?? "";
-  const result = await request("POST", `/api/items/${meta.id}/publish`, versionNote ? { note: versionNote } : {});
+  const result = await request("POST", `/api/items/${meta.id}/publish`, { expectedRevision: revision, ...(versionNote ? { note: versionNote } : {}) });
   meta.version = String(result.version);
   meta.note = "";
   writeDraft(file, meta, body);
@@ -179,13 +189,13 @@ async function pull(file) {
   const { meta } = readDraft(file);
   if (!meta.id) fail(`${file} has no id yet; push it first`);
   const item = await request("GET", `/api/items/${meta.id}`);
-  if (typeof item?.content_md !== "string") fail(`GET /api/items/${meta.id} returned no working copy`);
-  writeDraft(file, meta, item.content_md);
+  if (typeof item?.contentMd !== "string") fail(`GET /api/items/${meta.id} returned no working copy`);
+  writeDraft(file, meta, item.contentMd);
   console.log(`Pulled working copy of ${meta.id} into ${path.relative(process.cwd(), file)}.`);
 }
 
 async function generate(file, all) {
-  const { meta } = await push(file, { quiet: true });
+  let { meta, revision } = await push(file, { quiet: true });
   let { body } = readDraft(file);
   const scopes = tkScopes(body);
   if (!scopes.length) return console.log("No [TK]...[/TK] scopes in this draft.");
@@ -193,7 +203,8 @@ async function generate(file, all) {
   for (const [i, scope] of scopes.entries()) {
     if (scope.generated && !all) continue;
     process.stdout.write(`Generating scope ${i + 1}/${scopes.length}: ${scope.instruction.slice(0, 60) || "(no instruction)"} ... `);
-    const result = await request("POST", `/api/items/${meta.id}/generate`, { scope: i });
+    const result = await request("POST", `/api/items/${meta.id}/generate`, { scope: i, expectedRevision: revision });
+    revision = result.revision;
     console.log(`done (${result.model})`);
     ran++;
   }
@@ -270,8 +281,10 @@ function newDraft(file, kind) {
 }
 
 async function settings(file) {
-  const data = JSON.parse(readFileSync(file, "utf8"));
-  delete data.$note;
+  const raw = JSON.parse(readFileSync(file, "utf8"));
+  delete raw.$note;
+  // The studio's settings are camelCase since 0.49.9; the file may use either.
+  const data = Object.fromEntries(Object.entries(raw).map(([k, v]) => [k.replace(/_([a-z])/g, (_, c) => c.toUpperCase()), v]));
   await request("PATCH", "/api/settings", data);
   console.log(`Pushed ${Object.keys(data).length} settings from ${path.relative(process.cwd(), file)}.`);
 }
