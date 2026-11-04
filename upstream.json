@@ -2,9 +2,9 @@
   "repo": "https://github.com/blygger/blygger-studio.git",
   "package": "@blygger/studio",
   "path": ".",
-  "tag": "v0.49.0",
-  "version": "0.49.0",
-  "commit": "1ee1f50b7732ec134c661cc5c522dfdb28dd0bba",
-  "date": "2026-10-29",
+  "tag": "v0.52.0",
+  "version": "0.52.0",
+  "commit": "92b3520d64dbc0aae5bdbe405fe7dbee2865d694",
+  "date": "2026-11-04",
   "note": "worker/ is a verbatim copy of this repository at this release (minus .git and .github). Update it with `npm run upgrade-worker`, never by hand."
 }

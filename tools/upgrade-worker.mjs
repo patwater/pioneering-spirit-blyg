@@ -72,6 +72,10 @@ try {
   }
   cpSync(src, dest, {
     recursive: true,
+    // Keep upstream's relative symlinks (CLAUDE.md -> AGENTS.md) as they are.
+    // Without this, cpSync rewrites them as absolute links into the temporary
+    // checkout, which is deleted below, leaving dangling links in worker/.
+    verbatimSymlinks: true,
     filter: (p) => !path.relative(src, p).split(path.sep).some((part) => skipCopy.has(part)),
   });
 

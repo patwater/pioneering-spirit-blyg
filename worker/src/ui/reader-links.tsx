@@ -16,12 +16,14 @@
  * do not subscribe to opens at /peek, fetched from its origin. Either way the
  * step is recorded on the trail (browse.ts) so back retraces it.
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { useLiveQuery } from '@tanstack/react-db';
-import { useNavigate } from '@tanstack/react-router';
+import { clearBrowse } from './server-mutations.ts';
+import { useEffect, useMemo, useRef, useState, type ReactNode, type MouseEvent } from 'react';
+import { createPortal } from 'react-dom';
+import { useLiveQuery, useLiveInfiniteQuery } from '@tanstack/react-db';
+import { Link } from '@tanstack/react-router';
 import { BlyggerApi, unwrap } from '../../sdk/dist/browser.js';
 import type { ListBrowseResponses } from '../../sdk/dist/browser.js';
-import { client, subscriptions } from './data.ts';
+import { browse, client, subscriptions } from './data.ts';
 import { Button, Failure, mount } from './components.tsx';
 import { Sheet, confirm } from './sheets.tsx';
 import { Back } from './icons.tsx';
@@ -48,14 +50,23 @@ export function useSubscriptionRows(): Held[] {
   return (useLiveQuery({ query: (q) => q.from({ source: subscriptions }) }).data ?? []) as Held[];
 }
 
-/** Open an item in the reader as a step down (or `start` when called with it). */
-export function useOpenTarget() {
-  const navigate = useNavigate();
+/** Trail state changes only when a link opens in this tab, never on hover. */
+function sameTab(event: MouseEvent<HTMLAnchorElement>) {
+  return event.button === 0 && !(event.metaKey || event.ctrlKey || event.shiftKey || event.altKey);
+}
+
+export function ReaderLink({ origin, id, via, onFollow, children, html, className = 'link-btn', 'data-action': action }: {
+  origin: string; id: string; via?: Exclude<Via, 'start' | 'back'>;
+  onFollow?: () => void; children?: ReactNode; html?: string; className?: string; 'data-action'?: string;
+}) {
   const subs = useSubscriptionRows();
-  return (origin: string, id: string, via: Exclude<Via, 'start' | 'back'>) => {
-    follow(via);
-    void navigate(addressOf(origin, id, subs));
-  };
+  return <Link {...addressOf(origin, id, subs)} className={className} data-action={action}
+    data-reader-origin={origin} data-reader-id={id} data-reader-via={via}
+    onClick={event => {
+      if (!sameTab(event)) return;
+      if (via) follow(via);
+      onFollow?.();
+    }} {...(html === undefined ? { children } : { dangerouslySetInnerHTML: { __html: html } })} />;
 }
 
 /* ---------------- an entry's body ---------------- */
@@ -88,8 +99,8 @@ export function ReaderBody({
   onClick?: (event: React.MouseEvent<HTMLDivElement>) => void;
 }) {
   const box = useRef<HTMLDivElement>(null);
-  const open = useOpenTarget();
   const subs = useSubscriptionRows();
+  const [links, setLinks] = useState<{ node: HTMLElement; origin: string; id: string; via: 'quote' | 'link'; html: string; className: string }[]>([]);
   const titleFor = useMemo(() => {
     const byOrigin = new Map(subs.filter((s) => s.kind === 'blyg').map((s) => [withSlash(s.origin), s.title]));
     return (o: string) => (withSlash(o) === ownOrigin() ? 'you' : byOrigin.get(withSlash(o)) ?? hostOf(o));
@@ -98,6 +109,16 @@ export function ReaderBody({
   useEffect(() => {
     const root = box.current;
     if (!root) return;
+    // Stored HTML stays outside React; portals give its reader targets real
+    // Router links, including intent preload and native new-tab behavior.
+    root.innerHTML = html;
+    const targets: typeof links = [];
+    const replace = (a: HTMLAnchorElement, origin: string, id: string, via: 'quote' | 'link') => {
+      const node = document.createElement('span');
+      a.replaceWith(node);
+      a.classList.add('reader-ref');
+      targets.push({ node, origin, id, via, html: a.innerHTML, className: a.className });
+    };
     // 1. A line on every layer of every depth, naming whose it is.
     for (const layer of root.querySelectorAll<HTMLElement>('blockquote.blyg-transclusion')) {
       const id = layer.dataset.blygId;
@@ -109,14 +130,10 @@ export function ReaderBody({
       const line = document.createElement('p');
       line.className = 'layer-ref';
       const a = document.createElement('a');
-      a.href = '#';
-      a.className = 'reader-ref';
-      a.dataset.readerOrigin = layerOrigin;
-      a.dataset.readerId = id;
-      a.dataset.readerVia = 'quote';
       a.textContent = `↳ ${layer.classList.contains('blyg-partial') ? 'excerpt of' : 'snapshot of'} v${layer.dataset.blygVersion ?? '?'} from ${titleFor(layerOrigin)} — open in reader`;
       line.append(a);
       layer.prepend(line);
+      replace(a, layerOrigin, id, 'quote');
     }
     // 2. Ordinary links: ask which of them lead to blyg items.
     const anchors = [...root.querySelectorAll<HTMLAnchorElement>('a[href^="http"]')].filter((a) => !a.closest('.layer-ref'));
@@ -130,12 +147,9 @@ export function ReaderBody({
       for (const a of anchors) {
         const target = classified.get(a.href);
         if (!target) continue;
-        a.classList.add('reader-ref');
-        a.dataset.readerOrigin = target.origin;
-        a.dataset.readerId = target.id;
-        a.dataset.readerVia = 'link';
-        a.title = 'opens in the reader';
+        if (a.isConnected) replace(a, target.origin, target.id, 'link');
       }
+      setLinks([...targets]);
     };
     apply();
     const unknown = [...new Set(anchors.map((a) => a.href).filter((u) => !classified.has(u)))].slice(0, 40);
@@ -157,20 +171,13 @@ export function ReaderBody({
   }, [html, origin, titleFor]);
 
   return (
-    <div
-      ref={box}
-      className={className}
-      onClick={(event) => {
-        const a = (event.target as Element).closest<HTMLAnchorElement>('a[data-reader-id]');
-        if (a && event.button === 0 && !(event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)) {
-          event.preventDefault();
-          open(a.dataset.readerOrigin!, a.dataset.readerId!, a.dataset.readerVia === 'quote' ? 'quote' : 'link');
-          return;
-        }
-        onClick?.(event);
-      }}
-      dangerouslySetInnerHTML={{ __html: html }}
-    />
+    <>
+      <div ref={box} className={className} onClick={onClick} />
+      {links.map((link, i) => createPortal(
+        <ReaderLink origin={link.origin} id={link.id} via={link.via} html={link.html} className={link.className} />,
+        link.node, String(i),
+      ))}
+    </>
   );
 }
 
@@ -183,15 +190,7 @@ export function useEndTrail() {
 
 export function TrailBar({ back }: { back: () => void }) {
   const { stack } = useTrail();
-  const navigate = useNavigate();
-  const subs = useSubscriptionRows();
   const [open, setOpen] = useState(false);
-  const jump = (index: number) => {
-    const step = stack[index];
-    if (!step) return;
-    popTo(index);
-    void navigate(addressOf(step.origin, step.id, subs));
-  };
   return (
     <>
       <div className="article-head trail-bar">
@@ -207,9 +206,9 @@ export function TrailBar({ back }: { back: () => void }) {
                 {i === stack.length - 1 ? (
                   <span aria-current="page">{step.title || step.id.slice(0, 8)}</span>
                 ) : (
-                  <button type="button" className="link-btn" onClick={() => jump(i)}>
+                  <ReaderLink origin={step.origin} id={step.id} onFollow={() => popTo(i)}>
                     {step.title || step.id.slice(0, 8)}
-                  </button>
+                  </ReaderLink>
                 )}
               </span>
             ))}
@@ -221,7 +220,7 @@ export function TrailBar({ back }: { back: () => void }) {
           history
         </Button>
       </div>
-      <HistoryPane open={open} onClose={() => setOpen(false)} />
+      {open ? <HistoryPane open={open} onClose={() => setOpen(false)} /> : null}
     </>
   );
 }
@@ -236,50 +235,31 @@ type BrowseRow = ListBrowseResponses[200]['items'][number];
  */
 function HistoryPane({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { stack, trail } = useTrail();
-  const navigate = useNavigate();
-  const subs = useSubscriptionRows();
-  const [rows, setRows] = useState<BrowseRow[]>();
+  const history = useLiveInfiniteQuery(q => q.from({ step: browse }).orderBy(({ step }) => step.id, { direction: 'desc', stringSort: 'lexical' }), { pageSize: 100 });
+  const rows = history.data;
   const [error, setError] = useState<unknown>();
-  const [stamp, setStamp] = useState(0);
-  useEffect(() => {
-    if (!open) return;
-    let live = true;
-    unwrap(BlyggerApi.listBrowse({ client, query: { limit: 100 } })).then(
-      (page) => live && setRows(page.items),
-      (failure) => live && setError(failure),
-    );
-    return () => {
-      live = false;
-    };
-  }, [open, stamp, stack.length]);
   const walks = useMemo(() => {
     const byTrail = new Map<string, BrowseRow[]>();
     for (const row of rows ?? []) byTrail.set(row.trail, [...(byTrail.get(row.trail) ?? []), row].sort((a, b) => a.id - b.id));
     return [...byTrail.entries()];
   }, [rows]);
-  const go = (origin: string, id: string) => {
-    onClose();
-    follow('link');
-    void navigate(addressOf(origin, id, subs));
-  };
   const clear = async () => {
     if (!(await confirm({ title: 'Clear browsing history?', body: 'The private log of what you opened by following links is deleted. Nothing public changes.', ok: 'clear', danger: true }))) return;
-    await unwrap(BlyggerApi.clearBrowse({ client }));
+    await clearBrowse();
     endTrail();
-    setStamp((n) => n + 1);
   };
   return (
     <Sheet open={open} onClose={onClose} title="Browsing history" className="trail-sheet" description="Where following links has taken you. Private to you.">
-      <Failure error={error} />
+      <Failure error={error ?? (history.status === 'error' ? new Error('Could not load browsing history.') : undefined)} />
       {stack.length ? (
         <>
           <h3 className="trail-h">This walk</h3>
           <ol className="trail-list" data-current>
             {stack.map((step, i) => (
               <li key={i} style={{ paddingLeft: `${Math.min(i, 8) * 12}px` }} aria-current={i === stack.length - 1 ? 'page' : undefined}>
-                <button type="button" className="link-btn" onClick={() => { popTo(i); onClose(); void navigate(addressOf(step.origin, step.id, subs)); }}>
+                <ReaderLink origin={step.origin} id={step.id} onFollow={() => { popTo(i); onClose(); }}>
                   {step.title || step.id.slice(0, 8)}
-                </button>
+                </ReaderLink>
               </li>
             ))}
           </ol>
@@ -296,14 +276,14 @@ function HistoryPane({ open, onClose }: { open: boolean; onClose: () => void }) 
               </p>
               <ul className="trail-list">
                 {steps.map((s) => {
-                  const d = s.parent_id != null && depth.has(s.parent_id) ? depth.get(s.parent_id)! + 1 : 0;
+                  const d = s.parentId != null && depth.has(s.parentId) ? depth.get(s.parentId)! + 1 : 0;
                   depth.set(s.id, s.via === 'back' ? Math.max(0, d - 1) : d);
                   return (
                     <li key={s.id} style={{ paddingLeft: `${Math.min(depth.get(s.id)!, 8) * 12}px` }} data-via={s.via}>
                       <span className="trail-via">{s.via === 'back' ? '↩' : '↳'}</span>{' '}
-                      <button type="button" className="link-btn" onClick={() => go(s.origin, s.remote_id)}>
-                        {s.title || s.remote_id.slice(0, 8)}
-                      </button>{' '}
+                      <ReaderLink origin={s.origin} id={s.remoteId} via="link" onFollow={onClose}>
+                        {s.title || s.remoteId.slice(0, 8)}
+                      </ReaderLink>{' '}
                       <span className="trail-note">{viaWord(s.via)}</span>
                     </li>
                   );
@@ -313,11 +293,12 @@ function HistoryPane({ open, onClose }: { open: boolean; onClose: () => void }) 
           );
         })
       ) : (
-        <p className="hint">{rows ? 'Nothing yet. Follow a link or a quoted layer in an entry and the path appears here.' : 'loading…'}</p>
+        history.status === 'error' ? null : <p className="hint">{history.isLoading ? 'loading…' : 'Nothing yet. Follow a link or a quoted layer in an entry and the path appears here.'}</p>
       )}
+      {history.hasNextPage ? <Button disabled={history.isFetchingNextPage} onClick={() => void history.fetchNextPage()}>load older history</Button> : null}
       <div className="sheet-actions">
         {walks.length ? (
-          <Button className="btn btn-ghost" onClick={() => void clear()}>
+          <Button className="btn btn-ghost" onClick={() => void clear().catch(setError)}>
             clear history
           </Button>
         ) : null}
