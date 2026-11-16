@@ -6,6 +6,10 @@ import type { Env as BaseEnv } from "../../worker/src/types.ts";
 export interface Env extends BaseEnv {
   /** Owner bearer token for native clients (Blygger Desktop). Unset = bearer auth off. */
   BLYG_OWNER_TOKEN?: string;
+  /** Exact retired hostname whose public pages redirect to CANONICAL_ORIGIN (redirect.ts). */
+  REDIRECT_FROM_HOST?: string;
+  /** The blyg's one public origin, e.g. https://blyg.pioneeringspirit.xyz. */
+  CANONICAL_ORIGIN?: string;
 }
 
 export function json(body: unknown, status = 200): Response {

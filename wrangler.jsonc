@@ -28,7 +28,13 @@
   // "" mounts the blyg at the domain root: feed at /feed.xml, studio at
   // /studio, owner API at /api. The protocol file names never change.
   "vars": {
-    "MOUNT": ""
+    "MOUNT": "",
+    // One identity: public pages at the workers.dev address redirect (301) to
+    // the custom domain, so readers and the blygger.com directory see one blyg,
+    // not two with the same item ids. /api and /studio are not redirected, and
+    // branch preview addresses are untouched (server-ext/src/redirect.ts).
+    "REDIRECT_FROM_HOST": "pioneering-spirit-blyg.patrickatwater.workers.dev",
+    "CANONICAL_ORIGIN": "https://blyg.pioneeringspirit.xyz"
   },
 
   // Serve the blyg at blyg.pioneeringspirit.xyz. A Custom Domain provisions

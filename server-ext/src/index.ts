@@ -24,6 +24,7 @@ import { type Env, json } from "./http.ts";
 import { getProvenance, putProvenance } from "./provenance.ts";
 import { hoppers, listItems, listSubscriptions, mentions, oneItem, reading, settings } from "./reads.ts";
 import { postReads, putRead } from "./readstate.ts";
+import { canonicalRedirect } from "./redirect.ts";
 
 type Handler = (req: Request, env: Env, params: string[]) => Promise<Response | null>;
 
@@ -52,7 +53,10 @@ function match(method: string, path: string): { handler: Handler; params: string
 }
 
 async function fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-  const path = new URL(req.url).pathname;
+  const url = new URL(req.url);
+  const canonical = canonicalRedirect(req.method, url, env);
+  if (canonical) return Response.redirect(canonical, 301);
+  const path = url.pathname;
   if (!path.startsWith("/api/")) return reference.fetch(req, env, ctx);
 
   const auth = await authenticate(req, env);

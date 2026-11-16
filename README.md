@@ -74,7 +74,7 @@ The blyg lives at `blyg.pioneeringspirit.xyz`, and the apex `pioneeringspirit.xy
 
 The archive the deploy builds is served on the blyg too, at `https://blyg.pioneeringspirit.xyz/<slug>/` and `https://blyg.pioneeringspirit.xyz/paragraph/`, with each page naming its original `pioneeringspirit.xyz` address as canonical. If you later retire Paragraph and point the apex at this Worker as well, add `{ "pattern": "pioneeringspirit.xyz", "custom_domain": true }` to `routes` after detaching the domain from Paragraph, and the old links will keep resolving at their original addresses. The blyg's own identity stays on the subdomain either way.
 
-The Worker also answers at https://pioneering-spirit-blyg.patrickatwater.workers.dev, which is a good place to check a deploy.
+The Worker also answers at https://pioneering-spirit-blyg.patrickatwater.workers.dev, but only `/api` and `/studio` are served there. Every public page at that address answers with a permanent redirect to the same path on `blyg.pioneeringspirit.xyz` (`REDIRECT_FROM_HOST` and `CANONICAL_ORIGIN` in `wrangler.jsonc`, `server-ext/src/redirect.ts`). A blyg's identity is the address its pages are fetched from, so while both addresses served the blyg, other blygs and the blygger.com directory saw two blygs with the same item ids. To check a deploy, use the branch preview URL that Workers Builds posts on each pull request.
 
 ### 5. Deploys
 
