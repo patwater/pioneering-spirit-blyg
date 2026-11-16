@@ -1,14 +1,25 @@
 {
-  "$note": "Studio settings as code. Push with `npm run blyg -- settings`. Every key is optional; the studio's /studio/settings page edits the same values.",
-  "site_title": "Pioneering Spirit Blyg",
+  "$note": "Studio settings as code, mirroring what the studio held on 2026-11-16. Push with `npm run blyg -- settings`, which overwrites the studio's values for every key listed here. Every key is optional; the studio's /studio/settings page edits the same values.",
+  "site_title": "Pioneering Spirit (Blyg)",
   "site_url": "https://blyg.pioneeringspirit.xyz/",
-  "theme": "auto",
-  "author_name": "Patrick Atwater",
-  "author_bio": "Husband, father, data sophist, avid cyclist, fervent reader, and lover of board games. I manage the innovation program at Southern California's Metropolitan Water District and write about water, California, civic technology, and what it means to build things that last for generations yet to be born.",
-  "author_links": [],
+  "theme": "solarized-dark",
+  "font": "book",
+  "timezone": "America/Los_Angeles",
+  "author_name": "PAtwater",
+  "author_url": "https://blyg.pioneeringspirit.xyz",
+  "author_bio": "",
+  "author_links": [
+    { "label": "Personal website", "url": "https://bit.ly/patwater" }
+  ],
   "accept_mentions": true,
   "show_responses_default": true,
-  "ai_model_tk": "claude-opus-5-5",
-  "ai_model_changelog": "claude-opus-5-5",
-  "ai_style_prompt": "Write in Patrick Atwater's voice for Pioneering Spirit: essayistic, warm, curious, and concrete. Use full sentences and full paragraphs; never write sentence fragments, verbless sentences, or one-line paragraphs. Ground abstractions in specific places, infrastructure, and lived experience, especially water, California, civic institutions, and stewardship across generations. Prefer plain words to jargon, earn every claim, and when drawing on source passages, extend and argue with them rather than summarizing them."
+  "auto_change_notes": true,
+  "feed_order": "pace-layered",
+  "links_position": "left",
+  "ai_model": "claude-sonnet-5-5",
+  "ai_model_tk": "claude-sonnet-5-5",
+  "ai_model_changelog": "claude-haiku-4-5",
+  "ai_model_feed": "claude-sonnet-5-5",
+  "ai_style_prompt": "",
+  "feed_prompt": "Prioritize tech updates and significant updates to posts I have liked or interacted with. Also responses to my blyg. "
 }
