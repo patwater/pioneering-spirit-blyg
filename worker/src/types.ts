@@ -1,3 +1,4 @@
+import type { BackgroundRule } from "./background.ts";
 import type { CustomTheme } from "./themes.ts";
 export interface Env {
   DB: D1Database;
@@ -280,6 +281,8 @@ export interface SubscriptionRow {
   created: string;
   /** 1 = the title follows the source (manifest or channel title); 0 = the owner named it. */
   title_auto: number;
+  /** 1 = the owner moved this whole blyg to Background in the reader (migration 0046). */
+  background?: number;
   /** JSON `Surface` (src/surface.ts): where a templated blyg's files live. NULL = default paths. */
   surface: string | null;
   /**
@@ -401,6 +404,10 @@ export interface MentionOutRow {
 }
 
 /** Site settings with defaults applied. */
+/** Session 61: the latest note, every note, or an AI summary of them. */
+export type ChangelogDisplay = "latest" | "history" | "summary";
+export const CHANGELOG_DISPLAYS: readonly ChangelogDisplay[] = ["latest", "history", "summary"];
+
 export interface Settings {
   site_title: string;
   /** Reading theme for the public pages — a key of THEMES, "custom" for custom_theme, or "auto" to follow the reader's system preference. */
@@ -460,6 +467,14 @@ export interface Settings {
   feed_prompt: string;
   /** TK generation: optional site-level style prompt appended to every generation request. */
   ai_style_prompt: string;
+  /** What an item's own public page shows of its changelog (session 61). */
+  changelog_display: ChangelogDisplay;
+  /** The same, for blyg items in the reader. */
+  reader_changelog_display: ChangelogDisplay;
+  /** Owner instructions for changelog summaries and history-to-date notes. */
+  changelog_summary_prompt: string;
+  /** Which Background rules count in the reader (src/background.ts); all on by default. */
+  bg_rules: Record<BackgroundRule, boolean>;
   /**
    * Whether this blyg receives Webmentions (0.3 §15, which is **OPTIONAL at
    * every level**). When false the endpoint 404s, the manifest omits its
@@ -548,6 +563,8 @@ export interface Settings {
    * saying so plainly is what buys the default.
    */
   update_notice_ack: boolean;
+  /** The newest blygger.com listing the owner has seen in Discover (ISO), or "" for never. */
+  discover_seen_at: string;
   /** Studio extensions enabled on this node (docs/extensions.md). Every extension starts disabled. */
   extensions: string[];
 }

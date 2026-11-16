@@ -11,6 +11,7 @@ import {
 import {
   parseLoadSubsetOptions,
   queryCollectionOptions,
+  SyncNotInitializedError,
 } from '@tanstack/query-db-collection';
 import type { QueryFunctionContext } from '@tanstack/query-core';
 import { z } from 'zod';
@@ -41,9 +42,21 @@ import { readCursorWindow, type ApiPage } from './cursor-query.ts';
 import { planReadWrites, type ReadWrite, type UnreadWrite } from './read-state.ts';
 import { createReadBatchFetch } from './read-batch.ts';
 import { createReadFlight } from './read-flight.ts';
+import { errorLog } from './error-log.ts';
 
 export const apiBase = new URL(document.getElementById('studio-root')!.dataset.apiBase!, location.origin).href;
-const transport = createReadBatchFetch(apiBase);
+const batched = createReadBatchFetch(apiBase);
+/** Names each failed request to the error log, so the error it becomes can say what was asked. */
+const transport = (request: Request) => {
+  const { method, url } = request;
+  return batched(request).then((response) => {
+    if (!response.ok) errorLog.noteRequest(method, url, response.status);
+    return response;
+  }, (failure) => {
+    errorLog.noteRequest(method, url);
+    throw failure;
+  });
+};
 export const client = createBlyggerClient({ baseUrl: apiBase, fetch: (input, init) => {
   const request = new Request(input, init);
   if (['GET', 'HEAD'].includes(request.method)) return transport(request);
@@ -53,6 +66,15 @@ export const client = createBlyggerClient({ baseUrl: apiBase, fetch: (input, ini
 } });
 const changesFlight = createReadFlight(signal => unwrap(BlyggerApi.getChanges({ client, signal })));
 queryClient.mount();
+/** Applies a confirmed row. An on-demand source no view has started holds no
+ * rows to correct, and the view that starts it reads the server (#142). */
+export async function writeIfSyncing(write: () => unknown) {
+  try {
+    await write();
+  } catch (error) {
+    if (!(error instanceof SyncNotInitializedError)) throw error;
+  }
+}
 /** Query resolves paused refetches without observing the server. */
 function assertNotPaused(queryKey: readonly unknown[]) {
   if (queryClient.getQueryCache().findAll({ queryKey, type: 'active' })
@@ -259,6 +281,50 @@ export const settings = createCollection(
     },
   }),
 );
+/** The shelf (#135): one row, the owner's ordered entries ({ sub, remoteId }). Edits replace the
+ * whole list on the revision they were made against, so a change from another
+ * client rolls this one back rather than being overwritten. */
+export const shelf = createCollection(
+  queryCollectionOptions({
+    ...collectionPollingOptions,
+    schema: sourceSchemas.shelf,
+    id: 'shelf',
+    syncMode: 'on-demand',
+    queryKey: ['shelf'],
+    queryClient,
+    getKey: (row) => row.key,
+    queryFn: (context) =>
+      cachedQuery(context, 'shelf', sourceSchemas.shelf.array(), async ({ signal }) => [
+        { ...(await unwrap(BlyggerApi.getShelf({ client, signal }))), key: 'shelf' as const },
+      ]),
+    select: (response) => response.data,
+    onUpdate: async ({ transaction, collection }) => {
+      try {
+        for (const { original, modified } of transaction.mutations)
+          await unwrap(BlyggerApi.putShelf({ client, body: { entries: modified.entries, expectedRevision: original.revision } }));
+      } catch (error) {
+        // A revision conflict means another client moved the shelf: show its
+        // list, and let the owner make the change again on top of it.
+        await collection.utils.refetch().catch(() => undefined);
+        throw error;
+      }
+      await collection.utils.refetch({ throwOnError: true });
+      // Reading's Shelf lens is a projection of the shelf the write cannot supply.
+      await changed('reading');
+      assertNotPaused(['shelf']);
+    },
+  }),
+);
+export const SHELF_MAX = 50;
+export type ShelfEntry = { sub: string; remoteId: string };
+/** Replace the shelf's order; resolves once the server has it. */
+export async function setShelf(entries: ShelfEntry[]) {
+  await preloadView(listViews.shelf);
+  if (!shelf.has('shelf')) throw new Error('The shelf has not loaded. Try again.');
+  await shelf.update('shelf', (row) => {
+    row.entries = entries;
+  }).when('settled');
+}
 export const subscriptions = createCollection(
   queryCollectionOptions({
     ...collectionPollingOptions,
@@ -512,7 +578,7 @@ export function createDraftAction(id?: string, observedRevision?: number) {
         case 'delete': result = await unwrap(BlyggerApi.deleteItem({ client, path, body: condition })); break;
         case 'withdraw': result = await unwrap(BlyggerApi.withdrawItem({ client, path, body: condition })); break;
         case 'pin': result = await unwrap(BlyggerApi.pinItem({ client, path: { ...path, version: command.version }, body: condition })); break;
-        case 'draft-note': result = await unwrap(BlyggerApi.draftNote({ client, path, body: condition })); break;
+        case 'draft-note': result = await unwrap(BlyggerApi.draftNote({ client, path, body: { ...condition, ...(command.history ? { history: true } : {}) } })); break;
         case 'classify': result = await unwrap(BlyggerApi.classifyChange({ client, path, body: condition })); break;
         case 'update': result = await unwrap(BlyggerApi.updateItem({ client, path, body: { ...command.changes, ...condition } })); break;
       }
@@ -525,7 +591,7 @@ export function createDraftAction(id?: string, observedRevision?: number) {
       // the summaries rather than replacing unknown pins with an empty list.
       const pins = item.version === 0 ? [] : items.get(itemId!)?.pins
         ?? (await unwrap(BlyggerApi.getItem({ client, path: { id: itemId! } }))).pins;
-      await items.utils.writeUpsert(sourceSchemas.items.parse({ ...result, pins }));
+      await writeIfSyncing(() => items.utils.writeUpsert(sourceSchemas.items.parse({ ...result, pins })));
     }
     if (command.type === 'save' || command.type === 'update') {
       // The response confirms the row. Count refresh failures stay visible
@@ -535,7 +601,7 @@ export function createDraftAction(id?: string, observedRevision?: number) {
       // Keep the row until refreshes finish, then apply the confirmed deletion
       // even if a secondary read failed. The caller can navigate immediately.
       await Promise.allSettled([changed('item-summary', 'reading')]);
-      await items.utils.writeDelete(itemId!);
+      await writeIfSyncing(() => items.utils.writeDelete(itemId!));
     } else if (command.type === 'draft-note' || command.type === 'classify') {
       // These commands return suggestions without changing the item.
     } else {
@@ -557,10 +623,10 @@ export function createDraftAction(id?: string, observedRevision?: number) {
 export type Reading = Omit<z.infer<typeof sourceSchemas.reading>, 'view'>;
 /**
  * Reading lenses (0.25.0). "threads" and "fragments" narrow a timeline and its
- * counts by kind; "background" and "smart" are placeholders for features that
- * are not built yet (procedural updates with ignyr; the AI-ranked feed).
+ * counts by kind; "shelf" is the shelved entries in the owner's order (row 115);
+ * "smart" is a placeholder for the AI-ranked feed.
  */
-export const LENSES = ['all', 'threads', 'fragments', 'background', 'smart'] as const;
+export const LENSES = ['all', 'mentions', 'smart', 'fragments', 'threads', 'shelf', 'background'] as const;
 export type Lens = (typeof LENSES)[number];
 export const lensKind = (lens: Lens | undefined): 'thread' | 'fragment' | undefined =>
   lens === 'threads' ? 'thread' : lens === 'fragments' ? 'fragment' : undefined;
@@ -569,7 +635,7 @@ export const lensKind = (lens: Lens | undefined): 'thread' | 'fragment' | undefi
  * unfiltered view (so every existing key is unchanged), `sub~kind` otherwise.
  */
 export const readingKey = (sub: string, lens?: Lens) => {
-  if (lens === 'background') return `${sub}~background`;
+  if (lens === 'background' || lens === 'mentions' || lens === 'shelf') return `${sub}~${lens}`;
   const kind = lensKind(lens);
   return kind ? `${sub}~${kind}` : sub;
 };
@@ -598,16 +664,16 @@ export const reading = createCollection(queryCollectionOptions({
   select: response => response.data,
 }));
 function readingDomains(view: string): readonly ChangeDomain[] {
-  return view.startsWith('hopper:') ? ['reading', 'subscriptions', 'hoppers'] : ['reading', 'subscriptions'];
+  return ['reading', 'subscriptions', ...(view.startsWith('hopper:') ? ['hoppers' as const] : []), ...(view.split('~')[1] === 'shelf' ? ['shelf' as const] : [])];
 }
 export function readingQuery(view: string) {
-  const [sub, filter] = view.split('~') as [string, 'thread' | 'fragment' | 'background' | undefined];
-  return { ...(sub.startsWith('hopper:') ? { hopper: sub.slice('hopper:'.length) } : { sub }), ...(filter === 'background' ? { background: 'true' as const } : filter ? { kind: filter } : {}) };
+  const [sub, filter] = view.split('~') as [string, 'thread' | 'fragment' | 'background' | 'mentions' | 'shelf' | undefined];
+  return { ...(sub.startsWith('hopper:') ? { hopper: sub.slice('hopper:'.length) } : { sub }), ...(filter === 'background' ? { background: 'true' as const } : filter === 'mentions' ? { mentions: 'true' as const } : filter === 'shelf' ? { shelf: 'true' as const } : filter ? { kind: filter } : {}) };
 }
 export const readingSummaries = createCollection(queryCollectionOptions({
   ...collectionPollingOptions, schema: sourceSchemas.readingSummaries, id: 'reading-summary', syncMode: 'on-demand',
   queryKey: ['reading-summary', 'rows'], queryClient, getKey: row => row.view,
-  queryFn: context => cachedQuery(context, ['reading', 'subscriptions', 'hoppers'], sourceSchemas.readingSummaries.array(), async ({ signal }) => {
+  queryFn: context => cachedQuery(context, ['reading', 'subscriptions', 'hoppers', 'shelf'], sourceSchemas.readingSummaries.array(), async ({ signal }) => {
     const views = subsetIds(context, 'view');
     if (!views) throw new Error('Reading summary requires a view predicate');
     return Promise.all(views.map(async view => {
@@ -890,7 +956,7 @@ export const inbound = createCollection(queryCollectionOptions({
       const result = await unwrap(BlyggerApi.updateMention({ client,
         path: { id: String(mutation.key) }, body: { hidden: mutation.modified.hidden },
       }));
-      await collection.utils.writeUpdate({ id: String(mutation.key), hidden: result.hidden });
+      await writeIfSyncing(() => collection.utils.writeUpdate({ id: String(mutation.key), hidden: result.hidden }));
     }
     // The receipt is confirmed; refresh the server aggregate before settling.
     // A failed secondary read stays visible through collection health.
@@ -969,6 +1035,7 @@ export const mentionSource = scoped((id) => createLiveQueryCollection({
 export const listViews = {
   items: createLiveQueryCollection((q) => q.from({ item: items }).orderBy(({ item }) => item.orderKey, { direction: 'asc', stringSort: 'lexical' }).limit(25)),
   settings: createLiveQueryCollection((q) => q.from({ setting: settings })),
+  shelf: createLiveQueryCollection((q) => q.from({ row: shelf })),
   updates: createLiveQueryCollection((q) => q.from({ update: updates })),
   subscriptions: createLiveQueryCollection((q) => q.from({ subscription: subscriptions })),
   hoppers: createLiveQueryCollection((q) => q.from({ hopper: hoppers })),

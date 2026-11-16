@@ -67,7 +67,7 @@ test('every field on the main screens is at least 16px', async ({ page }) => {
     ['/studio/access', 'access', false],
     ['/studio/hoppers', 'hoppers', true],
     ['/studio/hoppers/parity-hopper', 'hopper', false],
-    ['/studio/mentions', 'mentions', false],
+    ['/studio/mentions', 'responses', false],
     ['/studio/signals', 'signals', false],
     ['/studio/reading?view=sources', 'sources', false],
   ] as const) {
@@ -136,6 +136,7 @@ async function injectWidePost(page: Page) {
       page0.items.unshift({
         key: 'imported:["parity-rss","wide-fixture"]', source: 'imported', kind: 'fragment', withdrawn: false, l0: true, contentHtml: WIDE_HTML, displayAt: at,
         imported: { subscriptionId: 'parity-rss', subscriptionTitle: 'Legacy source', remoteId: 'wide-fixture', kind: 'fragment', withdrawn: false, l0: true, updated: at, observedAt: at, contentHtml: WIDE_HTML, pinnedVersionRetained: null, sourceUrl: 'https://legacy.example/' + 'very-long-path-segment/'.repeat(12), version: 1, readVersion: 1 },
+        background: { reasons: [], placement: null, blyg: false },
       });
     }
     await route.fulfill({ response, json: page0 });

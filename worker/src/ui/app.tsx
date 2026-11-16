@@ -1,6 +1,7 @@
 // The design system first, so each screen's own stylesheet (imported by its
 // module below) comes after it in the bundle and wins ties.
 import './studio.css';
+import { useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   createRootRoute,
@@ -51,9 +52,19 @@ import { SheetHost } from './sheets.tsx';
 import { ExtensionPage } from './extension-page.tsx';
 import { SetupPage } from './setup.tsx';
 import { applyCachedTheme } from './theme.ts';
+import { applyCachedTitle } from './tab.ts';
+import { errorLog, watchUncaughtErrors } from './error-log.ts';
+import { TooltipProvider } from './primitives.tsx';
 // Paint the last theme this device saw before the first render; settings
 // repaint it once they load (see theme.ts).
 applyCachedTheme();
+applyCachedTitle();
+watchUncaughtErrors();
+/** A failed route load replaces the page, banners included: log it from here. */
+function RouteErrorLogged({ error }: { error: unknown }) {
+  useEffect(() => { errorLog.record(error, 'route'); }, [error]);
+  return null;
+}
 const rootRoute = createRootRoute({
   loader: () => Promise.all([
     preloadView(listViews.settings),
@@ -63,6 +74,7 @@ const rootRoute = createRootRoute({
   errorComponent: ({ error }) => (
     <div role="alert">
       <p>{error instanceof Error ? error.message : String(error)}</p>
+      <RouteErrorLogged error={error} />
       <Button
         onClick={() =>
           void queryClient
@@ -86,8 +98,10 @@ const rootRoute = createRootRoute({
 const compose = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
+  validateSearch: (search: Record<string, unknown>): { q?: string } =>
+    typeof search.q === 'string' && search.q ? { q: search.q } : {},
   loader: () => preloadView(listViews.items),
-  component: Compose,
+  component: () => <Compose {...compose.useSearch()} />,
 });
 function readingOffset(search: Record<string, unknown>) {
   if (
@@ -111,7 +125,13 @@ function readingOffset(search: Record<string, unknown>) {
  * ?sub=X one source's timeline and ?hopper=H a hopper's. A bookmark that pages
  * without naming a source (?page=2, ?offset=25) still means "all".
  */
-function readingSearch(search: Record<string, unknown>): {
+function readingSearch(search: Record<string, unknown>): ReturnType<typeof readingLocation> & { q?: string } {
+  // ?q= is a search over the picker's scope (docs/search.md); it rides along
+  // with any view so clearing it returns to where the reader was.
+  const view = readingLocation(search);
+  return typeof search.q === 'string' && search.q ? { ...view, q: search.q } : view;
+}
+function readingLocation(search: Record<string, unknown>): {
   sub?: string;
   hopper?: string;
   offset?: number;
@@ -367,10 +387,10 @@ declare module '@tanstack/react-router' {
   }
 }
 createRoot(document.getElementById('studio-root')!).render(
-  <>
+  <TooltipProvider>
     <RouterProvider router={router} />
     <SheetHost />
-  </>,
+  </TooltipProvider>,
 );
 // Installable PWA: the worker caches only the shell's static assets (see
 // studioServiceWorker in src/spa.ts). Its scope is the studio base itself,
