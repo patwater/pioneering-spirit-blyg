@@ -1,5 +1,5 @@
 {
-  "$note": "Studio settings as code, mirroring what the studio held on 2026-11-16. Push with `npm run blyg -- settings`, which overwrites the studio's values for every key listed here. Every key is optional; the studio's /studio/settings page edits the same values.",
+  "$note": "Studio settings as code, mirroring what the studio held on 2026-11-17. Push with `npm run blyg -- settings`, which overwrites the studio's values for every key listed here. Every key is optional; the studio's /studio/settings page edits the same values.",
   "site_title": "Pioneering Spirit (Blyg)",
   "site_url": "https://blyg.pioneeringspirit.xyz/",
   "theme": "solarized-dark",
@@ -7,7 +7,7 @@
   "timezone": "America/Los_Angeles",
   "author_name": "PAtwater",
   "author_url": "https://blyg.pioneeringspirit.xyz",
-  "author_bio": "",
+  "author_bio": "ome quick biographical context: 38, male, So Cal born, bred and still belong here, stereotypically spent a couple stints in the Bay / NYC / DC (also Philly!), once drove from Cincinnati to LA with a new employee at a crazy indie publishing venture, helped launch the CaDC, married, work as a data sophist of sorts, father of  two girls (4 years and 8 months).",
   "author_links": [
     { "label": "Personal website", "url": "https://bit.ly/patwater" }
   ],
