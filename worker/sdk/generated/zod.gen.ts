@@ -82,7 +82,8 @@ export const zChangeState = z.object({
         mentions: z.int().gte(0).lte(9007199254740991),
         responses: z.int().gte(0).lte(9007199254740991),
         interactions: z.int().gte(0).lte(9007199254740991),
-        browse: z.int().gte(0).lte(9007199254740991)
+        browse: z.int().gte(0).lte(9007199254740991),
+        shelf: z.int().gte(0).lte(9007199254740991)
     })
 });
 
@@ -187,6 +188,20 @@ export const zSettings = z.object({
     changeCategoryInNote: z.boolean(),
     feedPrompt: z.string(),
     aiStylePrompt: z.string(),
+    changelogDisplay: z.enum([
+        'latest',
+        'history',
+        'summary'
+    ]),
+    readerChangelogDisplay: z.enum([
+        'latest',
+        'history',
+        'summary'
+    ]),
+    changelogSummaryPrompt: z.string(),
+    backgroundRules: z.object({
+        minor: z.boolean()
+    }),
     acceptMentions: z.boolean(),
     updateCheck: z.boolean(),
     showResponsesDefault: z.boolean(),
@@ -228,6 +243,7 @@ export const zSettings = z.object({
     })).optional(),
     updateFeedUrl: z.string(),
     updateNoticeAck: z.boolean(),
+    discoverSeenAt: z.string(),
     extensions: z.array(z.string())
 });
 
@@ -253,7 +269,35 @@ export const zSubscription = z.object({
     })),
     created: z.string(),
     titleFollowsSource: z.boolean(),
+    background: z.boolean(),
     hopperFeedUrl: z.string().nullable()
+});
+
+export const zShelfEntry = z.object({
+    sub: z.string().min(1).max(128),
+    remoteId: z.string().min(1).max(256)
+}).strict();
+
+export const zShelf = z.object({
+    entries: z.array(zShelfEntry),
+    revision: z.int().gte(0)
+});
+
+export const zContact = z.object({
+    id: z.string(),
+    handle: z.string(),
+    name: z.string(),
+    url: z.string(),
+    ids: z.array(z.object({
+        id: z.string(),
+        provenance: z.enum([
+            'self',
+            'bound',
+            'entered'
+        ])
+    })),
+    created: z.string(),
+    updated: z.string()
 });
 
 export const zHopper = z.object({
@@ -484,6 +528,16 @@ export const zMentionGroup = z.object({
     firstId: z.string()
 });
 
+/**
+ * Why the entry is in Background or not (blygger-spec docs/background-plan.md). Reader-only: never published, never marks anything read.
+ */
+export const zEntryBackground = z.object({
+    reasons: z.array(z.string()),
+    placement: z.enum(['background', 'foreground']).nullable(),
+    blyg: z.boolean(),
+    detail: z.record(z.string(), z.unknown()).optional()
+});
+
 export const zReadingEntry = z.object({
     key: z.string(),
     source: z.enum(['own', 'imported']),
@@ -513,7 +567,8 @@ export const zReadingEntry = z.object({
         sourceUrl: z.string().nullable(),
         version: z.int(),
         readVersion: z.int().nullable()
-    }).optional()
+    }).optional(),
+    background: zEntryBackground
 });
 
 export const zImportedReadingEntry = z.object({
@@ -659,6 +714,39 @@ export const zLineageGlyphSummary = z.object({
         stub: z.int().gte(0),
         transclusion: z.int().gte(0),
         fork: z.int().gte(0)
+    })
+});
+
+export const zWordCount = z.object({
+    published: z.object({
+        words: z.int().gte(0),
+        cjk: z.int().gte(0),
+        document: z.object({
+            words: z.int().gte(0),
+            cjk: z.int().gte(0),
+            items: z.int().gt(0)
+        }).nullable(),
+        reason: z.enum([
+            'cycle',
+            'repeated',
+            'unavailable',
+            'too-large'
+        ]).optional()
+    }).nullable(),
+    draft: z.object({
+        words: z.int().gte(0),
+        cjk: z.int().gte(0),
+        document: z.object({
+            words: z.int().gte(0),
+            cjk: z.int().gte(0),
+            items: z.int().gt(0)
+        }).nullable(),
+        reason: z.enum([
+            'cycle',
+            'repeated',
+            'unavailable',
+            'too-large'
+        ]).optional()
     })
 });
 
@@ -926,7 +1014,8 @@ export const zPublishItemResponse = z.object({
     ok: z.boolean(),
     revision: z.int().gt(0).lte(9007199254740991),
     version: z.number(),
-    warning: z.string().optional()
+    warning: z.string().optional(),
+    unresolvedHandles: z.array(z.string()).optional()
 });
 
 export const zClassifyChangeBody = z.object({
@@ -955,7 +1044,8 @@ export const zClassifyChangeResponse = z.object({
 });
 
 export const zDraftNoteBody = z.object({
-    expectedRevision: z.int().gt(0).lte(9007199254740991)
+    expectedRevision: z.int().gt(0).lte(9007199254740991),
+    history: z.boolean().optional()
 }).strict();
 
 export const zDraftNotePath = z.object({
@@ -970,6 +1060,29 @@ export const zDraftNoteResponse = z.object({
     model: z.string(),
     pinnedPrior: z.boolean(),
     revision: z.int().gt(0).lte(9007199254740991)
+});
+
+/**
+ * An own item by itemId, or an imported blyg item by its subscription and remote id. The summary reads the changelog's notes only, is written once per version with the change-notes model and kept, and is studio-private.
+ */
+export const zSummarizeChangelogBody = z.union([
+    z.object({
+        itemId: z.string()
+    }).strict(),
+    z.object({
+        subscriptionId: z.string(),
+        remoteId: z.string()
+    }).strict()
+]);
+
+/**
+ * Success
+ */
+export const zSummarizeChangelogResponse = z.object({
+    summary: z.string(),
+    model: z.string(),
+    version: z.int().gt(0),
+    cached: z.boolean()
 });
 
 export const zGenerateItemBody = z.object({
@@ -1118,6 +1231,20 @@ export const zUpdateSettingsBody = z.object({
     changeCategoryInNote: z.boolean().optional(),
     feedPrompt: z.string().optional(),
     aiStylePrompt: z.string().optional(),
+    changelogDisplay: z.enum([
+        'latest',
+        'history',
+        'summary'
+    ]).optional(),
+    readerChangelogDisplay: z.enum([
+        'latest',
+        'history',
+        'summary'
+    ]).optional(),
+    changelogSummaryPrompt: z.string().optional(),
+    backgroundRules: z.object({
+        minor: z.boolean()
+    }).optional(),
     acceptMentions: z.boolean().optional(),
     updateCheck: z.boolean().optional(),
     showResponsesDefault: z.boolean().optional(),
@@ -1153,6 +1280,7 @@ export const zUpdateSettingsBody = z.object({
     ]).optional(),
     updateFeedUrl: z.string().optional(),
     updateNoticeAck: z.boolean().optional(),
+    discoverSeenAt: z.string().optional(),
     extensions: z.array(z.string()).optional()
 }).strict();
 
@@ -1233,7 +1361,8 @@ export const zGetSubscriptionResponse = zSubscription;
 export const zUpdateSubscriptionBody = z.object({
     inBlogroll: z.boolean().optional(),
     title: z.string().min(1).nullish(),
-    paused: z.boolean().optional()
+    paused: z.boolean().optional(),
+    background: z.boolean().optional()
 }).strict();
 
 export const zUpdateSubscriptionPath = z.object({
@@ -1263,6 +1392,76 @@ export const zResyncSubscriptionResponse = z.object({
     ok: z.boolean(),
     changed: z.number()
 });
+
+/**
+ * Success
+ */
+export const zGetShelfResponse = zShelf;
+
+export const zPutShelfBody = z.object({
+    entries: z.array(zShelfEntry).max(50),
+    expectedRevision: z.int().gte(0)
+}).strict();
+
+/**
+ * Success
+ */
+export const zPutShelfResponse = zShelf;
+
+/**
+ * Success
+ */
+export const zListContactsResponse = z.object({
+    contacts: z.array(zContact)
+});
+
+export const zCreateContactBody = z.object({
+    handle: z.string(),
+    name: z.string().min(1).max(200),
+    url: z.string(),
+    ids: z.array(z.string().min(1).max(500)).max(50).optional()
+}).strict();
+
+/**
+ * Success
+ */
+export const zCreateContactResponse = zContact;
+
+export const zDeleteContactPath = z.object({
+    id: z.string().min(1)
+});
+
+/**
+ * Success
+ */
+export const zDeleteContactResponse = z.object({
+    ok: z.boolean()
+});
+
+export const zUpdateContactBody = z.object({
+    handle: z.string().optional(),
+    name: z.string().min(1).max(200).optional(),
+    url: z.string().optional(),
+    ids: z.array(z.string().min(1).max(500)).max(50).optional()
+}).strict();
+
+export const zUpdateContactPath = z.object({
+    id: z.string().min(1)
+});
+
+/**
+ * Success
+ */
+export const zUpdateContactResponse = zContact;
+
+export const zResolveContactPath = z.object({
+    id: z.string().min(1)
+});
+
+/**
+ * Success
+ */
+export const zResolveContactResponse = zContact;
 
 export const zListHoppersQuery = z.object({
     cursor: z.string().min(1).max(8192).optional(),
@@ -1688,7 +1887,8 @@ export const zPreviewResponse = z.object({
         directive: z.string().optional(),
         reason: z.string().optional()
     }).catchall(z.unknown())).optional(),
-    transclusions: z.array(zTransclusion).optional()
+    transclusions: z.array(zTransclusion).optional(),
+    unresolvedHandles: z.array(z.string()).optional()
 });
 
 export const zSearchQuery = z.object({
@@ -1701,7 +1901,8 @@ export const zSearchQuery = z.object({
         'imported'
     ]).optional(),
     sub: z.string().optional(),
-    sort: z.enum(['newest', 'oldest']).optional()
+    sort: z.enum(['newest', 'oldest']).optional(),
+    include: z.enum(['drafts']).optional()
 });
 
 /**
@@ -1718,7 +1919,8 @@ export const zSearchResponse = z.object({
         source: z.enum(['mine', 'imported']),
         kind: z.enum(['fragment', 'thread']),
         subscriptionId: z.string().nullable(),
-        sourceTitle: z.string().nullable()
+        sourceTitle: z.string().nullable(),
+        draft: z.boolean().optional()
     })),
     page: z.object({
         limit: z.int().gt(0),
@@ -1740,7 +1942,9 @@ export const zGetReadingSummaryQuery = z.object({
     sub: z.string().optional(),
     hopper: z.string().optional(),
     kind: z.enum(['thread', 'fragment']).optional(),
-    background: z.enum(['true']).optional()
+    background: z.enum(['true']).optional(),
+    mentions: z.enum(['true']).optional(),
+    shelf: z.enum(['true']).optional()
 });
 
 /**
@@ -1761,7 +1965,9 @@ export const zListReadingQuery = z.object({
     sub: z.string().optional(),
     hopper: z.string().optional(),
     kind: z.enum(['thread', 'fragment']).optional(),
-    background: z.enum(['true']).optional()
+    background: z.enum(['true']).optional(),
+    mentions: z.enum(['true']).optional(),
+    shelf: z.enum(['true']).optional()
 });
 
 /**
@@ -1775,6 +1981,23 @@ export const zListReadingResponse = z.object({
     }),
     readState: z.literal(true),
     readStateClear: z.literal(true)
+});
+
+export const zSetReadingPlacementBody = z.object({
+    source: z.enum(['own', 'imported']),
+    sub: z.string().optional(),
+    id: z.string(),
+    placement: z.enum(['background', 'foreground']).nullable()
+}).strict();
+
+/**
+ * Success
+ */
+export const zSetReadingPlacementResponse = z.object({
+    source: z.enum(['own', 'imported']),
+    sub: z.string(),
+    id: z.string(),
+    placement: z.enum(['background', 'foreground']).nullable()
 });
 
 export const zListImportedReadingQuery = z.object({
@@ -2019,4 +2242,15 @@ export const zExtLineageGlyphListSummariesQuery = z.object({
  */
 export const zExtLineageGlyphListSummariesResponse = z.object({
     summaries: z.record(z.string(), zLineageGlyphSummary)
+});
+
+export const zExtWordCountListCountsQuery = z.object({
+    keys: z.string().min(2)
+});
+
+/**
+ * Success
+ */
+export const zExtWordCountListCountsResponse = z.object({
+    counts: z.record(z.string(), zWordCount)
 });

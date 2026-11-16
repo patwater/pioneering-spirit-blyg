@@ -33,18 +33,27 @@ function ExamplePage({ context }: { context: StudioContext }) {
   useEffect(() => {
     void context.run(async () => setTitle((await unwrap(BlyggerApi.getSettings({ client: context.client }))).siteTitle));
   }, []);
-  return <p data-extension-page="example">This page belongs to the example extension. Site title, read through the SDK: {title ?? '…'}</p>;
+  return (
+    <>
+      <p data-extension-page="example">This page belongs to the example extension. Site title, read through the SDK: {title ?? '…'}</p>
+      {/* A failure the extension found for itself: shown in the page's error line and kept in Settings → Errors under "example". */}
+      <Button className="btn btn-ghost btn-mini" onClick={() => context.showError(new Error('The example extension has nothing wrong with it; this is what an error looks like.'))}>
+        show an error
+      </Button>
+    </>
+  );
 }
 
 export const extension: StudioExtension = {
   name: 'example',
   label: 'Example extension',
-  description: 'Adds a marker to each reading byline, an "example" row to the ⋯ sheet and a page under More. For trying the extension slots.',
+  description: 'Adds a marker to each reading byline and beside the character count, an "example" row to the ⋯ sheet and a page under More. For trying the extension slots.',
   entryByline: ({ context }) => (
     <button type="button" className="ext-example" data-extension="example" aria-label="example extension" onClick={() => context.openSheet(aboutSheet(context))}>
       ◇
     </button>
   ),
+  draftCounter: ({ context }) => <span data-extension="example">· ◇ {context.item?.kind ?? 'new'}</span>,
   entryActions: (context) => [{ icon: '◇', label: 'example', description: 'about this entry', onSelect: () => context.openSheet(aboutSheet(context)) }],
   page: { title: 'example', component: ExamplePage },
 };

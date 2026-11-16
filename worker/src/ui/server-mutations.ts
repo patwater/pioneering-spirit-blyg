@@ -1,6 +1,6 @@
 import { BlyggerApi, unwrap } from '../../sdk/dist/browser.js';
-import type { AddHopperItemData, CreateAuthorizationData, CreateItemData, CreateSubscriptionData, LogBrowseData, UploadMediaData } from '../../sdk/dist/browser.js';
-import { authorizations, browse, changed, client, hoppers, items, markReading, subscriptions } from './data.ts';
+import type { AddHopperItemData, CreateAuthorizationData, CreateItemData, CreateSubscriptionData, LogBrowseData, SetReadingPlacementData, UploadMediaData } from '../../sdk/dist/browser.js';
+import { authorizations, browse, changed, client, hoppers, items, markReading, subscriptions, writeIfSyncing } from './data.ts';
 import { serverMutation } from './mutation.ts';
 import { sourceSchemas } from './data-schemas.ts';
 import { retryAfterMs, runImport, type Attempt, type ImportSummary, type OpmlFeed, type RowStatus } from './opml.ts';
@@ -11,7 +11,7 @@ export const uploadMedia = serverMutation((body: UploadMediaData['body']) =>
 
 export const createItem = serverMutation(async (body: CreateItemData['body']) => {
   const item = await unwrap(BlyggerApi.createItem({ client, body }));
-  await items.utils.writeUpsert(sourceSchemas.items.parse({ ...item, pins: [] }));
+  await writeIfSyncing(() => items.utils.writeUpsert(sourceSchemas.items.parse({ ...item, pins: [] })));
   // Creation is confirmed by its returned row; a failed count refresh must
   // not make a retry create another item.
   await Promise.allSettled([changed('item-summary')]);
@@ -20,7 +20,7 @@ export const createItem = serverMutation(async (body: CreateItemData['body']) =>
 
 export const createSubscription = serverMutation(async (body: CreateSubscriptionData['body']) => {
   const result = await unwrap(BlyggerApi.createSubscription({ client, body }));
-  if (!('needsConfirm' in result)) await subscriptions.utils.writeUpsert(result);
+  if (!('needsConfirm' in result)) await writeIfSyncing(() => subscriptions.utils.writeUpsert(result));
   // Native collection polling observes the server's background backfill.
   return result;
 });
@@ -31,6 +31,20 @@ export const resyncSubscription = serverMutation(async (id: string) => {
   return result;
 });
 
+// Background and Foreground (src/background.ts): the owner's choice on one
+// entry, or on a whole blyg. Each moves entries between lenses, so the
+// reading views refresh.
+export const setReadingPlacement = serverMutation(async (body: SetReadingPlacementData['body']) => {
+  await unwrap(BlyggerApi.setReadingPlacement({ client, body }));
+  await changed('reading');
+});
+
+export const setBlygBackground = serverMutation(async ({ id, background }: { id: string; background: boolean }) => {
+  const result = await unwrap(BlyggerApi.updateSubscription({ client, path: { id }, body: { background } }));
+  await writeIfSyncing(() => subscriptions.utils.writeUpsert(result));
+  await changed('reading');
+});
+
 export const pollSubscriptions = serverMutation(async (_: void) => {
   // The server polls in the background. Active collections already poll every 15s.
   return unwrap(BlyggerApi.pollAllSubscriptions({ client }));
@@ -38,7 +52,7 @@ export const pollSubscriptions = serverMutation(async (_: void) => {
 
 export const createHopper = serverMutation(async (name: string) => {
   const hopper = await unwrap(BlyggerApi.createHopper({ client, body: { name } }));
-  await hoppers.utils.writeUpsert(hopper);
+  await writeIfSyncing(() => hoppers.utils.writeUpsert(hopper));
   return hopper;
 });
 
@@ -67,13 +81,13 @@ export const logBrowse = serverMutation(async ({ body, onLogged }: {
 
 export const clearBrowse = serverMutation(async (_: void) => {
   await unwrap(BlyggerApi.clearBrowse({ client }));
-  await browse.utils.writeDelete([...browse.keys()]);
+  await writeIfSyncing(() => browse.utils.writeDelete([...browse.keys()]));
   await changed('browse');
 });
 
 export const createAuthorization = serverMutation(async (body: CreateAuthorizationData['body']) => {
   const result = await unwrap(BlyggerApi.createAuthorization({ client, body }));
-  await authorizations.utils.writeUpsert(result.authorization);
+  await writeIfSyncing(() => authorizations.utils.writeUpsert(result.authorization));
   return result;
 });
 

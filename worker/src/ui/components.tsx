@@ -21,8 +21,14 @@ import * as sourceData from './data.ts';
 import { readState } from '../versions.ts';
 import { displayUrl } from '../importer/util.ts';
 import { Sheet } from './sheets.tsx';
+import { errorLog, type ErrorSource } from './error-log.ts';
 import { SetupBanner } from './setup.tsx';
+import { compiledExtensions } from '../../build/extensions.ui.ts';
+import type { StudioExtension } from './extension-api.ts';
+import { enabledExtensions, menuPlacement } from './extensions.tsx';
 import { applyTheme } from './theme.ts';
+import { applyTitle } from './tab.ts';
+import { Tooltip } from './primitives.tsx';
 import type { CustomTheme } from '../themes.ts';
 export { Button };
 export const mount =
@@ -59,10 +65,24 @@ export function SourceLink({ url }: { url?: string | null }) {
 export function Html({ html, id }: { html: string; id?: string }) {
   return <div id={id} dangerouslySetInnerHTML={{ __html: html }} />;
 }
-export function Failure({ error }: { error: unknown }) {
+/**
+ * An error banner. A failure (an Error, not a message to the author) also goes in
+ * this device's error log, and the banner links to it there.
+ */
+export function Failure({ error, source = 'banner' }: { error: unknown; source?: ErrorSource }) {
+  const [logged, setLogged] = useState<string>();
+  useEffect(() => setLogged(errorLog.record(error, source)), [error, source]);
   return error ? (
     <p className="error-banner" role="alert">
       {error instanceof Error ? error.message : String(error)}
+      {logged ? (
+        <>
+          {' '}
+          <Link className="error-details" to="/settings" hash="errors">
+            details
+          </Link>
+        </>
+      ) : null}
     </p>
   ) : null;
 }
@@ -135,7 +155,7 @@ const tabs = [
   { label: 'reading', to: '/reading', icon: '◫' },
   { label: 'compose', to: '/', icon: '✎' },
   { label: 'hoppers', to: '/hoppers', icon: '▤' },
-  { label: 'mentions', to: '/mentions', icon: '↩' },
+  { label: 'responses', to: '/mentions', icon: '↩' },
   { label: 'updates', to: '/updates', icon: '↻' },
   { label: 'more', to: '/more', icon: '⋯' },
 
@@ -147,7 +167,7 @@ export function tabFor(path: string): Tab | null {
   if (p === '/' || p.startsWith('/edit/')) return 'compose';
   if (p === '/reading' || p.startsWith('/reading/') || p === '/subs' || p === '/fork') return 'reading';
   if (p === '/hoppers' || p.startsWith('/hoppers/')) return 'hoppers';
-  if (p === '/mentions') return 'mentions';
+  if (p === '/mentions') return 'responses';
   if (p === '/updates') return 'updates';
   if (p === '/more' || p === '/settings' || p === '/syntax' || p === '/signals' || p === '/access') return 'more';
   return null;
@@ -201,7 +221,7 @@ export function Layout({ children }: { children: ReactNode }) {
   const framed = chrome.framed ?? true;
   const wide = chrome.wide ?? (path === '/reading' || path.startsWith('/edit/'));
   const readProblem = useSyncExternalStore(subscribeReadProblems, readProblemSnapshot);
-  const error = readProblem?.cause ?? readProblem?.message;
+  const error = readProblem?.cause ?? readProblem;
   // The studio wears the reading theme. Until settings load, the theme
   // applied at startup (the last one seen on this device) stays.
   const theme = settings?.theme;
@@ -226,6 +246,10 @@ export function Layout({ children }: { children: ReactNode }) {
     media.addEventListener('change', flip);
     return () => media.removeEventListener('change', flip);
   }, [theme, customKey, customDarkKey]);
+  const siteTitle = settings?.siteTitle;
+  useEffect(() => {
+    if (settings) applyTitle(siteTitle);
+  }, [siteTitle, settings === undefined]);
   useEffect(() => {
     document.body.classList.toggle('has-tabs', showTabs);
     document.body.classList.toggle('no-tabs', !showTabs);
@@ -242,6 +266,24 @@ export function Layout({ children }: { children: ReactNode }) {
     editedItem?.status === 'public' ? publicPath(editedItem) : `${mount}/`;
   const behind = !!(settings?.updateCheck && update?.behind);
   const unacked = !!(settings?.updateCheck && !settings.updateNoticeAck);
+  const menu = menuPlacement(enabledExtensions(compiledExtensions, settings?.extensions));
+  const extensionTab = (extension: StudioExtension) => {
+    const current = path.replace(/\/+$/, '') === `/ext/${extension.name}`;
+    return (
+      <Link
+        key={`ext-${extension.name}`}
+        to="/ext/$name"
+        params={{ name: extension.name }}
+        className={current ? 'tab is-active' : 'tab'}
+        aria-current={current ? 'page' : undefined}
+      >
+        <span className="ti" aria-hidden="true">
+          {extension.page!.mainMenu!.icon}
+        </span>
+        <span className="tl">{extension.page!.title}</span>
+      </Link>
+    );
+  };
   return (
     <ChromeContext.Provider value={setChrome}>
       <header className="topbar">
@@ -254,14 +296,15 @@ export function Layout({ children }: { children: ReactNode }) {
         </h1>
         <div className="topbar-actions">
           {behind ? (
-            <Link
-              to="/more"
-              className="tb-badge warn"
-              id="update-badge"
-              title="A newer release exists"
-            >
-              update
-            </Link>
+            <Tooltip label="A newer release exists">
+              <Link
+                to="/more"
+                className="tb-badge warn"
+                id="update-badge"
+              >
+                update
+              </Link>
+            </Tooltip>
           ) : null}
           <a
             className="tb-btn"
@@ -277,7 +320,7 @@ export function Layout({ children }: { children: ReactNode }) {
       <main className={wide ? 'views wide' : 'views'}>
         {error ? (
           <div className="read-error">
-            <Failure error={error} />
+            <Failure error={error} source="read" />
             <Button
               className="btn btn-ghost btn-mini"
               onClick={() => {
@@ -292,12 +335,15 @@ export function Layout({ children }: { children: ReactNode }) {
         <div className={framed ? 'screen framed' : 'screen'}>{children}</div>
       </main>
       {showTabs ? (
-        <nav className="tabbar" aria-label="studio">
-          {tabs.map((tab) => (
+        <nav className={menu.top.length || menu.visible.length ? 'tabbar has-extension-tab' : 'tabbar'} aria-label="studio">
+          {menu.top.map(extensionTab)}
+          {tabs.flatMap((tab) => [
+            // The Studio's spot for visible extension pages: just above compose.
+            ...(tab.label === 'compose' ? menu.visible.map(extensionTab) : []),
             <Link
               key={tab.label}
               to={tab.to}
-              preload={tab.label === 'mentions' ? 'viewport' : undefined}
+              preload={tab.label === 'responses' ? 'viewport' : undefined}
               className={tab.label === active ? 'tab is-active' : 'tab'}
               aria-current={tab.label === active ? 'page' : undefined}
             >
@@ -308,8 +354,8 @@ export function Layout({ children }: { children: ReactNode }) {
               {tab.label === 'more' && (behind || unacked) ? (
                 <span className="flag" aria-hidden="true" />
               ) : null}
-            </Link>
-          ))}
+            </Link>,
+          ])}
         </nav>
       ) : null}
     </ChromeContext.Provider>

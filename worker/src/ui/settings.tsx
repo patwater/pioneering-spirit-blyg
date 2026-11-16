@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { AiModels, Settings } from '../../sdk/dist/browser.js';
 import { BlyggerApi, unwrap } from '../../sdk/dist/browser.js';
 import { settings, client, items } from './data.ts';
@@ -26,6 +26,8 @@ import { ThemeEditor, ThemeShare } from './theme-editor.tsx';
 import { FONTS } from '../fonts.ts';
 import { DEFAULT_FEED_ORDER, FEED_ALGORITHMS } from '../feeds/index.ts';
 import { CLIENT } from '../client.ts';
+import { AddressBook } from './contacts.tsx';
+import { ERROR_LOG_MAX, describeEntry, diagnostics, errorLog, exportLog, thisDevice } from './error-log.ts';
 import { compiledExtensions } from '../../build/extensions.ui.ts';
 
 const fields = [
@@ -59,6 +61,10 @@ const fields = [
   "aiModelClassify",
   "feedPrompt",
   "aiStylePrompt",
+  "changelogDisplay",
+  "readerChangelogDisplay",
+  "backgroundRules",
+  "changelogSummaryPrompt",
   "acceptMentions",
   "updateCheck",
   "showResponsesDefault",
@@ -142,6 +148,7 @@ function SettingsForm({ initial }: { initial: Settings }) {
       | "siteUrl"
       | "aiStylePrompt"
       | "feedPrompt"
+      | "changelogSummaryPrompt"
       | "updateFeedUrl",
     label: string,
     multiline = false,
@@ -154,7 +161,7 @@ function SettingsForm({ initial }: { initial: Settings }) {
       {multiline ? (
         <textarea
           id={key}
-          rows={key === "feedPrompt" ? 4 : 3}
+          rows={key === "feedPrompt" || key === "changelogSummaryPrompt" ? 4 : 3}
           value={form[key]}
           placeholder={placeholder}
           onChange={(event) => change(key, event.target.value)}
@@ -207,6 +214,7 @@ function SettingsForm({ initial }: { initial: Settings }) {
   return (
     <div className="settings-layout">
     <SettingsNav />
+    <div className="settings-main">
     <form
       className="settings-form"
       id="settings-form"
@@ -414,6 +422,77 @@ function SettingsForm({ initial }: { initial: Settings }) {
           </span>
         </div>
         <FrontPageFields form={form} change={change} />
+      </section>
+      <section className="card" id="changelog-display">
+        <h3 className="card-h">changelog</h3>
+        {(
+          [
+            ['changelogDisplay', 'On your item pages, show', 'changelog_display'],
+            ['readerChangelogDisplay', 'In your reader, for blyg items, show', 'reader_changelog_display'],
+          ] as const
+        ).map(([key, legend, id]) => (
+          <div className="field" role="radiogroup" aria-labelledby={`${id}-label`} key={key}>
+            <span id={`${id}-label`}>{legend}</span>
+            {(
+              [
+                ['latest', 'The latest note', 'the note for the current version, as before'],
+                ['history', 'The full history', 'every version\u2019s note, newest first'],
+                ['summary', 'An AI summary', 'written from the notes by the change-notes model; uses tokens'],
+              ] as const
+            ).map(([value, label, hint]) => (
+              <label className="check" key={value}>
+                <input
+                  type="radio"
+                  name={key}
+                  value={value}
+                  checked={form[key] === value}
+                  onChange={() => change(key, value)}
+                />
+                <span>
+                  {label} <span className="hint">{hint}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+        ))}
+        <p className="hint">
+          A summary reads only the notes, never the text, and is written once
+          per new version and kept: on your pages when a version is first
+          viewed, in your reader when you open an item. Until it exists, the
+          full history shows. It is labelled as AI-written and never goes into
+          your feed or your item files. An item with one version and no note
+          shows just its version line.
+        </p>
+      </section>
+      <section className="card" id="background">
+        <h3 className="card-h">Background</h3>
+        <p className="hint">
+          The Background lens in your reader holds what you have moved there,
+          blygs you have moved there, and entries these rules send there. Every
+          other lens leaves them out. Background never marks anything read and
+          never changes what you publish. Use an entry&rsquo;s ⋯ menu to move it
+          either way; your choice beats the rules.
+        </p>
+        <label className="check">
+          <input type="checkbox" checked disabled />
+          <span>
+            Withdrawn items <span className="hint">always in Background</span>
+          </span>
+        </label>
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={form.backgroundRules?.minor ?? true}
+            onChange={(event) => change('backgroundRules', { ...form.backgroundRules, minor: event.target.checked })}
+          />
+          <span>
+            Your own minor changes
+            <span className="hint">
+              a version the change classifier calls a typo, minor or refresh
+              (Settings → AI → change classifier)
+            </span>
+          </span>
+        </label>
       </section>
       </section>
       <section className="settings-section" id="appearance" aria-labelledby="appearance-h">
@@ -675,6 +754,20 @@ function SettingsForm({ initial }: { initial: Settings }) {
           </>,
         )}
       </section>
+      <section className="card" id="ai-changelog-summary">
+        <h3 className="card-h">changelog summaries</h3>
+        <p className="hint">
+          Uses the change-notes model above. Applies to the summaries chosen
+          under Feed → changelog, and to a change note drafted with{' '}
+          <em>summarize full history to date</em>.
+        </p>
+        {field(
+          "changelogSummaryPrompt",
+          'Instructions for roll-up summaries (optional)',
+          true,
+          'e.g. One short paragraph. Say which versions were substantial rewrites and which were small corrections, and what the piece argues now.',
+        )}
+      </section>
       <section className="card" id="ai-classify">
         <h3 className="card-h">change classifier</h3>
         <p className="hint">
@@ -750,7 +843,7 @@ function SettingsForm({ initial }: { initial: Settings }) {
           <>
             Applies to items that have not decided for themselves. An item’s
             override keeps winning if you change this later. Set overrides and
-            hide individual responses in the mentions tab. A response list is a
+            hide individual responses in the responses tab. A response list is a
             citation trail with no count.
           </>,
         )}
@@ -824,7 +917,104 @@ function SettingsForm({ initial }: { initial: Settings }) {
         </Button>
       </div>
     </form>
+    {/* Its own form and its own save: "save settings" does not reach it. */}
+    <section className="settings-section" id="contacts" aria-labelledby="contacts-h">
+      <h2 className="section-title" id="contacts-h">Address book</h2>
+      <AddressBook />
+    </section>
+    <section className="settings-section" id="errors" aria-labelledby="errors-h">
+      <h2 className="section-title" id="errors-h">Errors</h2>
+      <ErrorLog />
+    </section>
     </div>
+    </div>
+  );
+}
+
+/**
+ * This device's error log (error-log.ts): what each banner said, newest first,
+ * and one button to copy the lot into an issue.
+ */
+function ErrorLog() {
+  const entries = useSyncExternalStore(errorLog.subscribe, errorLog.entries);
+  const [copied, setCopied] = useState(false);
+  useEffect(() => setCopied(false), [entries]);
+  return (
+    <section className="card" id="error-log">
+      <p className="hint">
+        The last errors the Studio showed in this browser, kept on this device
+        only: nothing here is sent anywhere unless you export it. Each device
+        keeps its own list, of the latest {ERROR_LOG_MAX}. An export carries the errors
+        with this browser, screen and Studio version, and none of your text.
+      </p>
+      {entries.length ? (
+        <ol className="error-log">
+          {entries.map((entry) => (
+            <li key={entry.id}>
+              <details>
+                <summary>
+                  <span className="error-log-message">{entry.message}</span>
+                  <span className="error-log-when">
+                    <time dateTime={entry.at}>{new Date(entry.at).toLocaleString()}</time>
+                    {entry.count > 1 ? ` · ×${entry.count}` : ''}
+                  </span>
+                </summary>
+                <pre>{describeEntry(entry)}</pre>
+              </details>
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <p id="error-log-empty">No errors logged on this device.</p>
+      )}
+      <div className="error-log-actions">
+        <Button
+          type="button"
+          className="btn btn-ghost btn-mini"
+          id="error-log-copy"
+          onClick={async () => {
+            try {
+              await navigator.clipboard.writeText(diagnostics(entries, thisDevice()));
+              setCopied(true);
+            } catch {
+              /* clipboard blocked: each entry's text is selectable above */
+            }
+          }}
+        >
+          {copied ? 'copied' : 'copy diagnostics'}
+        </Button>
+        <Button
+          type="button"
+          className="btn btn-ghost btn-mini"
+          id="error-log-export"
+          onClick={async () => {
+            const { name, text } = exportLog(entries, thisDevice(), new Date());
+            const file = new File([text], name, { type: 'application/json' });
+            // A phone or tablet hands the file to Mail, Messages or AirDrop; a desktop saves it.
+            if (matchMedia('(pointer: coarse)').matches && navigator.canShare?.({ files: [file] })) {
+              try {
+                await navigator.share({ files: [file], title: name });
+                return;
+              } catch (failure) {
+                if (failure instanceof Error && failure.name === 'AbortError') return;
+              }
+            }
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(file);
+            link.download = name;
+            link.click();
+            setTimeout(() => URL.revokeObjectURL(link.href), 10_000);
+          }}
+        >
+          export error log
+        </Button>
+        {entries.length ? (
+          <Button type="button" className="btn btn-ghost btn-mini" id="error-log-clear" onClick={() => errorLog.clear()}>
+            clear error log
+          </Button>
+        ) : null}
+      </div>
+    </section>
   );
 }
 
@@ -837,6 +1027,8 @@ const SECTIONS = [
   ['ai', 'AI'],
   ['network', 'Network'],
   ...(compiledExtensions.length ? [['extensions', 'Extensions'] as const] : []),
+  ['contacts', 'Address book'],
+  ['errors', 'Errors'],
 ] as const;
 
 /**

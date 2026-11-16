@@ -189,13 +189,18 @@ test('the composer tools: kind pills, the over-length hint, [[ and [TK]', async 
   await login(page);
   const box = page.locator('#composer-text');
   await expect(page.getByRole('radio', { name: 'fragment', exact: true })).toBeChecked();
-  await expect(page.locator('[data-action="bracket-quote"]')).toHaveCount(0);
+  // Thread-only tools stay in the row, greyed, so it doesn't shift between kinds.
+  await expect(page.locator('[data-action="bracket-quote"]')).toBeDisabled();
+  await expect(box).toHaveClass(/is-fragment/);
   await box.fill('x'.repeat(1001));
   await expect(page.locator('#composer-count')).toHaveClass(/over/);
+  await expect(box).toHaveClass(/is-over/);
   await page.getByRole('button', { name: 'make this a thread', exact: true }).click();
   await expect(page.getByRole('radio', { name: 'thread', exact: true })).toBeChecked();
   await expect(page.locator('#composer-count')).not.toHaveClass(/over/);
-  await expect(page.locator('[data-action="bracket-quote"]')).toHaveCount(1);
+  await expect(box).not.toHaveClass(/is-fragment/);
+  await expect(box).not.toHaveClass(/is-over/);
+  await expect(page.locator('[data-action="bracket-quote"]')).toBeEnabled();
   await box.fill('Summarise this');
   await select(page, '#composer-text', 'Summarise this');
   await page.locator('[data-action="tk"]').click();
@@ -336,10 +341,10 @@ test('the editor ⋯ menu copies, pins and withdraws, and the Version-N dialog s
     const sheet = page.getByRole('dialog', { name: 'actions' });
     await sheet.getByRole('button', { name: new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`) }).click();
   };
-  // A draft: make this a…, add to hopper (session 47), discard draft — nothing that needs a public item.
+  // A draft: make this a…, add to shelf (#135), add to hopper (session 47), discard draft — nothing that needs a public item.
   await page.getByRole('button', { name: 'more actions' }).click();
   const sheet = page.getByRole('dialog', { name: 'actions' });
-  await expect(sheet.locator('.ml')).toHaveText(['make this a thread', /^add to hopper…/, 'discard draft']);
+  await expect(sheet.locator('.ml')).toHaveText(['make this a thread', /^(add to|remove from) shelf/, /^add to hopper…/, 'discard draft']);
   await page.keyboard.press('Escape');
   await expect(sheet).toHaveCount(0);
   await page.locator('#publish-btn').click();

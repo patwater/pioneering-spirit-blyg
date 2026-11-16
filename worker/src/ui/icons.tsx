@@ -65,9 +65,40 @@ export const Sparkle = () => (
     <path d="M12 3v4M12 17v4M3 12h4M17 12h4M6.3 6.3l2.5 2.5M15.2 15.2l2.5 2.5M6.3 17.7l2.5-2.5M15.2 8.8l2.5-2.5" />
   </Svg>
 );
+export const EnterFocus = () => (
+  <Svg>
+    <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />
+  </Svg>
+);
+export const ExitFocus = () => (
+  <Svg>
+    <path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5" />
+  </Svg>
+);
 export const Swap = () => (
   <Svg>
     <path d="M7 4 3 8l4 4M3 8h13M17 20l4-4-4-4M21 16H8" />
+  </Svg>
+);
+/* Markdown structure: a list item moved in or out, a line broken, a block of code. */
+export const IndentIn = () => (
+  <Svg>
+    <path d="M4 6h16M12 12h8M12 18h8M4 10l4 3.5L4 17" />
+  </Svg>
+);
+export const IndentOut = () => (
+  <Svg>
+    <path d="M4 6h16M12 12h8M12 18h8M8 10l-4 3.5L8 17" />
+  </Svg>
+);
+export const LineBreak = () => (
+  <Svg>
+    <path d="M19 5v7a3 3 0 0 1-3 3H5M9 11l-4 4 4 4" />
+  </Svg>
+);
+export const CodeBlock = () => (
+  <Svg>
+    <path d="m8 7-5 5 5 5M16 7l5 5-5 5M13.5 5l-3 14" />
   </Svg>
 );
 export const Expand = () => (

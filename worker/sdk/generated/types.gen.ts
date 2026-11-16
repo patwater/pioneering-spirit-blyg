@@ -72,6 +72,7 @@ export type ChangeState = {
         responses: number;
         interactions: number;
         browse: number;
+        shelf: number;
     };
 };
 
@@ -159,6 +160,24 @@ export type Settings = {
     changeCategoryInNote: boolean;
     feedPrompt: string;
     aiStylePrompt: string;
+    /**
+     * What an item's own public page shows of its changelog: the latest note (the default), every note, or an AI summary of them. A summary is written once per new version with the change-notes model, and is studio-private: it never reaches the item document or the feed.
+     */
+    changelogDisplay: 'latest' | 'history' | 'summary';
+    /**
+     * The same choice for blyg items in the reader. In summary mode a card shows the latest note and the summary is written when the item is opened.
+     */
+    readerChangelogDisplay: 'latest' | 'history' | 'summary';
+    /**
+     * Owner instructions for changelog summaries: the public-page and reader summaries, and a change note drafted with "summarize full history to date".
+     */
+    changelogSummaryPrompt: string;
+    /**
+     * Which Background rules count in the reader, all on by default (blygger-spec docs/background-plan.md). Withdrawn items are always in Background. Reader-only: nothing published changes, and nothing is marked read.
+     */
+    backgroundRules: {
+        minor: boolean;
+    };
     acceptMentions: boolean;
     updateCheck: boolean;
     showResponsesDefault: boolean;
@@ -233,6 +252,10 @@ export type Settings = {
     updateFeedUrl: string;
     updateNoticeAck: boolean;
     /**
+     * Discover: the listing date of the newest blygger.com listing the owner has been shown, ISO; empty until Discover is first opened. Listings after it are new.
+     */
+    discoverSeenAt: string;
+    /**
      * Studio extensions enabled on this node (docs/extensions.md). Only names compiled into this build are accepted; every extension starts disabled.
      */
     extensions: Array<string>;
@@ -269,9 +292,54 @@ export type Subscription = {
     created: string;
     titleFollowsSource: boolean;
     /**
+     * The owner moved this whole blyg to Background in the reader. An entry's own placement still wins (blygger-spec docs/background-plan.md).
+     */
+    background: boolean;
+    /**
      * A hopper subscription (one public hopper at another blyg; spec 0.4 §16.12): the hopper feed's resolved absolute URL, which with origin (the blyg's identity origin) is the subscription's identity. Null for every other subscription.
      */
     hopperFeedUrl: string | null;
+};
+
+export type Shelf = {
+    /**
+     * The shelved items, in the owner's order, each named as hopper membership names an item. Own drafts may be shelved; a withdrawn own item, or an imported tombstone with no retained pin, is omitted. A discarded draft, an imported item no longer held, and every entry of a deleted subscription leave the shelf. Studio-private for good: never in an item document, feed, manifest or public page, and the shelf never gains a public mode.
+     */
+    entries: Array<ShelfEntry>;
+    /**
+     * The shelf's revision. Send it back as expectedRevision for a conditional replace; every successful PUT bumps it.
+     */
+    revision: number;
+};
+
+export type ShelfEntry = {
+    /**
+     * The subscription the item is held under, or "~own" (OWN_SUBSCRIPTION) for one of the owner's own items.
+     */
+    sub: string;
+    /**
+     * The item's id: the own item's id under "~own", else the imported item's remote id.
+     */
+    remoteId: string;
+};
+
+export type Contact = {
+    id: string;
+    /**
+     * The petname typed as @handle. Never leaves the studio.
+     */
+    handle: string;
+    name: string;
+    url: string;
+    /**
+     * Alternate identifiers. Only self and bound go on the wire; the API can only add entered ones.
+     */
+    ids: Array<{
+        id: string;
+        provenance: 'self' | 'bound' | 'entered';
+    }>;
+    created: string;
+    updated: string;
 };
 
 export type Hopper = {
@@ -528,6 +596,31 @@ export type ReadingEntry = {
          */
         readVersion: number | null;
     };
+    background: EntryBackground;
+};
+
+/**
+ * Why the entry is in Background or not (blygger-spec docs/background-plan.md). Reader-only: never published, never marks anything read.
+ */
+export type EntryBackground = {
+    /**
+     * The automatic reasons that count under Settings (withdrawn always), in order: withdrawn, then each enabled rule that applies.
+     */
+    reasons: Array<string>;
+    /**
+     * The owner's choice on this entry, which beats every rule; null when the rules decide.
+     */
+    placement: 'background' | 'foreground' | null;
+    /**
+     * The owner moved this entry's whole blyg to Background.
+     */
+    blyg: boolean;
+    /**
+     * What a reason's label says, such as the change category behind minor.
+     */
+    detail?: {
+        [key: string]: unknown;
+    };
 };
 
 export type ImportedReadingEntry = {
@@ -689,6 +782,65 @@ export type LineageGlyphSummary = {
         stub: number;
         transclusion: number;
         fork: number;
+    };
+};
+
+export type WordCount = {
+    /**
+     * The current published version, and the tree its outline makes; null for an item never published.
+     */
+    published: {
+        words: number;
+        /**
+         * Han, kana and Hangul characters, counted one by one.
+         */
+        cjk: number;
+        /**
+         * The roll-up over this side's outline links; null when they do not form a strict tree of our own items.
+         */
+        document: {
+            words: number;
+            /**
+             * Han, kana and Hangul characters, counted one by one.
+             */
+            cjk: number;
+            /**
+             * Items in the outline tree, this one included.
+             */
+            items: number;
+        } | null;
+        /**
+         * Why `document` is null.
+         */
+        reason?: 'cycle' | 'repeated' | 'unavailable' | 'too-large';
+    } | null;
+    /**
+     * The working copy as publish would bake it now, and the tree its outline makes. Equal to `published` when there are no unpublished edits.
+     */
+    draft: {
+        words: number;
+        /**
+         * Han, kana and Hangul characters, counted one by one.
+         */
+        cjk: number;
+        /**
+         * The roll-up over this side's outline links; null when they do not form a strict tree of our own items.
+         */
+        document: {
+            words: number;
+            /**
+             * Han, kana and Hangul characters, counted one by one.
+             */
+            cjk: number;
+            /**
+             * Items in the outline tree, this one included.
+             */
+            items: number;
+        } | null;
+        /**
+         * Why `document` is null.
+         */
+        reason?: 'cycle' | 'repeated' | 'unavailable' | 'too-large';
     };
 };
 
@@ -1647,6 +1799,10 @@ export type PublishItemResponses = {
         revision: number;
         version: number;
         warning?: string;
+        /**
+         * @words that name no contact. They stay literal text.
+         */
+        unresolvedHandles?: Array<string>;
     };
 };
 
@@ -1747,6 +1903,10 @@ export type ClassifyChangeResponse = ClassifyChangeResponses[keyof ClassifyChang
 export type DraftNoteData = {
     body: {
         expectedRevision: number;
+        /**
+         * Summarize the item's whole revision history to date, ending with this change, from the earlier notes and the two texts; longer than a plain note (at most 400 characters). Off by default.
+         */
+        history?: boolean;
     };
     path: {
         id: string;
@@ -1821,6 +1981,88 @@ export type DraftNoteResponses = {
 };
 
 export type DraftNoteResponse = DraftNoteResponses[keyof DraftNoteResponses];
+
+export type SummarizeChangelogData = {
+    /**
+     * An own item by itemId, or an imported blyg item by its subscription and remote id. The summary reads the changelog's notes only, is written once per version with the change-notes model and kept, and is studio-private.
+     */
+    body: {
+        itemId: string;
+    } | {
+        subscriptionId: string;
+        remoteId: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/changelog-summary';
+};
+
+export type SummarizeChangelogErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    405: ApiError;
+    /**
+     * Request failed
+     */
+    409: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    415: ApiError;
+    /**
+     * Request failed
+     */
+    422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+    /**
+     * Request failed
+     */
+    502: ApiError;
+};
+
+export type SummarizeChangelogError = SummarizeChangelogErrors[keyof SummarizeChangelogErrors];
+
+export type SummarizeChangelogResponses = {
+    /**
+     * Success
+     */
+    200: {
+        summary: string;
+        model: string;
+        version: number;
+        cached: boolean;
+    };
+};
+
+export type SummarizeChangelogResponse = SummarizeChangelogResponses[keyof SummarizeChangelogResponses];
 
 export type GenerateItemData = {
     body: {
@@ -2405,6 +2647,24 @@ export type UpdateSettingsData = {
         changeCategoryInNote?: boolean;
         feedPrompt?: string;
         aiStylePrompt?: string;
+        /**
+         * What an item's own public page shows of its changelog: the latest note (the default), every note, or an AI summary of them. A summary is written once per new version with the change-notes model, and is studio-private: it never reaches the item document or the feed.
+         */
+        changelogDisplay?: 'latest' | 'history' | 'summary';
+        /**
+         * The same choice for blyg items in the reader. In summary mode a card shows the latest note and the summary is written when the item is opened.
+         */
+        readerChangelogDisplay?: 'latest' | 'history' | 'summary';
+        /**
+         * Owner instructions for changelog summaries: the public-page and reader summaries, and a change note drafted with "summarize full history to date".
+         */
+        changelogSummaryPrompt?: string;
+        /**
+         * Which Background rules count in the reader, all on by default (blygger-spec docs/background-plan.md). Withdrawn items are always in Background. Reader-only: nothing published changes, and nothing is marked read.
+         */
+        backgroundRules?: {
+            minor: boolean;
+        };
         acceptMentions?: boolean;
         updateCheck?: boolean;
         showResponsesDefault?: boolean;
@@ -2464,6 +2724,10 @@ export type UpdateSettingsData = {
         setup?: 'pending' | 'notice' | 'done';
         updateFeedUrl?: string;
         updateNoticeAck?: boolean;
+        /**
+         * Discover: the listing date of the newest blygger.com listing the owner has been shown, ISO; empty until Discover is first opened. Listings after it are new.
+         */
+        discoverSeenAt?: string;
         /**
          * Studio extensions enabled on this node (docs/extensions.md). Only names compiled into this build are accepted; every extension starts disabled.
          */
@@ -2876,6 +3140,10 @@ export type UpdateSubscriptionData = {
          */
         title?: string | null;
         paused?: boolean;
+        /**
+         * Move this whole blyg to Background in the reader, or back.
+         */
+        background?: boolean;
     };
     path: {
         id: string;
@@ -3090,6 +3358,518 @@ export type ResyncSubscriptionResponses = {
 };
 
 export type ResyncSubscriptionResponse = ResyncSubscriptionResponses[keyof ResyncSubscriptionResponses];
+
+export type GetShelfData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/shelf';
+};
+
+export type GetShelfErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    405: ApiError;
+    /**
+     * Request failed
+     */
+    409: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    415: ApiError;
+    /**
+     * Request failed
+     */
+    422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+    /**
+     * Request failed
+     */
+    502: ApiError;
+};
+
+export type GetShelfError = GetShelfErrors[keyof GetShelfErrors];
+
+export type GetShelfResponses = {
+    /**
+     * Success
+     */
+    200: Shelf;
+};
+
+export type GetShelfResponse = GetShelfResponses[keyof GetShelfResponses];
+
+export type PutShelfData = {
+    body: {
+        /**
+         * The whole list, in order (at most 50). Replaces the stored list. An entry that does not resolve (an unknown subscription, an item not held under it, a withdrawn own item, an imported tombstone with no retained pin) is dropped quietly, never refused, and a repeated entry keeps its first position; the response is what was stored.
+         */
+        entries: Array<ShelfEntry>;
+        /**
+         * Required. Replace only if the shelf is still at this revision (read it with GET /shelf; a never-written shelf is at 0); otherwise 409 revision-conflict with the current { entries, revision } in details.current. There is no unconditional replace: several clients share the shelf, and one must not silently undo another's reorder.
+         */
+        expectedRevision: number;
+    };
+    path?: never;
+    query?: never;
+    url: '/shelf';
+};
+
+export type PutShelfErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    405: ApiError;
+    /**
+     * Request failed
+     */
+    409: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    415: ApiError;
+    /**
+     * Request failed
+     */
+    422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+    /**
+     * Request failed
+     */
+    502: ApiError;
+};
+
+export type PutShelfError = PutShelfErrors[keyof PutShelfErrors];
+
+export type PutShelfResponses = {
+    /**
+     * Success
+     */
+    200: Shelf;
+};
+
+export type PutShelfResponse = PutShelfResponses[keyof PutShelfResponses];
+
+export type ListContactsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/contacts';
+};
+
+export type ListContactsErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    405: ApiError;
+    /**
+     * Request failed
+     */
+    409: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    415: ApiError;
+    /**
+     * Request failed
+     */
+    422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+    /**
+     * Request failed
+     */
+    502: ApiError;
+};
+
+export type ListContactsError = ListContactsErrors[keyof ListContactsErrors];
+
+export type ListContactsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        contacts: Array<Contact>;
+    };
+};
+
+export type ListContactsResponse = ListContactsResponses[keyof ListContactsResponses];
+
+export type CreateContactData = {
+    body: {
+        handle: string;
+        name: string;
+        url: string;
+        ids?: Array<string>;
+    };
+    path?: never;
+    query?: never;
+    url: '/contacts';
+};
+
+export type CreateContactErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    405: ApiError;
+    /**
+     * Request failed
+     */
+    409: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    415: ApiError;
+    /**
+     * Request failed
+     */
+    422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+    /**
+     * Request failed
+     */
+    502: ApiError;
+};
+
+export type CreateContactError = CreateContactErrors[keyof CreateContactErrors];
+
+export type CreateContactResponses = {
+    /**
+     * Success
+     */
+    201: Contact;
+};
+
+export type CreateContactResponse = CreateContactResponses[keyof CreateContactResponses];
+
+export type DeleteContactData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/contacts/{id}';
+};
+
+export type DeleteContactErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    405: ApiError;
+    /**
+     * Request failed
+     */
+    409: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    415: ApiError;
+    /**
+     * Request failed
+     */
+    422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+    /**
+     * Request failed
+     */
+    502: ApiError;
+};
+
+export type DeleteContactError = DeleteContactErrors[keyof DeleteContactErrors];
+
+export type DeleteContactResponses = {
+    /**
+     * Success
+     */
+    200: {
+        ok: boolean;
+    };
+};
+
+export type DeleteContactResponse = DeleteContactResponses[keyof DeleteContactResponses];
+
+export type UpdateContactData = {
+    body: {
+        handle?: string;
+        name?: string;
+        url?: string;
+        ids?: Array<string>;
+    };
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/contacts/{id}';
+};
+
+export type UpdateContactErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    405: ApiError;
+    /**
+     * Request failed
+     */
+    409: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    415: ApiError;
+    /**
+     * Request failed
+     */
+    422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+    /**
+     * Request failed
+     */
+    502: ApiError;
+};
+
+export type UpdateContactError = UpdateContactErrors[keyof UpdateContactErrors];
+
+export type UpdateContactResponses = {
+    /**
+     * Success
+     */
+    200: Contact;
+};
+
+export type UpdateContactResponse = UpdateContactResponses[keyof UpdateContactResponses];
+
+export type ResolveContactData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/contacts/{id}/resolve';
+};
+
+export type ResolveContactErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    405: ApiError;
+    /**
+     * Request failed
+     */
+    409: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    415: ApiError;
+    /**
+     * Request failed
+     */
+    422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+    /**
+     * Request failed
+     */
+    502: ApiError;
+};
+
+export type ResolveContactError = ResolveContactErrors[keyof ResolveContactErrors];
+
+export type ResolveContactResponses = {
+    /**
+     * Success
+     */
+    200: Contact;
+};
+
+export type ResolveContactResponse = ResolveContactResponses[keyof ResolveContactResponses];
 
 export type ListHoppersData = {
     body?: never;
@@ -5171,6 +5951,7 @@ export type PreviewResponses = {
             [key: string]: unknown;
         }>;
         transclusions?: Array<Transclusion>;
+        unresolvedHandles?: Array<string>;
     };
 };
 
@@ -5189,6 +5970,10 @@ export type SearchData = {
         source?: 'all' | 'mine' | 'imported';
         sub?: string;
         sort?: 'newest' | 'oldest';
+        /**
+         * drafts: also search own drafts and unpublished changes, by their working copy. For finding your own work (the compose page); off by default because the default scope is exactly what a quote or link can name.
+         */
+        include?: 'drafts';
     };
     url: '/search';
 };
@@ -5265,6 +6050,10 @@ export type SearchResponses = {
             kind: 'fragment' | 'thread';
             subscriptionId: string | null;
             sourceTitle: string | null;
+            /**
+             * With include=drafts: true when an own item's hit is its working copy (never published, or unpublished changes). A draft cannot be quoted or linked; the picker never asks for drafts.
+             */
+            draft?: boolean;
         }>;
         page: {
             limit: number;
@@ -5358,6 +6147,14 @@ export type GetReadingSummaryData = {
         hopper?: string;
         kind?: 'thread' | 'fragment';
         background?: 'true';
+        /**
+         * Only imported entries whose own h-cards name the owner (author URL or this blyg's address). A find on the reading side: nothing was verified or received.
+         */
+        mentions?: 'true';
+        /**
+         * Only shelved entries (GET /shelf), in the owner's shelf order, whatever their Background placement. Own drafts are left out: they are not reading entries.
+         */
+        shelf?: 'true';
     };
     url: '/reading/summary';
 };
@@ -5449,9 +6246,17 @@ export type ListReadingData = {
         hopper?: string;
         kind?: 'thread' | 'fragment';
         /**
-         * Only withdrawn entries.
+         * Only Background entries: the owner's choice on the entry, else on its blyg, else an enabled rule (withdrawn always). Without it, every lens leaves them out.
          */
         background?: 'true';
+        /**
+         * Only imported entries whose own h-cards name the owner (author URL or this blyg's address). A find on the reading side: nothing was verified or received.
+         */
+        mentions?: 'true';
+        /**
+         * Only shelved entries (GET /shelf), in the owner's shelf order, whatever their Background placement. Own drafts are left out: they are not reading entries.
+         */
+        shelf?: 'true';
     };
     url: '/reading';
 };
@@ -5531,6 +6336,94 @@ export type ListReadingResponses = {
 };
 
 export type ListReadingResponse = ListReadingResponses[keyof ListReadingResponses];
+
+export type SetReadingPlacementData = {
+    body: {
+        source: 'own' | 'imported';
+        /**
+         * The subscription id, for an imported entry.
+         */
+        sub?: string;
+        /**
+         * The item id: an own item's id, or the imported item's remote id.
+         */
+        id: string;
+        /**
+         * background or foreground pins the entry there across later versions; null clears the choice and the rules decide again.
+         */
+        placement: 'background' | 'foreground' | null;
+    };
+    path?: never;
+    query?: never;
+    url: '/reading/placement';
+};
+
+export type SetReadingPlacementErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    405: ApiError;
+    /**
+     * Request failed
+     */
+    409: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    415: ApiError;
+    /**
+     * Request failed
+     */
+    422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+    /**
+     * Request failed
+     */
+    502: ApiError;
+};
+
+export type SetReadingPlacementError = SetReadingPlacementErrors[keyof SetReadingPlacementErrors];
+
+export type SetReadingPlacementResponses = {
+    /**
+     * Success
+     */
+    200: {
+        source: 'own' | 'imported';
+        sub: string;
+        id: string;
+        placement: 'background' | 'foreground' | null;
+    };
+};
+
+export type SetReadingPlacementResponse = SetReadingPlacementResponses[keyof SetReadingPlacementResponses];
 
 export type ListImportedReadingData = {
     body?: never;
@@ -6834,3 +7727,81 @@ export type ExtLineageGlyphListSummariesResponses = {
 };
 
 export type ExtLineageGlyphListSummariesResponse = ExtLineageGlyphListSummariesResponses[keyof ExtLineageGlyphListSummariesResponses];
+
+export type ExtWordCountListCountsData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * A JSON array of up to 50 own reading entry keys.
+         */
+        keys: string;
+    };
+    url: '/ext/word-count/counts';
+};
+
+export type ExtWordCountListCountsErrors = {
+    /**
+     * Request failed
+     */
+    400: ApiError;
+    /**
+     * Request failed
+     */
+    401: ApiError;
+    /**
+     * Request failed
+     */
+    403: ApiError;
+    /**
+     * Request failed
+     */
+    404: ApiError;
+    /**
+     * Request failed
+     */
+    405: ApiError;
+    /**
+     * Request failed
+     */
+    409: ApiError;
+    /**
+     * Request failed
+     */
+    413: ApiError;
+    /**
+     * Request failed
+     */
+    415: ApiError;
+    /**
+     * Request failed
+     */
+    422: ApiError;
+    /**
+     * Request failed
+     */
+    429: ApiError;
+    /**
+     * Request failed
+     */
+    500: ApiError;
+    /**
+     * Request failed
+     */
+    502: ApiError;
+};
+
+export type ExtWordCountListCountsError = ExtWordCountListCountsErrors[keyof ExtWordCountListCountsErrors];
+
+export type ExtWordCountListCountsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        counts: {
+            [key: string]: WordCount;
+        };
+    };
+};
+
+export type ExtWordCountListCountsResponse = ExtWordCountListCountsResponses[keyof ExtWordCountListCountsResponses];

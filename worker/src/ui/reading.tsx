@@ -12,12 +12,12 @@
  * handlers, never the only way. Choosing a passage to quote happens in the
  * stub editor (session 37), not here.
  */
-import { createItem, createHopper, addHopperItem, resyncSubscription, pollSubscriptions, markUnheldRead } from './server-mutations.ts';
+import { createItem, createHopper, addHopperItem, resyncSubscription, pollSubscriptions, markUnheldRead, setReadingPlacement, setBlygBackground } from './server-mutations.ts';
 import { readingPage } from '../paging.ts';
 import { linkSource } from '../grammar.ts';
 import { linkLabel } from '../link-label.ts';
 import type { ReactNode } from 'react';
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useLiveQuery } from '@tanstack/react-db';
 import { Link, useNavigate } from '@tanstack/react-router';
 import type {
@@ -54,18 +54,24 @@ import {
   SourceLink,
 } from './components.tsx';
 import { Sheet, confirm, menu, prompt, toast } from './sheets.tsx';
+import { IconButton, Tooltip } from './primitives.tsx';
+import { shelfLabel, toggleShelf, useShelf } from './shelf.tsx';
 import { displayUrl, sourceTitleAndUrl } from '../importer/util.ts';
 import { ReaderBody, TrailBar, ownOrigin, useEndTrail, useSubscriptionRows } from './reader-links.tsx';
 import { currentTrail, visit } from './browse.ts';
 import { formatDateIn } from '../dates.ts';
 import { AddFeedForm } from './catalog.tsx';
 import { OpmlImportSheet } from './opml-import.tsx';
+import { DiscoverSheet } from './discover.tsx';
 import { diffText, type DiffOp } from '../word-diff.ts';
 import { useSwipe } from './swipe.ts';
 import type { EntryContext, StudioExtension } from './extension-api.ts';
-import { EntryBylineSlot, EntrySheetSlot, entryActionRows, enabledExtensions, type OpenSheet } from './extensions.tsx';
+import { EntryBylineSlot, EntrySheetSlot, entryActionRows, enabledExtensions, type HostContext, type OpenSheet } from './extensions.tsx';
 import { compiledExtensions } from '../../build/extensions.ui.ts';
 import { More, ThumbDown, ThumbUp } from './icons.tsx';
+import { SearchBox, SearchResults, type SearchFilters } from './search.tsx';
+import { addAuthorContact } from './contacts.tsx';
+import { markOwnMentions, useOwnMentionTargets } from './own-mentions.ts';
 import './reading.css';
 
 
@@ -271,6 +277,23 @@ function Body({ html, url, l0, onMore }: { html: string; url?: string; l0: boole
       element.removeEventListener('load', measure, true);
     };
   }, [content.html]);
+  const self = useOwnMentionTargets();
+  const lens = useContext(LensContext);
+  useLayoutEffect(() => {
+    const element = body.current;
+    const first = element && markOwnMentions(element, self);
+    if (!element || !first || lens !== 'mentions') return;
+    // The mention may sit below the clamp: bring it into the part the card shows,
+    // and again whenever the text reflows (a late font, a loaded image, a resize).
+    const focus = () => {
+      element.scrollTop = Math.max(0, first.offsetTop - element.clientHeight / 3);
+    };
+    focus();
+    const observer = new ResizeObserver(focus);
+    observer.observe(element);
+    for (const child of element.children) observer.observe(child);
+    return () => observer.disconnect();
+  }, [content.html, self, lens]);
   return (
     <>
       <EntryTitle title={content.title} url={url} />
@@ -450,7 +473,7 @@ function useEntryActions({
   };
   // What an extension's slots see of this entry (extension-api.ts). Built only
   // when an extension asks, so an entry with none enabled does no extra work.
-  const extensionContext = (extension: StudioExtension): EntryContext => ({
+  const extensionContext = (extension: StudioExtension): HostContext<EntryContext> => ({
     entry,
     id,
     imported: imported
@@ -471,6 +494,12 @@ function useEntryActions({
     openSheet: (render) => setExtensionSheet({ name: extension.name, render }),
   });
   const hopperSub = imported?.subscriptionId ?? (entry.own ? OWN_SUB : undefined);
+  // The shelf keeps only what resolves (src/shelf.ts): never a withdrawn own item, nor a tombstone without its pin.
+  const shelved = useShelf();
+  const shelfEntry = hopperSub && (!entry.withdrawn || imported?.pinnedVersionRetained != null) ? { sub: hopperSub, remoteId: id } : null;
+  const shelf = shelfEntry
+    ? { label: shelfLabel(shelved, shelfEntry), on: shelfLabel(shelved, shelfEntry) === 'remove from shelf', toggle: () => run(() => toggleShelf(shelved, shelfEntry)) }
+    : null;
   const addToHopper = () =>
     run(async () => {
       if (!hopperSub) return;
@@ -497,6 +526,20 @@ function useEntryActions({
       }
       await addHopperItem({ id: hopperId, sub: hopperSub, remoteId: id });
       toast(`added to ${name}`);
+    });
+  // Background and Foreground (src/background.ts): a view preference, not a
+  // judgement, so nothing here is logged as an interaction or marks anything read.
+  const inBackground = useContext(LensContext) === 'background';
+  const place = (placement: 'background' | 'foreground' | null) =>
+    run(async () => {
+      await setReadingPlacement({ source: imported ? 'imported' : 'own', ...(imported ? { sub: imported.subscriptionId } : {}), id, placement });
+      toast(placement === 'background' ? 'moved to Background' : placement === 'foreground' ? 'moved to Foreground' : 'the rules decide again');
+    });
+  const blygBackground = (background: boolean) =>
+    run(async () => {
+      if (!imported) return;
+      await setBlygBackground({ id: imported.subscriptionId, background });
+      toast(`${imported.subscriptionTitle} ${background ? 'moved to Background' : 'back in the main lenses'}`);
     });
   const openMenu = async () => {
     await menu({
@@ -546,6 +589,31 @@ function useEntryActions({
             label: historyOpen ? 'hide history' : 'history',
             onSelect: () => setHistoryOpen((open) => !open),
           },
+        !!imported && {
+          key: 'add-author',
+          icon: '@',
+          label: 'add author to address book',
+          onSelect: () => void authorSeed(imported).then(addAuthorContact),
+        },
+        (imported || entry.own) && {
+          key: 'placement',
+          icon: inBackground ? '↑' : '↓',
+          label: inBackground ? 'move to Foreground' : 'move to Background',
+          onSelect: () => void place(inBackground ? 'foreground' : 'background'),
+        },
+        entry.background.placement !== null && {
+          key: 'placement-clear',
+          icon: '↺',
+          label: 'clear my choice',
+          description: 'Background and Foreground follow the rules again',
+          onSelect: () => void place(null),
+        },
+        !!imported && {
+          key: 'blyg-placement',
+          icon: entry.background.blyg ? '⇈' : '⇊',
+          label: entry.background.blyg ? 'move this blyg to Foreground' : 'move this blyg to Background',
+          onSelect: () => void blygBackground(!entry.background.blyg),
+        },
         ...entryActionRows(extensions, extensionContext),
       ],
     });
@@ -558,6 +626,7 @@ function useEntryActions({
     vote,
     stub,
     addToHopper,
+    shelf,
     openMenu,
     historyOpen,
     extensions,
@@ -568,15 +637,47 @@ function useEntryActions({
 }
 type EntryActions = ReturnType<typeof useEntryActions>;
 
+/**
+ * Who wrote an imported entry, as far as it says. A reading row does not carry
+ * its author, so this reads the item when asked. An rss subscription's origin is
+ * its feed, so it falls back to the site.
+ */
+async function authorSeed(imported: NonNullable<Reading['imported']>) {
+  const item = await unwrap(BlyggerApi.getImportedItem({ client, path: { sub: imported.subscriptionId, id: imported.remoteId } })).catch(() => null);
+  const author = (item?.author ?? {}) as { name?: unknown; url?: unknown };
+  const origin = subscriptions.get(imported.subscriptionId)?.origin ?? imported.sourceUrl ?? '';
+  const site = imported.l0 && origin ? new URL(origin).origin + '/' : origin;
+  return {
+    name: typeof author.name === 'string' && author.name ? author.name : imported.subscriptionTitle,
+    url: typeof author.url === 'string' && author.url.startsWith('https:') ? author.url : site,
+  };
+}
+
+/**
+ * Why an entry is in Background, in the plan's precedence (background-plan.md
+ * §4): your choice on it, then on its blyg, then the first rule that applies.
+ */
+function backgroundLabel(entry: Reading): string | null {
+  const { placement, blyg, reasons, detail } = entry.background;
+  if (placement === 'background') return 'you moved this';
+  if (blyg) return 'blyg in Background';
+  // Withdrawn entries already say so under the body (Tomb).
+  if (reasons[0] === 'withdrawn') return null;
+  if (reasons[0] === 'minor') return typeof detail?.category === 'string' ? `minor change (${detail.category})` : 'minor change';
+  return null;
+}
+
 /** The byline: kind, legacy rss, source and date, plus the extensions' slot. */
 function Byline({ entry, a, children }: { entry: Reading; a: EntryActions; children?: ReactNode }) {
   const settings = useSettings();
   const date = formatDateIn(entry.displayAt, settings?.timezone || 'UTC');
+  const why = useContext(LensContext) === 'background' ? backgroundLabel(entry) : null;
   return (
     <p className="byline">
       {children}
       <span className="badge">{entry.kind}</span>
       {entry.l0 ? <span className="badge badge-line">legacy rss</span> : null}
+      {why ? <span className="badge badge-line badge-why" title="why this is in Background">{why}</span> : null}
       <span className="src">{a.imported?.subscriptionTitle || 'you'}</span>
       <span>· {date}</span>
       <EntryBylineSlot extensions={a.extensions} context={a.extensionContext} />
@@ -604,16 +705,16 @@ function EntryBar({ entry, a }: { entry: Reading; a: EntryActions }) {
     <div className="entry-bar">
       {imported
         ? ([1, -1] as const).map((thumb) => (
-            <Button
-              key={thumb}
-              className="act icon-only thumb"
-              aria-label={thumb === 1 ? 'thumbs up' : 'thumbs down'}
-              title={thumb === 1 ? 'thumbs up' : 'thumbs down'}
-              aria-pressed={signal?.thumb === thumb}
-              onClick={() => void a.vote(thumb)}
-            >
-              {thumb === 1 ? <ThumbUp /> : <ThumbDown />}
-            </Button>
+            <Tooltip key={thumb} label={thumb === 1 ? 'thumbs up' : 'thumbs down'}>
+              <Button
+                className="act icon-only thumb"
+                aria-label={thumb === 1 ? 'thumbs up' : 'thumbs down'}
+                aria-pressed={signal?.thumb === thumb}
+                onClick={() => void a.vote(thumb)}
+              >
+                {thumb === 1 ? <ThumbUp /> : <ThumbDown />}
+              </Button>
+            </Tooltip>
           ))
         : null}
       <span className="spacer" />
@@ -636,23 +737,28 @@ function EntryBar({ entry, a }: { entry: Reading; a: EntryActions }) {
           <Button
             className="act"
             aria-label="add to hopper"
-            title="add to hopper"
             onClick={() => void a.addToHopper()}
           >
-            + add to hopper…
+            + <span className="act-wide">add to </span>hopper…
           </Button>
         </>
       ) : null}
-      <Button
-        className="act icon-only more-btn"
-        aria-label="more actions"
-        title="more actions"
-        // Keep a text selection alive through the press.
-        onMouseDown={(event) => event.preventDefault()}
-        onClick={() => void a.openMenu()}
-      >
-        <More />
-      </Button>
+      {a.shelf ? (
+        <Button className="act" data-action="shelf" aria-label={a.shelf.label} onClick={() => void a.shelf?.toggle()}>
+          {a.shelf.on ? '−' : '+'} <span className="act-wide">{a.shelf.on ? 'remove from' : 'add to'} </span>shelf
+        </Button>
+      ) : null}
+      <Tooltip label="more actions">
+        <Button
+          className="act icon-only more-btn"
+          aria-label="more actions"
+          // Keep a text selection alive through the press.
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => void a.openMenu()}
+        >
+          <More />
+        </Button>
+      </Tooltip>
     </div>
   );
 }
@@ -753,62 +859,148 @@ function Entry({
 
 /* ---------------- what changed (new versions in the feed) ---------------- */
 
-// The note for one held version, read from the origin's changelog once a card
-// has been on screen (decision #40's reader half: the importer stores the
-// latest state, not the changelog). Failures are not kept, so a blyg that was
-// briefly unreachable is asked again.
-const changeNotes = new Map<string, Promise<string | null>>();
-function changeNote(sub: string, id: string, version: number): Promise<string | null> {
-  const key = JSON.stringify([sub, id, version]);
-  let note = changeNotes.get(key);
-  if (!note) {
-    note = loadHistory(sub, id).then(
-      (history) => history.changelog.find((entry) => entry.version === version)?.note?.trim() || null,
-    );
-    note.catch(() => changeNotes.delete(key));
-    changeNotes.set(key, note);
+type LogEntry = { version: number; at: string; note: string | null; pinned: boolean };
+type Changelog = { current: number; entries: LogEntry[] };
+
+// One read per item and version, kept for the session; failures are not kept.
+const changelogs = new Map<string, Promise<Changelog>>();
+function loadChangelog(entry: Reading): Promise<Changelog> {
+  const imported = entry.imported;
+  const key = imported
+    ? JSON.stringify(['imp', imported.subscriptionId, imported.remoteId, imported.version])
+    : JSON.stringify(['own', entry.own!.id, entry.own!.updated]);
+  let got = changelogs.get(key);
+  if (!got) {
+    got = imported
+      ? loadHistory(imported.subscriptionId, imported.remoteId).then((h) => ({
+          current: h.current,
+          entries: h.changelog.map(({ version, at, note, pinned }) => ({ version, at, note, pinned })),
+        }))
+      : unwrap(BlyggerApi.listItemVersions({ client, path: { id: entry.own!.id }, query: { limit: 100 } })).then((page) => {
+          const entries = page.items
+            .filter((v) => v.kind !== 'withdrawn')
+            .map((v) => ({ version: v.version, at: v.publishedAt, note: v.note, pinned: v.pinned }))
+            .sort((a, b) => a.version - b.version);
+          return { current: entries.at(-1)?.version ?? 0, entries };
+        });
+    got.catch(() => changelogs.delete(key));
+    changelogs.set(key, got);
   }
-  return note;
+  return got;
 }
+const meaningfulLog = (entries: LogEntry[]) => entries.length > 1 || entries.some((e) => !!e.note?.trim());
+
+/** Every note, newest first; on a card the newest three and a count of the rest. */
+function ChangeHistory({ entries, limit }: { entries: LogEntry[]; limit?: number }) {
+  const settings = useSettings();
+  const newest = [...entries].reverse();
+  const shown = limit ? newest.slice(0, limit) : newest;
+  return (
+    <ol className="change-history" data-change-history>
+      {shown.map((e) => (
+        <li key={e.version}>
+          <strong>V{e.version}</strong>
+          {Number.isNaN(Date.parse(e.at)) ? null : <span className="h-hint"> {formatDateIn(e.at, settings?.timezone || 'UTC')}</span>}:{' '}
+          {e.note?.trim() || <span className="h-hint">no note</span>}
+          {e.pinned ? <span className="h-hint"> · pinned</span> : null}
+        </li>
+      ))}
+      {shown.length < newest.length ? (
+        <li className="h-hint">and {newest.length - shown.length} earlier, in history</li>
+      ) : null}
+    </ol>
+  );
+}
+
 /**
- * A revised post leads with its latest changelog entry: "V3: note". When the
- * origin gave none for that version (or cannot be reached) it says so rather
- * than showing nothing, so a changed post never reads like an unchanged one.
- * Only a held, blyg-native, live item past its first version has one.
+ * The changelog above an entry's body, as Settings' reader_changelog_display
+ * asks (session 61): the latest note ("V3: note"), every note, or an AI
+ * summary. Read from the item's changelog once the entry is on screen: an
+ * imported item's from its origin (the importer keeps the latest state, not
+ * the changelog), an own item's from its versions. A summary is asked for
+ * only when the item is opened, and kept per version on the server; a card in
+ * summary mode shows the latest note meanwhile. Only blyg-native, live items
+ * have one, and an item whose changelog says nothing beyond its first version
+ * shows none.
  */
-function ChangeLead({ entry }: { entry: Reading }) {
+function ChangeLead({ entry, opened = false }: { entry: Reading; opened?: boolean }) {
+  const settings = useSettings();
+  const mode = settings?.readerChangelogDisplay ?? 'latest';
   const imported = entry.imported;
   const version = imported?.version ?? 0;
-  const eligible = !!imported && !entry.l0 && !entry.withdrawn && version > 1;
-  const line = useRef<HTMLParagraphElement>(null);
-  const [note, setNote] = useState<string | null | undefined>();
+  // The latest note is what the reader showed before session 61, imported items only.
+  const eligible = !entry.l0 && !entry.withdrawn && (imported ? mode !== 'latest' || version > 1 : mode !== 'latest' && !!entry.own);
+  const line = useRef<HTMLDivElement>(null);
+  const [log, setLog] = useState<Changelog | null | undefined>();
+  const [summary, setSummary] = useState<{ text?: string; model?: string; error?: string } | undefined>();
   useEffect(() => {
-    setNote(undefined);
+    setLog(undefined);
+    setSummary(undefined);
     const element = line.current;
     if (!eligible || !element) return;
     let live = true;
-    const load = () =>
-      changeNote(imported!.subscriptionId, imported!.remoteId, version).then(
-        (value) => live && setNote(value),
-        () => live && setNote(null),
+    const load = () => {
+      loadChangelog(entry).then(
+        (value) => live && setLog(value),
+        () => live && setLog(null),
       );
-    // Only cards that come on screen ask their origin.
+      if (opened && mode === 'summary') {
+        const body = imported ? { subscriptionId: imported.subscriptionId, remoteId: imported.remoteId } : { itemId: entry.own!.id };
+        unwrap(BlyggerApi.summarizeChangelog({ client, body })).then(
+          (r) => live && setSummary({ text: r.summary, model: r.model }),
+          (e) => live && setSummary({ error: e instanceof Error ? e.message : String(e) }),
+        );
+      }
+    };
+    // Only entries that come on screen read a changelog.
     const observer = new IntersectionObserver((seen) => {
       if (!seen.some((s) => s.isIntersecting)) return;
       observer.disconnect();
-      void load();
+      load();
     });
     observer.observe(element);
     return () => {
       live = false;
       observer.disconnect();
     };
-  }, [entry.key, version, eligible]);
+  }, [entry.key, version, eligible, mode, opened]);
   if (!eligible) return null;
-  return (
-    <p ref={line} className={`change-lead${note === null ? ' none' : ''}`} data-change-lead>
-      <strong>V{version}:</strong> {note === undefined ? '…' : note ?? 'No changelog entry available'}
+  const latest = log?.entries.find((e) => e.version === (imported ? version : log.current));
+  const latestLine = (
+    <p className={`change-lead${log === null || (log && !latest?.note?.trim()) ? ' none' : ''}`} data-change-lead>
+      <strong>V{imported ? version : log?.current ?? ''}:</strong>{' '}
+      {log === undefined ? '…' : latest?.note?.trim() || 'No changelog entry available'}
     </p>
+  );
+  let body: ReactNode = null;
+  if (log === undefined) body = mode === 'latest' ? latestLine : <p className="change-lead none" data-change-lead>…</p>;
+  else if (mode === 'latest') body = latestLine;
+  else if (!log || !meaningfulLog(log.entries)) body = null;
+  else if (mode === 'history' || (mode === 'summary' && !opened)) body = mode === 'history' ? <ChangeHistory entries={log.entries} limit={opened ? undefined : 3} /> : latestLine;
+  else if (summary?.text) {
+    body = (
+      <p className="change-lead change-summary" data-change-summary>
+        <strong>Changes so far</strong>{' '}
+        <span className="badge tc-chip" title={`written by ${summary.model || 'a model'} from the changelog notes; not the author's words`}>
+          AI summary
+        </span>{' '}
+        {summary.text}
+      </p>
+    );
+  } else {
+    body = (
+      <>
+        <p className="change-lead none" data-change-summary>
+          {summary?.error ? `No summary: ${summary.error}` : 'Summarizing the changelog…'}
+        </p>
+        <ChangeHistory entries={log.entries} />
+      </>
+    );
+  }
+  return (
+    <div ref={line} className="change-log">
+      {body}
+    </div>
   );
 }
 
@@ -828,6 +1020,8 @@ async function ownEntry(id: string, signal?: AbortSignal): Promise<Reading> {
     displayAt: item.published?.publishedAt ?? item.updated,
     rank: 0,
     own: { id, kind, withdrawn, updated: item.updated, contentHtml },
+    // Opened by address, outside a list: what is known without the reader's query.
+    background: { reasons: withdrawn ? ['withdrawn'] : [], placement: null, blyg: false },
   };
 }
 /** A standalone import when no loaded Reading row is held. */
@@ -850,6 +1044,7 @@ function importedEntry(
     contentHtml: item.contentHtml,
     displayAt,
     rank,
+    background: { reasons: withdrawn ? ['withdrawn'] : [], placement: null, blyg: source?.background ?? false },
     imported: {
       subscriptionId: item.subscriptionId,
       subscriptionTitle: source ? sourceName(source) : item.subscriptionId,
@@ -982,6 +1177,7 @@ function Article({ entry, actions, origin }: { entry: Reading; actions: Actions;
       <div className="entry-in">
         <Byline entry={entry} a={a} />
         <Tomb entry={entry} />
+        <ChangeLead entry={entry} opened />
         <EntryTitle title={content.title} url={a.url} as="h2" className="entry-title article-title" />
         <ReaderBody html={content.html} origin={origin} className="content entry-body article-body" />
         <SourceLink url={a.url} />
@@ -1153,6 +1349,27 @@ function Inspector({
           </span>
         </span>
       </label>
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={shown.background}
+          onChange={(event) => {
+            const checked = event.target.checked;
+            setError(undefined);
+            setBlygBackground({ id: shown.id, background: checked }).then(
+              () => toast(checked ? 'moved to Background' : 'back in the main lenses'),
+              setError,
+            );
+          }}
+        />
+        <span>
+          in Background
+          <span className="hint">
+            Its entries leave the other lenses for Background, except any you
+            moved to Foreground. Nothing is marked read.
+          </span>
+        </span>
+      </label>
       <Failure error={error} />
       <ul className="menu-list">
         <li>
@@ -1230,9 +1447,9 @@ function SubscribeSheet({
   return (
     <Sheet open={open} onClose={onClose} title="subscribe">
       <AddFeedForm
-        onSubscribed={() => {
+        onSubscribed={(told) => {
           onClose();
-          toast('subscribed');
+          if (!told) toast('subscribed');
         }}
       />
       <div className="sheet-actions add-sub-more">
@@ -1262,6 +1479,8 @@ const LENS_LABELS: Record<Lens, string> = {
   all: 'All',
   threads: 'Threads',
   fragments: 'Fragments',
+  shelf: 'Shelf',
+  mentions: 'Mentions',
   background: 'Background',
   smart: 'Smart Feed',
 };
@@ -1309,6 +1528,8 @@ function LensBar({ sub, hopper, sources }: { sub?: string; hopper?: string; sour
     </div>
   );
 }
+const SHELF_NOTE = 'What you put on your shelf, yours and the blygs you read, in your order. Your drafts on it are under compose.';
+const MENTIONS_NOTE = 'Items you already read that name you. A find, not a notification: nobody told you, and nothing here is verified.';
 /** Withdrawn posts are background: every other lens leaves them out. */
 export const BACKGROUND_NOTE = 'Withdrawn posts, yours and the blygs you read. They are kept out of the other views.';
 export const SMART_FEED_NOTE = 'Coming soon. Feed sorted and filtered by your AI agent. You can already set its prompt in Settings.';
@@ -1463,6 +1684,8 @@ function Sources() {
   const buckets =
     useLiveQuery({ query: (q) => q.from({ hopper: hoppers }) }).data ?? [];
   const counts = summary.data?.[0]?.counts;
+  // No tally of who named you (tn-6 section 6, rule 3).
+  const shown = (count: number | undefined) => (lens === 'mentions' ? undefined : count);
   const inspected = sources.find((source) => source.id === inspect);
   return (
     <>
@@ -1482,8 +1705,8 @@ function Sources() {
         <span>sources</span>
       </div>
       <ul className="feeds" aria-label="sources">
-        <SmartSource sub="all" icon="◫" title="all" count={counts?.all} />
-        <SmartSource sub="own" icon="❝" title="my blyg" count={counts?.own} />
+        <SmartSource sub="all" icon="◫" title="all" count={shown(counts?.all)} />
+        <SmartSource sub="own" icon="❝" title="my blyg" count={shown(counts?.own)} />
       </ul>
       <div className="list-h">
         <span>hoppers · {buckets.length}</span>
@@ -1512,7 +1735,7 @@ function Sources() {
               <SubscriptionRow
                 key={source.id}
                 source={source}
-                count={counts?.subscriptions[source.id]}
+                count={shown(counts?.subscriptions[source.id])}
                 onInspect={() => setInspect(source.id)}
                 onToggle={() => void toggle(source)}
               />
@@ -1534,7 +1757,7 @@ function Sources() {
       )}
       <Inspector
         source={inspected}
-        count={inspected ? counts?.subscriptions[inspected.id] : undefined}
+        count={inspected ? shown(counts?.subscriptions[inspected.id]) : undefined}
         onClose={() => setInspect(undefined)}
         actions={actions}
       />
@@ -1589,6 +1812,7 @@ function ReadingHead({
 }) {
   const [adding, setAdding] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [discovering, setDiscovering] = useState(false);
   const [resyncing, setResyncing] = useState(false);
   // Native collection polling observes the server's background work.
   const resyncAll = async () => {
@@ -1612,27 +1836,20 @@ function ReadingHead({
         </h2>
         <div className="view-actions">
           {children}
-          <Button
-            className="icon-btn"
-            aria-label="resync all feeds"
-            title="resync all feeds"
-            disabled={resyncing}
-            onClick={() => void resyncAll()}
-          >
+          <IconButton className="icon-btn" label="resync all feeds" disabled={resyncing} onClick={() => void resyncAll()}>
             ↻
-          </Button>
-          <Button
-            className="icon-btn"
-            aria-label="subscribe"
-            title="subscribe"
-            onClick={() => setAdding(true)}
-          >
+          </IconButton>
+          <IconButton className="icon-btn" id="discover-open" label="discover blygs on blygger.com" onClick={() => setDiscovering(true)}>
+            ✦
+          </IconButton>
+          <IconButton className="icon-btn" label="subscribe" onClick={() => setAdding(true)}>
             ＋
-          </Button>
+          </IconButton>
         </div>
       </div>
       <SubscribeSheet open={adding} onClose={() => setAdding(false)} onImport={() => setImporting(true)} />
       <OpmlImportSheet open={importing} onClose={() => setImporting(false)} />
+      <DiscoverSheet open={discovering} onClose={() => setDiscovering(false)} />
     </>
   );
 }
@@ -1704,15 +1921,11 @@ function useReadSelection(key: string, offset: number, entries: Reading[], actio
       ],
     });
   const button = (
-    <Button
-      className="icon-btn"
-      aria-label="read state"
-      title="select, mark read or unread"
-      aria-pressed={selecting}
-      onClick={openMenu}
-    >
-      ☑
-    </Button>
+    <Tooltip label="select, mark read or unread">
+      <Button className="icon-btn" aria-label="read state" aria-pressed={selecting} onClick={openMenu}>
+        ☑
+      </Button>
+    </Tooltip>
   );
   const allPicked = importedRows.length > 0 && importedRows.every((entry) => picked.has(entry.key));
   const bar = selecting ? (
@@ -1767,16 +1980,12 @@ function Timeline({ sub, offset }: { sub: string; offset: number }) {
   const read = useReadSelection(key, offset, entries.data ?? [], actions, title, lens);
   return (
     <ReadContext.Provider value={read.ui}>
-      <ReadingHead title={title} count={metadata?.total}>
+      <ReadingHead title={title} count={lens === 'mentions' ? undefined : metadata?.total}>
         {readable ? read.button : null}
         {selected ? (
-          <Button
-            className="icon-btn"
-            aria-label="about this source"
-            onClick={() => setInspecting(true)}
-          >
+          <IconButton className="icon-btn" label="about this source" onClick={() => setInspecting(true)}>
             ⓘ
-          </Button>
+          </IconButton>
         ) : null}
       </ReadingHead>
       <LensBar sub={sub} />
@@ -1794,6 +2003,8 @@ function Timeline({ sub, offset }: { sub: string; offset: number }) {
       ) : (
         <>
           {lens === 'background' ? <p className="view-sub">{BACKGROUND_NOTE}</p> : null}
+          {lens === 'mentions' ? <p className="view-sub">{MENTIONS_NOTE}</p> : null}
+          {lens === 'shelf' ? <p className="view-sub">{SHELF_NOTE}</p> : null}
           {entries.isLoading ? <p className="view-sub">Loading reading…</p> : null}
           <EntryList entries={entries.data ?? []} actions={actions} />
           {!entries.isLoading && !entries.data?.length ? (
@@ -1801,7 +2012,7 @@ function Timeline({ sub, offset }: { sub: string; offset: number }) {
               <span className="em" aria-hidden="true">
                 ◫
               </span>
-              {lens === 'background' ? 'Nothing withdrawn.' : 'No items yet.'}
+              {lens === 'background' ? 'Nothing withdrawn.' : lens === 'mentions' ? 'Nothing you read mentions you yet.' : lens === 'shelf' ? 'Nothing on your shelf yet: “add to shelf” on any entry puts it here.' : 'No items yet.'}
             </div>
           ) : null}
           <Pager
@@ -1908,24 +2119,70 @@ function HopperTimeline({ id, offset }: { id: string; offset: number }) {
   );
 }
 
+/**
+ * Search on the reading page (docs/search.md): the picker's scope, narrowed to
+ * the selected source when there is one, with a chip to widen it. A hopper, a
+ * lens or Background does not narrow it; the route has no such filter.
+ */
+function ReadingSearch({ q, sub }: { q: string; sub?: string }) {
+  const navigate = useNavigate();
+  const [wide, setWide] = useState(false);
+  useEffect(() => setWide(false), [sub]);
+  const one = sub && sub !== 'all' ? sub : undefined;
+  const narrowed = one && !wide ? one : undefined;
+  const title = narrowed === '~own' ? 'my blyg' : narrowed ? subscriptions.get(narrowed)?.title || narrowed : '';
+  const filters: SearchFilters = narrowed === '~own' ? { q, source: 'mine' } : narrowed ? { q, source: 'imported', sub: narrowed } : { q };
+  return (
+    <>
+      {narrowed ? (
+        <p className="search-scope">
+          searching <strong>{title}</strong> only ·{' '}
+          <button type="button" className="btn btn-ghost btn-mini" onClick={() => setWide(true)}>search everything</button>
+        </p>
+      ) : one && wide ? (
+        <p className="search-scope">
+          searching everything ·{' '}
+          <button type="button" className="btn btn-ghost btn-mini" onClick={() => setWide(false)}>only this source</button>
+        </p>
+      ) : null}
+      <SearchResults filters={filters} ownOpens="reader" />
+      <p className="search-scope">
+        <button type="button" className="btn btn-ghost btn-mini" onClick={() => void navigate({ to: '/reading', search: (prev) => ({ ...prev, q: undefined }) })}>
+          back to the feed
+        </button>
+      </p>
+    </>
+  );
+}
+
 export function ReadingPage({
   sub,
   hopper,
   offset,
   lens = 'all',
   view,
+  q,
 }: {
   sub?: string;
   hopper?: string;
   offset?: number;
   lens?: Lens;
   view?: 'sources';
+  q?: string;
 }) {
   // A timeline or source list is where a walk through the thicket ends.
   useEndTrail();
+  const navigate = useNavigate();
+  const setQuery = (next: string) =>
+    void navigate({ to: '/reading', search: (prev) => ({ ...prev, q: next || undefined }), replace: true });
   return (
     <LensContext.Provider value={lens}>
-      {view === 'sources' ? (
+      <div className="page-search-row">
+        <SearchBox value={q ?? ''} onChange={setQuery} label="search reading" />
+      </div>
+      {q ? (
+        <ReadingSearch q={q} sub={hopper ? undefined : sub} />
+      ) : view === 'sources' ? (
         <Sources />
       ) : hopper ? (
         <HopperTimeline id={hopper} offset={offset ?? 0} />
