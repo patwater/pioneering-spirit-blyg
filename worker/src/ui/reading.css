@@ -74,6 +74,12 @@
 .entry-body blockquote.blyg-partial { border-left-style: dashed; }
 .entry-body blockquote > :last-child { margin-bottom: 0; }
 .entry-body pre { overflow-x: auto; max-width: 100%; background: var(--sunk); border-radius: 8px; padding: 8px 10px; font-size: .85rem; }
+/* A formula paints inside its own box (v0.4-plan 23.6): no raised, smashed or lapped
+   text over another author's words. The margin keeps glyph ink that overhangs the box
+   (italics, accents); 0.25em was the least that left ordinary formulas pixel-identical.
+   A browser without the margin is not clipped at all, since the clip would cut every
+   formula there; the voffset bound in math-render.ts is its containment. */
+@supports (overflow-clip-margin: 0.25em) { math { overflow: clip; overflow-clip-margin: 0.25em; } }
 /* Imported HTML carries fixed-width media, tables and embeds. They shrink or
    scroll inside the card; none may widen the page (a wider page is laid out
    zoomed out on iOS, which reads as the studio zooming at random). */
@@ -92,6 +98,12 @@
 /* The action row (Substack-scale): small line-icon thumbs, quiet text
    actions, ⋯. The controls are .act (studio.css): ~20px to the eye, 40px to
    the finger. */
+/* A thread's burst (§13.7 fold): its parts, folded until opened. */
+.burst-parts { margin: 6px 0 2px; font-size: .86rem; }
+.burst-toggle { font-size: .86rem; }
+.burst-list { margin: 4px 0 0; padding-left: 1.4em; color: var(--page-ink-soft); }
+.burst-list li { margin: 2px 0; }
+.burst-list a { color: var(--page-ink); }
 .entry-bar { display: flex; align-items: center; gap: 0; padding: 0 6px 2px; flex-wrap: wrap; }
 .entry-bar .act { padding: 0 7px; }
 .entry-bar .act.icon-only { padding: 0; }
