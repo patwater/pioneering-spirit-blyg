@@ -158,6 +158,12 @@ saying so.
 
 ## Status
 
+**0.64.1** (session 74, 2026-11-19): security upgrades, Hono 4.13.14 → 4.13.18 (five advisories, one the router skipping wildcard middleware, which is how the sign-in checks attach) and fast-xml-parser 5.11.2 → 5.12.1; supply-chain inventory in studio#153.
+**0.64.0** (session 74, 2026-11-19): studio#88 merged (Shannon's Base UI primitives; `src/ui/primitives.tsx`, toasts in `src/ui/sheets.tsx` on Base UI, phone toasts at the top so a WebKit hover cannot pause them); her `mobile-webkit` e2e project restored (`e54af45`: WebKit drops the Secure session cookie over the suite's http, so `cosmetics.spec.ts`'s login hands it over without Secure); link notices listed apart on the responses page (`MentionGroup.links`, `visible` excludes links); tangling fixes (a dropped part named in the publish warning, `droppedPartsNote` in `src/api.ts`; spans out of bounds in `src/ui/stub-quote.ts`). Private contract 5.13.0, SDK 0.19.0. **Migrations:** none. CI: the e2e job installs WebKit's apt packages, which can take 35 minutes on a slow Ubuntu mirror; moving WebKit to its own job is carried.
+**0.63.0** (session 74, 2026-11-18): **tangling** (row 45, decisions #78, #100; `src/tangle.ts` `parseTangles`/`rewriteTangles`/`placeholderBody`, `publishTangled` in `src/api.ts`: dry-run pre-flight, the `tangle: true` gate answering 409 `tangle-confirmation-required`, one batch minting parts with `tangled_from`, parts published before the thread, a stopped tangle finished by the next publish); **`[[+ text]]` placeholders** (row 130); **`links[]` on the wire** (row 77, #79: `linkEntries` in `src/transclusion.ts`, `versions.links_json`, emitted in item and pinned documents, imported) and **`link` mentions** (sent for remote entries, `relationTo` ranks `link` last, `listPublicResponses` leaves them out); the **fold by link** in `src/background.ts` (own items only when `tangled_from` names the thread; imported ones within `LINK_BURST_WINDOW_MS` and only when `saysNoMoreThanLink`, #112); **local patches** (`npm run patches`, `build/patches.ts`, the Settings line, `upgrade.ts` lists them). Private contract 5.12.0, SDK 0.18.0. **Migrations 0047, 0048.** Reader suite 100 of 100.
+**0.62.0** (session 72, 2026-11-16): mathematics (#149, decision #105; `src/math.ts`, `src/math-render.ts`, `temml` in the Worker only, the build fails if it reaches the browser bundle; the sanitizer redraws every imported formula from its TeX annotation) and the **burst fold** (Background reordered for tangling): `src/burst.ts` (`BURST_WINDOW_MS`, `withinBurst`, `clampedTime`) shared with the pace-layered `findBursts`; `settleImportedBackground` runs in `applyEffect`, `settleOwnBackground` at publish; rules `burst`, `wordless` (`isWordless` = §15.4's test via `extractDirectives`), `maintenance`; `ReadingEntry.parts` gives a thread's **+N parts**. A settings PATCH may name only the Background rules it changes (`BackgroundRulesPatchSchema`). Private contract 5.11.0, SDK 0.17.0. No migration. Pending call #15: no-vendoring covers client-side JavaScript only.
+**0.61.0** (session 72, 2026-11-15): the Reading redesign — lenses All, Mentions, Smart Feed, Fragments, Threads, Shelf, Background; the Shelf (#137, Aneesh; `src/shelf.ts`, `GET/PUT /shelf` with required `expectedRevision`) with a Shelf lens (`shelf=true` on `/reading` and `/reading/summary`, `shelfIdentitySql`) and **+ add to shelf** on every entry; Background phase 1 + 4a (`src/background.ts`, `PUT /reading/placement`); `citedUrl` names the item document for an unheld item. Private contract 5.10.0, SDK 0.16.0. **Migrations 0044, 0046.**
+**0.60.1** (session 72, 2026-11-15): Discover's "new" view is the unfollowed blygs, newest listing first, `PAGE_SIZE` at a time; setup's finish screen offers Discover; **tooltips are one pattern**: `Tooltip`/`IconButton` from studio#88 in `src/ui/primitives.tsx` and a `TooltipProvider` in `app.tsx` — use them, not a native `title`, on any interactive control. Contract unchanged. No migration.
 **0.60.0** (session 71, 2026-11-14): download backup (ROADMAP row 15; `src/backup.ts` streams a tar from `{studio}/backup`, owner cookie only; tables by allow-list in `src/backup-format.ts`, guarded by `test-ui/backup-tables.test.ts`, because better-auth's runtime tables are not in `migrations/`), marked beta in More; `npm run backup` (`scripts/backup.ts`) writes the same archive through wrangler with no Worker read cap; Discover (row 17, `src/ui/discover.ts(x)`, ✦ beside ＋) reads blygger.com's `/blygs.json` from the browser, new since `discoverSeenAt` or all, subscribing through the OPML import's paced walk. Private contract 5.9.0, SDK 0.15.0. No migration. Maths (#149) and the reading redesign are not in it.
 **0.59.0** (session 69, 2026-11-13): `main`'s held changes released with the 0.58.2/0.58.3 hotfix line merged in (#147): extension vendoring (#59; `scripts/ext-vendor.ts`, `extensions-vendor/`, the `vendored` lock in `extensions.local.json`, `docs/extension-vendoring.md`), menu zones (#143; `menuPlacement`, `askedZone` in `src/ui/extensions.tsx`, `PageContext.menu`), editor regions (#144; `src/ui/editor-regions.ts`, `editorRegions` slot). The extension page's context goes through `extensionContext` (the #147 merge). Contract and SDK unchanged. No migration. **The reading redesign (Background phase 1 + 4a, migration 0046, branch `feat/reading-redesign`) is not in it**; it moves to the next minor.
 **0.58.3** (session 69, 2026-11-13; also a hotfix-line release, on top of 0.58.2): Tab/Shift+Tab nest list items and Shift+Enter writes the backslash line break (`indentEdit`, `breakEdit`, `structureKey` in `src/ui/format-shortcuts.ts`, wired through `onFormatKey`, which now steps aside for a key a picker already took); toolbar buttons for those and a code block (`codeBlockEdit`, `applyEdit`); a Markdown section on the syntax page. Contract and SDK unchanged. No migration.
@@ -631,6 +637,15 @@ Deferred when the session wrapped, not blocked on anything.
 
 ### New features
 
+- [ ] **A responses count on public pages** (session 73, decision #107; ROADMAP row 127;
+  shape fixed in `blygger-spec/docs/opus-brief.md` § session 73). The count is the length
+  of the public responses list the page already renders (verified, unhidden, list switched
+  on for the item), shown as text on the item's page and on same-origin lists that show the
+  item; nothing at zero or with the list off. **Never data:** not in any protocol document
+  or feed, no `data-` attribute, microformat, JSON-LD or meta tag, with a test that says
+  so. Nothing public sorted or selected by it; no blyg-wide total, no per-responder tally.
+  Build with the studio-private counts and the Responses tab (Venkat, session 72), which
+  need no ruling.
 - [x] **`cited` on `{url}` stubs** — **done 0.18.0 (session 33)**. Finding: a hostname-only `cited` had been emitted since 0.4 (live on three venkateshrao stubs); what was missing was the import half (studio#12, now kept verbatim) and a useful citation (feed name + entry title, frozen at creation). Original entry: (session 31, decision #55; spec §16.1a — a ruled shape,
   normative once this ships and an import retains it): when a stub targets a plain URL, emit
   the §5.9 `cited` object on `stub_of` — `retrieved` always; `source`, `author`, `excerpt`
@@ -670,3 +685,78 @@ project's **local config**; it adds to the base and never replaces it.
 - **Wrap-up extras (after W5):** update `../blygger-spec/ROADMAP.md` (W5b in `../blygger-spec/CLAUDE.md`)
 - **Deploy policy:** `wrangler`-based; authenticate with `wrangler login`, always `--name` for secrets; only on request.
 - **Carry-overs (S6):** none
+
+<!-- BEGIN @tanstack/oracles (template 4) -->
+
+## Oracle tests
+
+This repository tests its design with `@tanstack/oracles`. An oracle
+captures the code's design as laws and enforces them against an independent
+model. Work oracle first, production second.
+
+**Who owns what.** The laws belong to the people who maintain this
+repository: what the code promises, the authority for each promise, and its
+limits. Propose a law, but do not adopt or change one without their
+approval. The production code that the oracles own is yours. Whenever you
+change it, do a good job, not a minimal or lazy one: the fast, small,
+elegant version, as an optimizing compiler for the oracle would write it.
+Anything that keeps every oracle passing is allowed, so a big refactor is
+fine when it makes the code better; the oracle is the review. Keep it in
+proportion to the task: improve the code the work touches, and when you see
+a larger win elsewhere, offer it instead of turning the task into a long
+optimization project.
+
+**How the work goes.**
+
+- **Probe first.** Before you propose anything, call the real code with
+  small scripts and show what they print. Every law and every finding comes
+  with a probe that can be rerun.
+- **Propose the laws, then build only the approved ones.** Each law is a
+  "For every …" sentence with where its promise is written: the docs, a
+  test, or a maintainer's decision. A question nobody has decided is fine:
+  state it as a limit.
+- **Red first, like TDD, but the oracle goes red.** A bug becomes a law and
+  a history that fail on the unchanged code. Then fix production at once,
+  and show the run going green.
+- **Never weaken or quarantine an oracle:** no skip, no `test.fails`, no
+  loosened expectation, no switch that turns a check off.
+- **Build the strongest model the laws need.** Compare every observable
+  result they speak about. The model states the rule a user relies on,
+  never the code's algorithm, even when the docs describe that algorithm.
+  Give each law a calibration: a wrong answer the check must reject.
+- **Run the oracles only through the gap check, never Vitest alone.** It
+  prints each test file's result first, then each gap as it is judged, and
+  ends with one `oracle-gaps: done` line. A run
+  can take minutes: start it in the background with output to a log at a
+  path of its own (never a fixed path under `/tmp`), and read the new lines
+  every few seconds, acting on a failure first. Stop a
+  run only by the process ID you recorded, never by name.
+- **Green is not done.** A gap is a change to the owned code that no law
+  notices. There are no equivalent mutants: never call one equivalent.
+  Widen the histories or the check until the oracle sees it, and keep going
+  until a bug or a design question turns up.
+- **Report classes of bugs:** the rule broken, and the measured share of
+  generated inputs that break it. Never call one minor.
+
+**Skills.**
+
+- To explore an area of the code (or the whole repository), find where an
+  oracle would help, or propose a new one, read
+  `node_modules/@tanstack/oracles/skills/oracles-explore/SKILL.md` in full
+  and follow it.
+- Before you create or change an oracle, or change production code that an
+  oracle owns, read `node_modules/@tanstack/oracles/skills/oracles-design/SKILL.md`
+  in full and follow it.
+- Before you review oracle work, read
+  `node_modules/@tanstack/oracles/skills/oracles-review/SKILL.md` in full.
+- Before you act on review findings, read
+  `node_modules/@tanstack/oracles/skills/oracles-evaluate-review/SKILL.md` in
+  full.
+- Lint each oracle file and each changed production file after you edit it.
+  Fix every report. Do not disable a rule.
+- Oracle files: `{test,test-ui,test-browser,test-oracles}/**/*.oracle.test.ts`.
+  Gap checks: `npm run test:oracles` (all runtimes), or
+  `npm run test:oracles:worker`, `npm run test:oracles:studio`, and
+  `npm run test:oracles:browser`. Ordinary Worker/UI commands exclude oracle files.
+
+<!-- END @tanstack/oracles -->
