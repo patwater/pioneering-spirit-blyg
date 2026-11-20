@@ -29,6 +29,8 @@ import { CLIENT } from '../client.ts';
 import { AddressBook } from './contacts.tsx';
 import { ERROR_LOG_MAX, describeEntry, diagnostics, errorLog, exportLog, thisDevice } from './error-log.ts';
 import { compiledExtensions } from '../../build/extensions.ui.ts';
+import { Tab, Tabs } from './primitives.tsx';
+import { localPatches } from '../../build/patches.ts';
 
 const fields = [
   "siteTitle",
@@ -391,6 +393,15 @@ function SettingsForm({ initial }: { initial: Settings }) {
           Only change this if you have modified the client and track your own
           versions. Point it at your releases, or turn the check off.
         </p>
+        {localPatches === null ? null : (
+          <p className="hint">
+            {localPatches === 0
+              ? 'This build carries no local patches.'
+              : `This build carries ${localPatches} local patch${localPatches === 1 ? '' : 'es'}.`}{' '}
+            <code>npm run patches</code> lists them. Nothing about patches is
+            published.
+          </p>
+        )}
       </section>
       </section>
       <section className="settings-section" id="feed" aria-labelledby="feed-h">
@@ -1354,19 +1365,16 @@ function CustomThemeFields({
         everyone else gets the light one.
       </p>
       {paired ? (
-        <div className="segmented" aria-label="Palette">
+        <Tabs label="Palette" value={showing} onValueChange={(value) => setEditing(value as 'light' | 'dark')}>
           {(['light', 'dark'] as const).map((which) => (
-            <button
+            <Tab
               key={which}
-              type="button"
-              aria-pressed={showing === which}
-              className={`seg${showing === which ? ' is-active' : ''}`}
-              onClick={() => setEditing(which)}
+              value={which}
             >
               {which === 'light' ? 'Light palette' : 'Dark palette'}
-            </button>
+            </Tab>
           ))}
-        </div>
+        </Tabs>
       ) : null}
       {showing === 'dark' && dark ? (
         <ThemeEditor

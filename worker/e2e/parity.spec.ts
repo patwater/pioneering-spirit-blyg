@@ -40,7 +40,7 @@ test('reading preserves retained snapshots and restricts legacy actions', async 
   await expect(menu).toContainText('https://legacy.example/post');
   await page.keyboard.press('Escape');
   // The Sources tab leads to the sources list, where the source is listed.
-  await page.getByRole('group', { name: 'reading view' }).getByRole('button', { name: 'Sources', exact: true }).click();
+  await page.getByRole('tablist', { name: 'reading view' }).getByRole('tab', { name: 'Sources', exact: true }).click();
   await expect(page.locator('.feed[data-id="parity-rss"]')).toContainText('Legacy source');
 });
 test('hopper uses stored HTML instead of re-previewing remote markdown', async ({ page }) => {
@@ -154,7 +154,7 @@ test('more offers settings, syntax, the public page and a log out that posts', a
 
 test('palette pages all candidates and applies bracket grammar in each composer', async ({ page }) => {
   await login(page);
-  const token = `${test.info().project.name}-palettetoken`;
+  const token = `${test.info().project.name}-palettetoken-${crypto.randomUUID()}`;
   await page.evaluate(async token => {
     for (let i = 0; i < 23; i++) {
       const item = await (await fetch('/api/items', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ contentMd: `${token} ${i}` }) })).json();
@@ -171,7 +171,7 @@ test('palette pages all candidates and applies bracket grammar in each composer'
   await page.locator('#composer-text').fill(`![[${token}`);
   await expect(page.getByRole('listbox')).toHaveCount(0);
   await page.locator('#composer-text').fill('thread picker');
-  await page.getByRole('radio', { name: 'thread', exact: true }).click();
+  await page.getByRole('button', { name: 'thread', exact: true }).click();
   await page.locator('#composer-full').click();
   await page.locator('#md-input').fill(`![[${token}`);
   await expect(page.getByRole('listbox', { name: 'items' }).getByRole('option')).toHaveCount(20);
@@ -182,7 +182,7 @@ test('palette pages all candidates and applies bracket grammar in each composer'
 
 test('editor kind, discard, pinned history and TK controls retain their contracts', async ({ page }) => {
   await login(page);
-  await expect(page.getByRole('radio', { name: 'fragment', exact: true })).toBeChecked();
+  await expect(page.getByRole('button', { name: 'fragment', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await page.locator('#composer-text').fill('plain draft');
   await expect(page.getByRole('button', { name: 'generate in editor →' })).toHaveCount(0);
   await page.locator('#composer-text').fill('[TK]instruction[/TK]');
