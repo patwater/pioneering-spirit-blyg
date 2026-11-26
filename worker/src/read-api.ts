@@ -16,11 +16,13 @@ import { injectNestedProvenance, injectProvenance, transclusionProvenance } from
 import { applyInternalLinks, previewInternalLinks, previewTransclusions, resolveBlockLinks } from "./transclusion.ts";
 import { parseTangles } from "./tangle.ts";
 import { siteOrigin } from "./protocol.ts";
+import { HELPERS } from "./helpers/catalogue.ts";
+import { catchUp } from "./helpers/catch-up.ts";
 import { MODELS, bindingName, configuredProviders, isDecisionModel } from "./ai/models.ts";
 import type { ChangeClassRow } from "./change-class.ts";
 import { withLabels, type InteractionRow } from "./interactions.ts";
 import { escapeHtml, normalizeMount } from "./util.ts";
-import type { SignalRow, ImportedItemRow, ItemRow, SubscriptionRow, HopperRow, HopperItemRow, VersionRow, MentionInRow, MentionOutRow } from "./types.ts";
+import type { SignalRow, ImportedItemRow, ItemRow, SubscriptionRow, HopperRow, HopperItemRow, VersionRow, PrivateVersionRow, MentionInRow, MentionOutRow } from "./types.ts";
 import { itemDetail } from "./item-data.ts";
 import { readingData, readingSummary } from "./reading-data.ts";
 import { enabledRules } from "./background.ts";
@@ -33,7 +35,6 @@ import { platformFetchFor } from "./importer/http.ts";
 import { recordBrowse, clearBrowse, type BrowseVia, type BrowseRow } from "./browse-log.ts";
 import { classifyLinks, peekItem } from "./peek.ts";
 import { fetchImportedHistory, fetchPublicVersion } from "./imported-history.ts";
-import { readChanges } from './changes.ts';
 import { linkLabel } from "./link-label.ts";
 import { authoredItemKindSql } from './version-state.ts';
 import { versionState } from './version-state.ts';
@@ -42,12 +43,12 @@ import { API_CONTRACT_VERSION } from './operation-policy.ts';
 import { deploymentUrls } from './deployment-urls.ts';
 import { cursorPage } from './cursor-page.ts';
 import { mentionGroups, mentionSummary } from './mention-groups.ts';
+import { canIndexSearchWord, searchWords } from './search-terms.ts';
 
 const getCapabilitiesOperation = async (context: OperationContext, input: OperationInput) => {
   return success({ contractVersion: API_CONTRACT_VERSION, endpoints: deploymentUrls(context.url, context.env),
     ...await operationAvailability(context.env.DB, context.access, context.extensions) });
 };
-const getChangesOperation = async (context: OperationContext, input: OperationInput) => success(await readChanges(context.env.DB));
 // Pin history retains the legacy nullness rule for unresolved version kinds.
 const pinKindSql = `CASE WHEN kind IN ('fragment','thread') THEN kind WHEN transclusions IS NULL THEN 'fragment' ELSE 'thread' END`;
 const listItemsOperation = async (context: OperationContext, input: OperationInput) => {
@@ -100,6 +101,17 @@ const listItemVersionsOperation = async (context: OperationContext, input: Opera
     name: 'item-versions', filters: [input.path.id, input.query.version ?? null], domains: ['items'],
     sql: `SELECT * FROM versions WHERE item_id = ?${input.query.version ? ' AND version = ?' : ''}`, binds: [input.path.id, ...(input.query.version ? [Number(input.query.version)] : [])],
     order: [{ column: 'version', direction: 'desc' }], project: rows => presentVersions(context.env.DB, rows),
+  }));
+};
+// Private versions (decision #94) are listed apart from public ones, newest
+// first; they stay after the item goes public, as studio history.
+const listPrivateVersionsOperation = async (context: OperationContext, input: OperationInput) => {
+  if (!await getItem(context.env.DB, input.path.id)) return failure('not-found', { error: 'not found' });
+  return success(await cursorPage<PrivateVersionRow, { itemId: string; version: number; contentMd: string; contentHtml: string; publishedAt: string; note: string | null }>(context.env.DB, input.query, {
+    name: 'private-versions', filters: [input.path.id], domains: ['items'],
+    sql: 'SELECT * FROM private_versions WHERE item_id = ?', binds: [input.path.id],
+    order: [{ column: 'version', direction: 'desc' }],
+    project: rows => rows.map(row => ({ itemId: row.item_id, version: row.version, contentMd: row.content_md, contentHtml: row.content_html, publishedAt: row.published_at, note: row.note })),
   }));
 };
 const getSettingsOperation = async (context: OperationContext, input: OperationInput) => success(settingsResource(await getSettings(context.env.DB)));
@@ -219,8 +231,12 @@ const mentioning = async (context: OperationContext, input: OperationInput) => {
   return ownMentionTargets(settings.author_url, siteOrigin(settings, context.url, normalizeMount(context.env.MOUNT)));
 };
 const backgroundRules = async (context: OperationContext) => enabledRules((await getSettings(context.env.DB)).bg_rules);
-const listReadingOperation = async (context: OperationContext, input: OperationInput) => success({ ...await readingData(context.env.DB, { ...input.query, limit: input.query.limit ?? 25 }, input.query.sub, readingKind(input.query.kind), input.query.background === 'true', input.query.hopper, await mentioning(context, input), await backgroundRules(context), input.query.shelf === 'true'), readState: true as const, readStateClear: true as const });
-const getReadingSummaryOperation = async (context: OperationContext, input: OperationInput) => success(await readingSummary(context.env.DB, input.query.sub, readingKind(input.query.kind), input.query.background === 'true', input.query.hopper, await mentioning(context, input), await backgroundRules(context), input.query.shelf === 'true'));
+const listReadingOperation = async (context: OperationContext, input: OperationInput) => {
+  const settings = await getSettings(context.env.DB);
+  const order = input.query.order === 'newest' || input.query.order === 'pace-layered' ? input.query.order : settings.reader_order;
+  return success({ ...await readingData(context.env.DB, { ...input.query, limit: input.query.limit ?? 25 }, input.query.sub, readingKind(input.query.kind), input.query.background === 'true', input.query.hopper, await mentioning(context, input), enabledRules(settings.bg_rules), input.query.shelf === 'true', order, input.query.raw === 'true'), readState: true as const, readStateClear: true as const });
+};
+const getReadingSummaryOperation = async (context: OperationContext, input: OperationInput) => success(await readingSummary(context.env.DB, input.query.sub, readingKind(input.query.kind), input.query.background === 'true', input.query.hopper, await mentioning(context, input), await backgroundRules(context), input.query.shelf === 'true', input.query.raw === 'true'));
 // Imported items only, keyset-paged, for clients that author from what they read (studio#11).
 const listImportedReadingOperation = async (context: OperationContext, input: OperationInput) => {
   return success(await importedReading(context.env.DB, input.query.cursor, Number(input.query.limit ?? IMPORTED_READING_DEFAULT)));
@@ -355,47 +371,65 @@ const searchOperation = async (context: OperationContext, input: OperationInput)
   // their working copy. The default stays exactly what resolveTarget accepts.
   const drafts = input.query.include === "drafts";
   const order = input.query.sort === "oldest" ? "ASC" : "DESC";
-  // Every word must appear somewhere in the item's text or id, in any order.
-  // lower() folds ASCII only; that is the "rudimentary" in rudimentary
-  // search, and FTS5 is the upgrade if it ever matters. instr, not LIKE: D1
-  // caps LIKE patterns at 50 bytes, so a pasted URL as a search word threw.
-  const words = (input.query.q ?? "").trim().split(/\s+/).filter(Boolean).slice(0, 8);
-  const textMatch = (text: string, id: string) => words.map(() => `(instr(lower(${text}), lower(?)) > 0 OR instr(lower(${id}), lower(?)) > 0)`).join(" AND ");
-  const wordBinds = words.flatMap((w) => [w, w]);
-  const parts: string[] = [];
-  const binds: string[] = [];
-  if (source !== "imported" && !sub && drafts) {
+  const words = searchWords(input.query.q ?? "");
+  const indexedWords = words.filter(canIndexSearchWord);
+  const unindexedWords = words.filter(word => !canIndexSearchWord(word));
+  // Quote each word as a literal phrase so punctuation and FTS operators in
+  // the input stay literal. Use the same ASCII fold as SQLite lower().
+  const match = indexedWords.map(word => `"${word.replace(/[A-Z]/g, letter => letter.toLowerCase()).replaceAll('"', '""')}"`).join(' AND ');
+  const remainingMatch = unindexedWords.map(() => ' AND (instr(d.search_body, lower(?)) > 0 OR instr(d.search_id, lower(?)) > 0)').join('');
+  const remainingBinds = unindexedWords.flatMap(word => [word, word]);
+  const parts: { sql: string; binds: string[] }[] = [];
+  const searchSource = (scope: 'working' | 'published' | 'imported', table: string, key: string) => {
+    const subscription = scope === 'imported' ? sub : undefined;
+    if (!match) {
+      return { from: table, where: subscription ? ' AND s.id = ?' : '', binds: subscription ? [subscription] : [] };
+    }
+    const scopeMatch = `scope : "${scope}" AND {search_id search_body} : (${match})`;
+    const expression = subscription ? `? || ' AND search_subscription : ":' || hex(?) || ':"'` : '?';
+    // Force candidate lookup by key even when the subscription or cursor can
+    // also supply an index. MATCH must be the outer loop for a text search.
+    return {
+      from: `search_fts(${expression}) f CROSS JOIN search_documents d ON d.rowid = f.rowid CROSS JOIN ${table} ON ${key}`,
+      where: remainingMatch,
+      binds: subscription ? [scopeMatch, subscription, ...remainingBinds] : [scopeMatch, ...remainingBinds],
+    };
+  };
+  const searchable = !words.length || !!match;
+  if (searchable && source !== "imported" && !sub && drafts) {
     // A clean published item's working copy is its published text, so one
     // match on i.content_md covers drafts, unpublished changes and the rest.
-    parts.push(`SELECT 'mine' AS source, i.id AS id, CASE WHEN i.dirty = 1 OR i.version = 0 THEN NULL ELSE v.content_html END AS html,
+    const { from, where, binds } = searchSource('working', 'items i', 'i.id = d.item_id');
+    parts.push({ binds, sql: `SELECT 'mine' AS source, i.id AS id, CASE WHEN i.dirty = 1 OR i.version = 0 THEN NULL ELSE v.content_html END AS html,
         i.version AS version, i.updated AS updated, i.kind AS kind,
         NULL AS subscription_id, NULL AS source_title, NULL AS origin,
         CASE WHEN i.dirty = 1 OR i.version = 0 THEN i.content_md END AS draft_md
-      FROM items i LEFT JOIN versions v ON v.item_id = i.id AND v.version = i.version
-      WHERE i.status IN ('public', 'draft') AND i.kind IN ('fragment', 'thread')${words.length ? " AND " + textMatch("i.content_md", "i.id") : ""}`);
-    binds.push(...wordBinds);
-  } else if (source !== "imported" && !sub) {
-    parts.push(`SELECT 'mine' AS source, i.id AS id, v.content_html AS html, i.version AS version, i.updated AS updated, i.kind AS kind,
+      FROM ${from} LEFT JOIN versions v ON v.item_id = i.id AND v.version = i.version
+      WHERE i.status IN ('public', 'draft') AND i.kind IN ('fragment', 'thread')${where}` });
+  } else if (searchable && source !== "imported" && !sub) {
+    const { from, where, binds } = searchSource('published', 'items i', 'i.id = d.item_id');
+    parts.push({ binds, sql: `SELECT 'mine' AS source, i.id AS id, v.content_html AS html, i.version AS version, i.updated AS updated, i.kind AS kind,
         NULL AS subscription_id, NULL AS source_title, NULL AS origin, NULL AS draft_md
-      FROM items i JOIN versions v ON v.item_id = i.id AND v.version = i.version
-      WHERE i.status = 'public' AND i.kind IN ('fragment', 'thread')${words.length ? " AND " + textMatch("v.content_md", "i.id") : ""}`);
-    binds.push(...wordBinds);
+      FROM ${from} CROSS JOIN versions v ON v.item_id = i.id AND v.version = i.version
+      WHERE i.status = 'public' AND i.kind IN ('fragment', 'thread')${where}` });
   }
-  if (source !== "mine") {
+  if (searchable && source !== "mine") {
     // Exactly what resolveTarget will accept at publish, so the picker never
     // offers something the author then can't publish.
-    parts.push(`SELECT 'imported' AS source, ii.remote_id AS id, ii.content_html AS html,
+    const { from, where, binds } = searchSource('imported', 'imported_items ii', 'ii.subscription_id = d.subscription_id AND ii.remote_id = d.item_id');
+    parts.push({ binds, sql: `SELECT 'imported' AS source, ii.remote_id AS id, ii.content_html AS html,
         CASE WHEN ii.state = 'current' THEN ii.version ELSE ii.pinned_version_retained END AS version,
         ii.observed_at AS updated, ii.kind AS kind, s.id AS subscription_id, s.title AS source_title, s.origin AS origin, NULL AS draft_md
-      FROM imported_items ii JOIN subscriptions s ON s.id = ii.subscription_id
-      WHERE ii.l0 = 0 AND (ii.state = 'current' OR ii.pinned_version_retained IS NOT NULL)${sub ? " AND s.id = ?" : ""}${words.length ? " AND " + textMatch("ii.content_md", "ii.remote_id") : ""}`);
-    if (sub) binds.push(sub);
-    binds.push(...wordBinds);
+      FROM ${from} CROSS JOIN subscriptions s ON s.id = ii.subscription_id
+      WHERE ii.l0 = 0 AND (ii.state = 'current' OR ii.pinned_version_retained IS NOT NULL)${where}` });
   }
   type Row = { source: 'mine' | 'imported'; id: string; html: string | null; version: number; updated: string; kind: string; subscription_id: string | null; source_title: string | null; origin: string | null; draft_md: string | null };
   return success(await cursorPage(context.env.DB, { ...input.query, limit: input.query.limit ?? SEARCH_PAGE }, {
     name: 'search', filters: [words, source, sub ?? null, order, drafts], domains: ['items', 'reading', 'subscriptions'],
-    sql: parts.length ? parts.join(' UNION ALL ') : 'SELECT NULL AS source, NULL AS id, NULL AS updated, NULL AS subscription_id WHERE 0', binds,
+    // FTS drives the source, so separate cursor ranges would repeat the same MATCH.
+    combineRanges: Boolean(match),
+    sql: parts.length ? parts.map(part => part.sql).join(' UNION ALL ') : 'SELECT NULL AS source, NULL AS id, NULL AS updated, NULL AS subscription_id WHERE 0',
+    binds: parts.flatMap(part => part.binds),
     order: ['updated', 'id', 'source', 'subscription_id'].map(column => ({ column, direction: order === 'ASC' ? 'asc' as const : 'desc' as const })),
     project: (rows: Row[]) => rows.map((r) => {
     // From rendered HTML, not markdown source — the picker showed literal
@@ -520,13 +554,24 @@ async function forkablePins(
   }
 }
 
+// Helpers (blygger-spec docs/helpers-plan.md): the catalogue, and catch-up.
+const listHelpersOperation = async () => success({ helpers: HELPERS.map((h) => ({ ...h })) });
+const catchUpOperation = async (context: OperationContext, input: OperationInput) => {
+  const settings = await getSettings(context.env.DB);
+  const body = input.body as { sub: string; remoteId: string };
+  const result = await catchUp(context.env.DB, body, siteOrigin(settings, context.url, normalizeMount(context.env.MOUNT)));
+  return result ? success(result) : failure('not-found', { error: "not a published or current entry this reader holds" });
+};
+
 export const readOperations = {
+  listHelpers: listHelpersOperation,
+  catchUp: catchUpOperation,
   getCapabilities: getCapabilitiesOperation,
-  getChanges: getChangesOperation,
   listItems: listItemsOperation,
   getItemSummary: getItemSummaryOperation,
   getItem: getItemOperation,
   listItemVersions: listItemVersionsOperation,
+  listPrivateVersions: listPrivateVersionsOperation,
   getSettings: getSettingsOperation,
   listSubscriptions: listSubscriptionsOperation,
   getSubscription: getSubscriptionOperation,

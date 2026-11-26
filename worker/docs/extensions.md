@@ -11,14 +11,17 @@ Extensions are one of three places a mod can live; [`mods.md`](mods.md) says whi
 | Name | What it does |
 | --- | --- |
 | `bars-example` | A bar above the editor's text box: inserts a mark at the cursor and, with `regions-example` on, shows and hides the held paragraphs in place of the Studio's notice. The template to copy for an editor bar. |
+| `claims` | Forecasts anyone can check, as `claim` and `resolution` blocks. A bar in the composer and full editor (**+ claim**) asks plain questions and inserts the block; with one in the post it shows it in a few words and reopens it. A reading byline badge on entries with a claim (how sure, when it's due, ◆ pinned or ◇ not) opens the claim: pin it or resolve it on your own (a `resolution` block appended, published and pinned), or fork someone else's to forecast it too. A Claims page scores your claims on each one as first pinned. Browser only; shipped in `extensions.json`. Source and the shared parser: [miguelito4/blyg-claims](https://github.com/miguelito4/blyg-claims). |
 | `example` | Fills each UI slot and does nothing that matters. The template to copy, and what the slot tests enable. |
 | `feed-example` | Adds a "Pinned first" home page order: pinned items at the top, most pins first, then the rest newest first. Server only (`feeds.ts`, `server.ts`); the template to copy for a feed order of your own. |
 | `inspect` | Adds "inspect" to each reading entry's ⋯ sheet: the record this Studio holds for it, and its JSON. Browser only; shipped in `extensions.json`. |
 | `lineage-glyph` | The lineage glyph, hex view and action ring from #35. A glyph in each reading byline counts what a post draws on and what draws on it here. It opens a hex view of one hop of ancestors and descendants, where each corner previews what stub, quote a passage, fork, link post, history and open would make, and a second press runs that action. The actions are the Studio's own (or drafts and navigation through the extension context), so they write through the owner's session like the ⋯ sheet does. Its server routes are owner reads: `GET /api/ext/lineage-glyph/lineage` and `/summaries`. `scripts/lineage-demo.ts` runs a seeded local node with it enabled. |
 | `menu-example` | A page with an entry in the main menu, and nothing else. The template to copy for one. |
 | `menu-top-example` | A page that asks for the top of the main menu, and shows where it was placed. The template to copy for a page an owner starts from. |
+| `picker-example` | A “drafts” tab in the `[[` picker: your drafts, matched by every word of the query. The template to copy for a picker source. |
 | `reading-time` | An estimated reading time and word count at the end of each reading entry's byline. Browser only; shipped in `extensions.json`. |
 | `regions-example` | Holds paragraphs that start with `[held]: #` out of the full editor's text box. The template to copy for keeping generated lines out of the author's way. |
+| `spellcheck` | A “spelling” button in an editor bar (composer and full editor) that opens a sheet: a dictionary check against a US English word list (ESDB size 60, served by its owner read `GET /api/ext/spellcheck/words` and checked in the browser), skipping markup, links, ids, code, math and TK instructions, with suggestions, ignore, and add to the blyg's dictionary (`PUT /dictionary/owner`, whose every source it also accepts); and, in the full editor, an AI proofread of the saved draft through the blyg's TK model (`GET /api/ext/spellcheck/proofread`), each fix applied in place. `make-words.ts` regenerates the list. |
 | `word-count` | Each reading entry's word count at the end of its byline and beside the character count in the composer (counted in the browser) and the full editor (re-read after each autosave), published and in draft (the working copy as publish would bake it now), and for a thread whose outline links (list items that are just an `[[id]]` link, as a table of contents is written) form a strict tree of your own items (published or draft), the words in the whole document under it. Inline links (navigation, citations) are never followed; transclusions are already in a thread's own count. Its server route is an owner read: `GET /api/ext/word-count/counts`. |
 
 ## What an extension can do
@@ -30,6 +33,7 @@ Extensions are one of three places a mod can live; [`mods.md`](mods.md) says whi
 | Draft counter | Something beside the character count, in the composer and the full editor | `draftCounter` (a component) |
 | Editor regions | Parts of the full editor's text kept out of its text box: hidden each time the editor opens, read-only when shown | `editorRegions(context)` (see "Editor regions" below) |
 | Editor bars | A bar of controls in a row of its own above or below the text box, in the composer and the full editor, that can edit the text. It asks for a row and room; the Studio decides | `editorBar` (see "Editor bars" below) |
+| Picker sources | A tab in the `[[` / `![[` picker beside the Studio's own search, listing what the extension offers to link to. The Studio lists, moves through and inserts the results | `pickerSource` (see "Picker sources" below) |
 | Sheets | A sheet of its own, opened from a reading byline or reading actions | `context.openSheet(render)` |
 | A page | A screen at `/studio/ext/<name>`, linked from More | `page` |
 | A main-menu entry | Asks for a link to that page in a menu zone: `top` (above the Studio's own tabs), `visible` (among them, where the Studio puts it: above compose) or `hidden` (More). The Studio decides; see "Menu zones" below | `page.mainMenu` (an icon and a `zone`); the label is `page.title` |
@@ -98,8 +102,8 @@ editorBar: { label: 'Book', row: 'above', blocks: 2, replaces: ['regionToggle'],
   show it, remembered on this device, and opens a bar that had no room in a sheet. A hidden bar takes
   no room.
 - **The context:** `text` (the whole text) and `shown` (what the box shows, without held-out regions),
-  `selection()`, `insert(text)` (in place of the selection, caret after) and `replace(start, end,
-  text)`, all in `shown` offsets. Edits go through the same path as the Studio's own tools, so
+  `selection()`, `insert(text)` (in place of the selection, caret after), `replace(start, end,
+  text)` and `select(start, end)`, all in `shown` offsets. Edits go through the same path as the Studio's own tools, so
   held-out regions, autosave and the preview follow them. `item` in the full editor, as for the draft
   counter. `openSheet(render)`, and the usual verbs.
 - **Held-out regions:** in the full editor, while any extension holds text out, `context.regions` has
@@ -111,9 +115,35 @@ editorBar: { label: 'Book', row: 'above', blocks: 2, replaces: ['regionToggle'],
   the bar obtained elsewhere (spec §5.7 rule 7, decision #37). Never insert it bare: `insert()` text
   publishes as the author's own, with no `generated[]` entry. The Studio cannot tell, so this is a
   review rule for extensions in this repository and a promise for mods (`mods.md`).
+  **A correction is not model text** (spec §5.7 rule 10, decision #115): a change that restores
+  what the author meant to write (spelling, grammar, punctuation, a name's consistent form) may go
+  in bare, whether a dictionary or a model proposed it, once the author accepts it. A model's
+  suggestion that rephrases, restructures or adds is composition and follows the rule above. A bar
+  that offers model corrections should offer corrections only, and may draft a line for the
+  changelog note ("Proofread with … ; 12 corrections accepted"), in words, never as a field.
 - **Focus view** leaves the bars out, like the Studio's tool row. Focus view is the text and nothing
   else; that is its point.
 - Off is invisible: with no bar enabled there is no bar row and no bars menu.
+
+## Editor marks
+
+An editor bar can underline stretches of the text: misspellings, grammar, notes of its own. A text box
+can't style part of its text, so the Studio draws the marks in a layer laid exactly over it, with the
+same box, font, padding and wrapping, scrolled with it and taking no pointer events. The text is never
+changed, and the author types, selects and scrolls as ever.
+
+```ts
+context.mark([{ start, end, kind: 'spelling', title: 'not in the dictionary' }], (mark) => openFix(mark));
+```
+
+- **A bar's marks replace its earlier ones**; `[]` clears them. Offsets are in `shown`. Make them again
+  when the text changes (an effect on `context.shown`); meanwhile the Studio moves each with every
+  edit, and drops one the edit touched.
+- **Kinds:** `spelling` (a wavy line), `grammar` (a wavy line in another colour), `note` (dotted).
+- **Activation:** a click that leaves the caret inside a mark calls the bar's `onActivate` with it.
+- **Drawn only while the bar is in a row on screen** and hasn't failed: hidden, in the menu or crashed,
+  its marks are gone. Never in focus view, which is the text and nothing else.
+- Marks are presentation in the Studio: they reach no draft, version or wire.
 
 ## Replaceable controls
 
@@ -139,9 +169,41 @@ Every entry keeps the same contract:
 | Control | Replaced from | What the replacement must still do |
 |---|---|---|
 | `regionToggle` | An editor bar: `editorBar.replaces` | Show and hide the held-out regions through `context.regions` (`show()`, `hide()`, `hidden`), naming them by `labels`. The Studio's notice beside the counts returns while the bar is not in a row on screen. |
+| `spellcheck` | An editor bar: `editorBar.replaces` | Find misspellings in the text box's text and mark them (`context.mark`, kind `spelling`), and offer corrections that go in through the context's edit path. While the owner stands in, the Studio turns the browser's own spellcheck off in that text box (`spellcheck="false"`); it is back whenever the bar is not in a row on screen, and in focus view. |
 
 A future entry, for example the TK button, would add a row with its own contract. A TK replacement
 would have to generate through the Studio's generate endpoint, so the `generated[]` record stays honest.
+
+## Picker sources
+
+For things an author links to that the Studio's own search doesn't find, or doesn't find first: a book's
+references, a glossary, a project's drafts. Typing `[[` (or `![[`) opens the picker; with any source enabled
+it has a row of tabs, the Studio's own search (**items**) first, then one per source in compiled order.
+
+```ts
+pickerSource: {
+  label: 'references',
+  forms: ['link'],
+  search: async ({ client, query, form, signal }) => [{ id, label: 'Polanyi 1966', excerpt: 'Polanyi, Michael. The Tacit Dimension.', meta: 'book' }],
+}
+```
+
+- **The extension finds; the Studio does the rest.** `search` is called as the query changes, after a short
+  pause, with `query` (what follows the brackets, or the panel's search box), `form` and a `signal` that
+  aborts when the query changes or the picker closes. The Studio lists the results, moves through them with
+  the arrow keys, inserts the one picked (Enter or a click) in the form being typed, with the label as
+  `[[id | label]]`, and closes. So keyboard parity, the syntax and the caret are the Studio's, as for its own
+  results.
+- **Items only.** A result's `id` must be an item id: the picker names items. Anything else is dropped, as
+  are repeats; excerpts and labels are put on one line; a tab shows at most 50 results, so narrow by the
+  query.
+- **Forms.** `forms` (default `['link']`) says where the tab is offered: `link` (`[[…]]`), `transclude`
+  (`![[…]]` on a line of its own) or `source` (`![[…]]` inside a TK scope).
+- **The tab is remembered** on the device. A remembered tab whose source is off, or not offered for the form,
+  falls back to the Studio's.
+- **Failures** show in the picker's error line and go in the error log under the extension's name and
+  `pickerSource`; the other tabs carry on. An aborted search is not a failure.
+- **Off is invisible:** with no source enabled there is no tab row, and the picker is as it was.
 
 ## Menu zones
 
@@ -166,7 +228,7 @@ page: { title: 'Dashboard', mainMenu: { icon: '⌂', zone: 'top' }, component: P
 - **Writes.** Extension routes are GETs under `/api/ext/<name>/`. The permission model classifies them as `owner:read`, and a route registered with any other method or prefix is refused when the Worker starts. An extension that wants to change something uses the existing contract through `client`, under the same scopes as any client.
 - **The wire.** An extension does not reach `blyg.json`, public pages, feeds, `content_html` or mentions. It is studio furniture for one owner. The one exception is order: a feed order may decide the sequence of the home page's cards, and nothing else (session 46; see "Feed orders").
 - **Changing the Studio's own controls.** No slot rewrites, hides or annotates a built-in button, row or label, except the controls listed under "Replaceable controls", which an extension may replace whole under that section's contract. #35 needed this (hover previews on `stub ↗`, tips on ⋯ rows), and it was left out because it would make the base UI's markup depend on extension code. That still holds for replaceable controls: the Studio decides by its own rule whether to render its control, and extension markup never goes inside a built-in one.
-- **Other screens.** The slots are on the reading view, beside the composer's and full editor's character count, in the editor bar rows above and below the composer's and full editor's text box, and in the full editor's text box (held-out regions), plus an extension's own page. New slots should be added when an extension needs them, not before.
+- **Other screens.** The slots are on the reading view, beside the composer's and full editor's character count, in the editor bar rows above and below the composer's and full editor's text box, in the full editor's text box (held-out regions) and as tabs in the `[[` picker, plus an extension's own page. New slots should be added when an extension needs them, not before.
 
 ## Writing one
 
@@ -249,7 +311,7 @@ The same holds for MCP, which serves the contract: an extension's reads are MCP 
 
 Two steps. Both are needed, and both default to off.
 
-1. **Compile it in.** `extensions.json` (committed) lists what every release carries: `inspect` and `reading-time`, the two browser-only extensions with no server half, so a node can try the mechanism with one switch in Settings. Anything with a server half (`lineage-glyph`, any route under `/api/ext/`) is never in it and needs your own build. Put your own list in a gitignored `extensions.local.json` at the repository root, which is merged at build like `models.local.json`:
+1. **Compile it in.** `extensions.json` (committed) lists what every release carries: `claims`, `inspect` and `reading-time`, the browser-only extensions with no server half, so a node can try the mechanism with one switch in Settings. Anything with a server half (`lineage-glyph`, any route under `/api/ext/`) is never in it and needs your own build. Put your own list in a gitignored `extensions.local.json` at the repository root, which is merged at build like `models.local.json`:
 
    ```json
    { "compile": ["lineage-glyph"] }

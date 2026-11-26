@@ -1,5 +1,8 @@
+import { readSyndication } from "./syndication.ts";
 import { authoredItemKindSql, authoredVersionKind } from './version-state.ts';
 import { cursorPage, type CursorQuery } from "./cursor-page.ts";
+import type { ReaderOrder } from "./feeds/reader-order.ts";
+import { ensureReaderOrder } from "./feeds/reader-order-cache.ts";
 import { buildReadingFeed, type OwnEntryInput, type ImportedEntryInput } from "./importer/reading.ts";
 import { sourceTitleAndUrl } from "./importer/util.ts";
 import { sanitizeHtml } from "./importer/sanitize.ts";
@@ -8,7 +11,7 @@ import { OWN_SUBSCRIPTION } from "./own-subscription.ts";
 import { linkLabel } from "./link-label.ts";
 import { BACKGROUND_RULES, entryBackground, importedBackgroundSql, ownBackgroundSql, type BackgroundRule } from "./background.ts";
 
-type Identity = { source: 'own' | 'imported'; id: string; sub: string; at: number | string | null };
+export type Identity = { source: 'own' | 'imported'; id: string; sub: string; at: number | string | null };
 /** Foreign dates are normalized before storage. Prefixes extend UTC lexical
  * ordering across JS's signed six-digit years, which SQLite cannot parse. */
 function dateOrderSql(column: string) {
@@ -18,20 +21,50 @@ function dateOrderSql(column: string) {
     ELSE '1' || strftime('%Y-%m-%dT%H:%M:%SZ', ${column}) END`;
 }
 /** Background (src/background.ts) is the owner's choice, then the blyg's, then the enabled rules. */
-function identitySql(kind: 'thread' | 'fragment' | undefined, background: boolean, rules: readonly BackgroundRule[], hopper?: string, mentioning?: string[], shelf = false) {
+/**
+ * A pace-layered position as an `at` key (src/feeds/reader-order.ts): position
+ * 0 sorts highest, newest first, and an entry newer than the stored order
+ * (none can be, once ensureReaderOrder has run, but a row may land between)
+ * sorts above every position.
+ */
+/**
+ * An imported row whose subscription still exists. The projection and the
+ * pace-layered order both join subscriptions, so a row without one (left by an
+ * old unsubscribe) was selected and then dropped: under pace-layered, with no
+ * position, it sorted first, and venkateshrao's 431 such rows made the first
+ * eight Reading pages empty (session 79).
+ */
+const HELD = "EXISTS (SELECT 1 FROM subscriptions held WHERE held.id = ii.subscription_id)";
+const paceAtSql = (alias: string) => `CASE WHEN ${alias}.position IS NULL THEN '4' ELSE '3' || printf('%09d', 999999999 - ${alias}.position) END`;
+function identitySql(kind: 'thread' | 'fragment' | undefined, background: boolean, rules: readonly BackgroundRule[], hopper?: string, mentioning?: string[], shelf = false, order: ReaderOrder = 'newest', raw = false) {
   if (shelf) return shelfIdentitySql(hopper);
+  if (raw) return rawIdentitySql(kind);
+  // A hopper keeps the order things were added to it.
+  const pace = order === 'pace-layered' && !hopper;
   const enabled = JSON.stringify(rules);
   const binds = [enabled, ...(kind ? [kind] : []), ...(hopper ? [hopper] : []), enabled, ...(kind ? [kind] : []), ...(mentioning ? [JSON.stringify(mentioning)] : [])];
   const updated = dateOrderSql('ii.updated'), observed = dateOrderSql('ii.observed_at');
-  const sql = `SELECT 'own' AS source, i.id, '' AS sub, ${dateOrderSql('i.updated')} AS at
+  const sql = `SELECT 'own' AS source, i.id, '' AS sub, ${pace ? paceAtSql('ro') : dateOrderSql('i.updated')} AS at
     FROM items i LEFT JOIN versions p ON i.kind = 'withdrawn' AND p.item_id = i.id AND p.version = i.version - 1
-    WHERE i.status IN ('public','withdrawn') AND (${ownBackgroundSql()}) = ${background ? 1 : 0}${hopper || mentioning ? ' AND 0' : ''}${kind ? ` AND ${authoredItemKindSql('p')} = ?` : ''}
+    ${pace ? "LEFT JOIN reading_order ro ON ro.source = 'own' AND ro.sub = '' AND ro.id = i.id" : ''}
+    WHERE i.status IN ('public','withdrawn','private') AND (${ownBackgroundSql()}) = ${background ? 1 : 0}${hopper || mentioning ? ' AND 0' : ''}${kind ? ` AND ${authoredItemKindSql('p')} = ?` : ''}
     UNION ALL SELECT 'imported', ii.remote_id, ii.subscription_id,
-      ${hopper ? 'hi.added_at' : `CASE WHEN ${updated} < ${observed} THEN ${updated} ELSE ${observed} END`}
+      ${hopper ? 'hi.added_at' : pace ? paceAtSql('ro') : `CASE WHEN ${updated} < ${observed} THEN ${updated} ELSE ${observed} END`}
     FROM imported_items ii ${hopper ? 'JOIN hopper_items hi ON hi.subscription_id = ii.subscription_id AND hi.remote_id = ii.remote_id AND hi.hopper_id = ?' : ''}
-    WHERE (${importedBackgroundSql()}) = ${background ? 1 : 0}${kind ? ' AND ii.kind = ?' : ''}${mentioning ? ` AND EXISTS (SELECT 1 FROM imported_mentions m
+    ${pace ? "LEFT JOIN reading_order ro ON ro.source = 'imported' AND ro.sub = ii.subscription_id AND ro.id = ii.remote_id" : ''}
+    WHERE ${HELD} AND (${importedBackgroundSql()}) = ${background ? 1 : 0}${kind ? ' AND ii.kind = ?' : ''}${mentioning ? ` AND EXISTS (SELECT 1 FROM imported_mentions m
       WHERE m.subscription_id = ii.subscription_id AND m.remote_id = ii.remote_id AND m.target IN (SELECT value FROM json_each(?)))` : ''}`;
   return { sql, binds };
+}
+/**
+ * The Raw tab: what came in, unaltered. Imported entries only, newest first,
+ * with no Background rule, placement or fold applied, withdrawn ones included.
+ */
+function rawIdentitySql(kind: 'thread' | 'fragment' | undefined) {
+  const updated = dateOrderSql('ii.updated'), observed = dateOrderSql('ii.observed_at');
+  const sql = `SELECT 'imported' AS source, ii.remote_id AS id, ii.subscription_id AS sub, CASE WHEN ${updated} < ${observed} THEN ${updated} ELSE ${observed} END AS at
+    FROM imported_items ii WHERE ${HELD}${kind ? ' AND ii.kind = ?' : ''}`;
+  return { sql, binds: kind ? [kind] : [] };
 }
 /**
  * The Shelf lens (ROADMAP row 115): the shelved entries (src/shelf.ts) in the
@@ -52,43 +85,53 @@ function shelfIdentitySql(hopper?: string) {
     WHERE (ii.state = 'current' OR ii.pinned_version_retained IS NOT NULL)`;
   return { sql, binds: hopper ? [hopper] : [] };
 }
+/** The `private` pseudo-source (Venkat, 2026-11-23): the owner's private items only, the reader view of a notebook. */
+const PRIVATE_SQL = " WHERE source = 'own' AND id IN (SELECT id FROM items WHERE status = 'private')";
 /** Counts are a named summary. Page construction never materializes the full identity set. */
-export async function readingSummary(db: D1Database, source: string | undefined, kind?: 'thread' | 'fragment', background = false, hopper?: string, mentioning?: string[], rules: readonly BackgroundRule[] = BACKGROUND_RULES, shelf = false) {
-  const { sql, binds } = identitySql(kind, background, rules, hopper, mentioning, shelf);
+export async function readingSummary(db: D1Database, source: string | undefined, kind?: 'thread' | 'fragment', background = false, hopper?: string, mentioning?: string[], rules: readonly BackgroundRule[] = BACKGROUND_RULES, shelf = false, raw = false) {
+  const { sql, binds } = identitySql(kind, background, rules, hopper, mentioning, shelf, 'newest', raw);
+  // One scan: own rows are grouped by whether their item is private, for the `private` source's count.
   const [counts, subs] = await Promise.all([
-    db.prepare(`SELECT source, sub, COUNT(*) AS total FROM (${sql}) GROUP BY source, sub`).bind(...binds).all<{ source: string; sub: string; total: number }>(),
+    db.prepare(`SELECT source, sub, (source = 'own' AND id IN (SELECT id FROM items WHERE status = 'private')) AS kept, COUNT(*) AS total FROM (${sql}) GROUP BY source, sub, kept`).bind(...binds).all<{ source: string; sub: string; kept: number; total: number }>(),
     db.prepare('SELECT id FROM subscriptions').all<{ id: string }>(),
   ]);
-  const result = { all: 0, own: 0, subscriptions: Object.fromEntries(subs.results.map(row => [row.id, 0])) };
+  const result = { all: 0, own: 0, private: 0, subscriptions: Object.fromEntries(subs.results.map(row => [row.id, 0])) };
   for (const row of counts.results) {
     result.all += row.total;
+    if (row.kept) result.private += row.total;
     if (row.source === 'own') result.own += row.total;
     else result.subscriptions[row.sub] = row.total;
   }
-  const selected = source === 'own' || subs.results.some(row => row.id === source) ? source! : 'all';
+  const selected = source === 'own' || source === 'private' || subs.results.some(row => row.id === source) ? source! : 'all';
   return { counts: result, selected };
 }
 /** Select one bounded keyset of identities before loading or sanitizing bodies. */
-export async function readingData(db: D1Database, query: CursorQuery, source: string | undefined, kind?: 'thread' | 'fragment', background = false, hopper?: string, mentioning?: string[], rules: readonly BackgroundRule[] = BACKGROUND_RULES, shelf = false) {
+export async function readingData(db: D1Database, query: CursorQuery, source: string | undefined, kind?: 'thread' | 'fragment', background = false, hopper?: string, mentioning?: string[], rules: readonly BackgroundRule[] = BACKGROUND_RULES, shelf = false, order: ReaderOrder = 'newest', raw = false) {
   const selected = source ?? 'all';
-  const identities = identitySql(kind, background, rules, hopper, mentioning, shelf);
+  if (raw) order = 'newest';
+  const identities = identitySql(kind, background, rules, hopper, mentioning, shelf, order, raw);
   return cursorPage(db, { ...query, limit: query.limit ?? 25 }, {
-    name: 'reading', filters: [selected, kind ?? null, background, hopper ?? null, mentioning?.join(' ') ?? null, rules.join(' '), shelf], domains: ['reading', 'subscriptions', ...(hopper ? ['hoppers' as const] : []), ...(shelf ? ['shelf' as const] : [])],
-    sql: `SELECT * FROM (${identities.sql})${selected === 'all' ? '' : selected === 'own' ? " WHERE source = 'own'" : ' WHERE sub = ? OR NOT EXISTS (SELECT 1 FROM subscriptions WHERE id = ?)'}`,
-    binds: [...identities.binds, ...(selected !== 'all' && selected !== 'own' ? [selected, selected] : [])],
+    name: 'reading', filters: [selected, kind ?? null, background, hopper ?? null, mentioning?.join(' ') ?? null, rules.join(' '), shelf, order, raw], domains: ['reading', 'subscriptions', ...(hopper ? ['hoppers' as const] : []), ...(shelf ? ['shelf' as const] : [])],
+    sql: `SELECT * FROM (${identities.sql})${selected === 'all' ? '' : selected === 'own' ? " WHERE source = 'own'" : selected === 'private' ? PRIVATE_SQL : ' WHERE sub = ? OR NOT EXISTS (SELECT 1 FROM subscriptions WHERE id = ?)'}`,
+    binds: [...identities.binds, ...(selected !== 'all' && selected !== 'own' && selected !== 'private' ? [selected, selected] : [])],
     order: [{ column: 'at', direction: 'desc' }, { column: 'source', direction: 'asc' }, { column: 'sub', direction: 'asc' }, { column: 'id', direction: 'asc' }],
-    project: (selectedRows: Identity[]) => readingEntries(db, selectedRows, rules),
+    prepare: order === 'pace-layered' && !hopper && !shelf ? () => ensureReaderOrder(db) : undefined,
+    // Raw shows no fold: with no rules, no thread lists its parts.
+    project: (selectedRows: Identity[]) => readingEntries(db, selectedRows, raw ? [] : rules),
   });
 }
-async function readingEntries(db: D1Database, selectedRows: Identity[], rules: readonly BackgroundRule[]) {
+/** Reading entries for the given identities, in their order; one that is no longer held is left out. */
+export async function readingEntries(db: D1Database, selectedRows: Identity[], rules: readonly BackgroundRule[]) {
   const ownIds = selectedRows.filter((r) => r.source === "own").map((r) => r.id);
   const importedIds = selectedRows.filter((r) => r.source === "imported");
   // Public pages hold at most50 identities. JSON pairs also keep internal calls within D1 bind limits.
   const [ownBodies, importedBodies, placementRows] = await Promise.all([
-    ownIds.length ? db.prepare(`SELECT i.id, i.kind, i.updated, i.bg_reasons, i.bg_detail, v.content_html, previous.transclusions AS previous_transclusions, previous.kind AS previous_kind
+    // A private item has no public version; its latest private version stands in (Venkat, 2026-11-22).
+    ownIds.length ? db.prepare(`SELECT i.id, i.kind, i.status, i.updated, i.bg_reasons, i.bg_detail, COALESCE(v.content_html, kept.content_html) AS content_html, previous.transclusions AS previous_transclusions, previous.kind AS previous_kind
       FROM items i LEFT JOIN versions v ON v.item_id = i.id AND v.version = i.version
+      LEFT JOIN private_versions kept ON i.status = 'private' AND kept.item_id = i.id AND kept.version = (SELECT MAX(version) FROM private_versions WHERE item_id = i.id)
       LEFT JOIN versions previous ON previous.item_id = i.id AND previous.version = i.version - 1
-      WHERE i.id IN (${ownIds.map(() => "?").join(",")})`).bind(...ownIds).all<{ id: string; kind: string; updated: string; bg_reasons: string | null; bg_detail: string | null; content_html: string | null; previous_transclusions: string | null; previous_kind: 'fragment' | 'thread' | 'withdrawn' | null }>() : { results: [] },
+      WHERE i.id IN (${ownIds.map(() => "?").join(",")})`).bind(...ownIds).all<{ id: string; kind: string; status: string; updated: string; bg_reasons: string | null; bg_detail: string | null; content_html: string | null; previous_transclusions: string | null; previous_kind: 'fragment' | 'thread' | 'withdrawn' | null }>() : { results: [] },
     // read_state is the owner's own (migration 0026); null means unread.
     importedIds.length ? db.prepare(`SELECT i.*, rs.read_version, s.title AS subscription_title, s.origin, s.background AS sub_background FROM imported_items i JOIN subscriptions s ON s.id = i.subscription_id
       LEFT JOIN read_state rs ON rs.subscription_id = i.subscription_id AND rs.remote_id = i.remote_id
@@ -108,13 +151,13 @@ async function readingEntries(db: D1Database, selectedRows: Identity[], rules: r
       if (!item) return null;
       const withdrawn = item.kind === "withdrawn";
       const kind = withdrawn ? authoredVersionKind({ kind: item.previous_kind, transclusions: item.previous_transclusions }, Boolean(item.previous_transclusions)) : item.kind === 'thread' ? 'thread' : 'fragment';
-      const input: OwnEntryInput = { id: item.id, kind, withdrawn, updated: item.updated, contentHtml: withdrawn ? "" : await sanitizeHtml(item.content_html ?? "") };
+      const input: OwnEntryInput = { id: item.id, kind, withdrawn, updated: item.updated, contentHtml: withdrawn ? "" : await sanitizeHtml(item.content_html ?? ""), ...(item.status === 'private' ? { private: true as const } : {}) };
       const background = entryBackground({ withdrawn, reasons: item.bg_reasons, detail: item.bg_detail, placement: placementOf('own', '', item.id), blyg: false }, rules);
       return { ...buildReadingFeed([input], [])[0], key: `own:${item.id}`, background };
     }
     const row = importedById.get(JSON.stringify([identity.sub, identity.id]));
     if (!row) return null;
-    const input: ImportedEntryInput = { subscriptionId: row.subscription_id, subscriptionTitle: row.subscription_title || row.origin || row.subscription_id, remoteId: row.remote_id, sourceUrl: sourceTitleAndUrl(row, row.origin).url, kind: row.kind, withdrawn: row.state === "tombstone", l0: row.l0 === 1, updated: row.updated, observedAt: row.observed_at, contentHtml: await sanitizeHtml(row.content_html), pinnedVersionRetained: row.pinned_version_retained, version: row.version, readVersion: row.read_version ?? null };
+    const input: ImportedEntryInput = { subscriptionId: row.subscription_id, subscriptionTitle: row.subscription_title || row.origin || row.subscription_id, remoteId: row.remote_id, sourceUrl: sourceTitleAndUrl(row, row.origin).url, kind: row.kind, withdrawn: row.state === "tombstone", l0: row.l0 === 1, updated: row.updated, observedAt: row.observed_at, contentHtml: await sanitizeHtml(row.content_html), pinnedVersionRetained: row.pinned_version_retained, version: row.version, readVersion: row.read_version ?? null, ...syndicationOf(row) };
     const background = entryBackground({ withdrawn: row.state === "tombstone", reasons: row.bg_reasons, detail: row.bg_detail, placement: placementOf('imported', row.subscription_id, row.remote_id), blyg: row.sub_background === 1 }, rules);
     return { ...buildReadingFeed([], [input])[0], key: `imported:${JSON.stringify([row.subscription_id, row.remote_id])}`, background };
   }));
@@ -143,4 +186,15 @@ async function readingEntries(db: D1Database, selectedRows: Identity[], rules: r
         : [];
     return parts.length ? { ...e, parts } : e;
   });
+}
+
+/** §16.14: a held item's copies, re-filtered on the way out (src/syndication.ts). */
+function syndicationOf(row: { syndication_json?: string | null }) {
+  if (!row.syndication_json) return {};
+  try {
+    const entries = readSyndication(JSON.parse(row.syndication_json));
+    return entries ? { syndication: entries } : {};
+  } catch {
+    return {};
+  }
 }

@@ -28,13 +28,13 @@ import {
   createBlyggerClient,
   unwrap,
 } from '../../sdk/dist/browser.js';
-import { queryClient, collectionPollingOptions, collectionRefreshOptions } from './query-client.ts';
+import { queryClient, collectionPollingOptions, collectionRefreshOptions, readingPollingOptions } from './query-client.ts';
 export { queryClient } from './query-client.ts';
 import { scoped } from './scoped.ts';
 import { createPacedDraftAction } from './paced-write.ts';
 import { createRowMutation } from './mutation.ts';
 import { sourceSchemas } from './data-schemas.ts';
-import { zGetItemResponse, zGetHopperResponse, zListItemsResponse, zListSubscriptionsResponse, zListHoppersResponse, zListSignalsResponse, zListReadingResponse, zListItemVersionsResponse, zListHopperMembershipsResponse, zListMentionsResponse, zListMentionGroupsResponse, zListThumbsResponse, zListInteractionsResponse, zListBrowseResponse } from '../../sdk/dist/schemas.js';
+import { zGetItemResponse, zGetHopperResponse, zListItemsResponse, zListSubscriptionsResponse, zListHoppersResponse, zListSignalsResponse, zListReadingResponse, zListItemVersionsResponse, zListPrivateVersionsResponse, zListHopperMembershipsResponse, zListMentionsResponse, zListMentionGroupsResponse, zListThumbsResponse, zListInteractionsResponse, zListBrowseResponse } from '../../sdk/dist/schemas.js';
 import { sequenceParts } from './sequence-order.ts';
 import { readCursorWindow, type ApiPage } from './cursor-query.ts';
 import { planReadWrites, type ReadWrite, type UnreadWrite } from './read-state.ts';
@@ -119,7 +119,7 @@ const readHopper = (id: string, signal: AbortSignal) =>
 
 const cursorPageSchemas: Record<string, { parse(value: unknown): unknown }> = {
   items: zListItemsResponse, subscriptions: zListSubscriptionsResponse, hoppers: zListHoppersResponse,
-  signals: zListSignalsResponse, reading: zListReadingResponse, 'item-versions': zListItemVersionsResponse,
+  signals: zListSignalsResponse, reading: zListReadingResponse, 'item-versions': zListItemVersionsResponse, 'private-versions': zListPrivateVersionsResponse,
   'hopper-memberships': zListHopperMembershipsResponse, 'mentions-in': zListMentionsResponse,
   'mentions-out': zListMentionsResponse, thumbs: zListThumbsResponse, interactions: zListInteractionsResponse, browse: zListBrowseResponse,
   'mention-groups': zListMentionGroupsResponse,
@@ -184,12 +184,12 @@ export const items = createCollection(
           });
         }
         const { filters } = parseLoadSubsetOptions(context.meta?.loadSubsetOptions);
-        const query: { status?: 'draft' | 'public' | 'withdrawn'; dirty?: 'true' | 'false'; version?: number; id?: string; updated?: string } = {};
+        const query: { status?: 'draft' | 'public' | 'private' | 'withdrawn'; dirty?: 'true' | 'false'; version?: number; id?: string; updated?: string } = {};
         for (const filter of filters) {
           const field = filter.field.join('.');
           if (filter.operator !== 'eq') throw new Error('Unsupported item predicate');
           if (field === 'orderKey' && typeof filter.value === 'string') [query.updated, query.id] = sequenceParts(filter.value, ['desc', 'desc']);
-          else if (field === 'status' && ['draft', 'public', 'withdrawn'].includes(String(filter.value))) query.status = filter.value as typeof query.status;
+          else if (field === 'status' && ['draft', 'public', 'private', 'withdrawn'].includes(String(filter.value))) query.status = filter.value as typeof query.status;
           else if (field === 'dirty' && typeof filter.value === 'boolean') query.dirty = filter.value ? 'true' : 'false';
           else if (field === 'version' && typeof filter.value === 'number' && Number.isSafeInteger(filter.value) && filter.value >= 0) query.version = filter.value;
           else throw new Error('Unsupported item predicate');
@@ -251,6 +251,16 @@ export const itemVersions = createCollection(queryCollectionOptions({
       version = filter.value;
     }
     return (await existing(ids, id => cursorRows(context, 'item-versions', [id, version ?? null], (cursor, signal) => unwrap(BlyggerApi.listItemVersions({ client, path: { id }, query: { cursor, version, limit: 25 }, signal })), pageWindow(context, [['version', 'desc']])))).flat();
+  }), select: response => response.data,
+}));
+// Private versions (decision #94), p1, p2, …: the owner's studio history.
+export const itemPrivateVersions = createCollection(queryCollectionOptions({
+  ...collectionPollingOptions, schema: sourceSchemas.itemPrivateVersions, id: 'private-versions', syncMode: 'on-demand',
+  queryKey: ['private-versions', 'rows'], queryClient, getKey: row => JSON.stringify([row.itemId, row.version]),
+  queryFn: context => cachedQuery(context, sourceSchemas.itemPrivateVersions.array(), async (_context) => {
+    const ids = subsetIds(context, 'itemId');
+    if (!ids) throw new Error('Private history requires an itemId predicate');
+    return (await existing(ids, id => cursorRows(context, 'private-versions', [id], (cursor, signal) => unwrap(BlyggerApi.listPrivateVersions({ client, path: { id }, query: { cursor, limit: 25 }, signal })), pageWindow(context, [['version', 'desc']])))).flat();
   }), select: response => response.data,
 }));
 export const settings = createCollection(
@@ -566,7 +576,7 @@ export function createDraftAction(id?: string, observedRevision?: number) {
         case 'delete-media': result = await unwrap(BlyggerApi.deleteMedia({ client, path: { id: command.mediaId }, body: condition })); break;
         case 'refresh': result = await unwrap(BlyggerApi.refreshItem({ client, path, body: { ...condition, note: command.note } })); break;
         case 'save': result = await unwrap(BlyggerApi.updateItem({ client, path, body: { ...condition, contentMd: command.text, kind: command.kind } })); break;
-        case 'generate': result = await unwrap(BlyggerApi.generateItem({ client, path, body: { ...condition, scope: command.scope } })); break;
+        case 'generate': result = await unwrap(BlyggerApi.generateItem({ client, path, body: { ...condition, scope: command.scope, ...(command.proceed ? { proceed: true } : {}) } })); break;
         case 'restore': {
           const restored = await unwrap(BlyggerApi.restoreItem({ client, path, body: { ...condition, version: command.version } }));
           revision = restored.revision;
@@ -574,10 +584,11 @@ export function createDraftAction(id?: string, observedRevision?: number) {
           if (result.revision !== revision) throw new BlyggerApiError(409, { message: 'item changed after restore; reload and try again', code: 'revision-conflict', details: { itemId, expectedRevision: revision } });
           break;
         }
-        case 'publish': result = await unwrap(BlyggerApi.publishItem({ client, path, body: { ...condition, note: command.note, noteGenerated: command.generated, ...(command.category !== undefined ? { changeCategory: command.category } : {}), ...(command.tangle ? { tangle: true } : {}) } })); break;
+        case 'publish': result = await unwrap(BlyggerApi.publishItem({ client, path, body: { ...condition, note: command.note, noteGenerated: command.generated, ...(command.category !== undefined ? { changeCategory: command.category } : {}), ...(command.tangle ? { tangle: true } : {}), ...(command.visibility ? { visibility: command.visibility } : {}) } })); break;
         case 'delete': result = await unwrap(BlyggerApi.deleteItem({ client, path, body: condition })); break;
         case 'withdraw': result = await unwrap(BlyggerApi.withdrawItem({ client, path, body: condition })); break;
         case 'pin': result = await unwrap(BlyggerApi.pinItem({ client, path: { ...path, version: command.version }, body: condition })); break;
+        case 'syndication': result = await unwrap(BlyggerApi.putSyndication({ client, path, body: { ...condition, entries: command.entries } })); break;
         case 'draft-note': result = await unwrap(BlyggerApi.draftNote({ client, path, body: { ...condition, ...(command.history ? { history: true } : {}) } })); break;
         case 'classify': result = await unwrap(BlyggerApi.classifyChange({ client, path, body: condition })); break;
         case 'update': result = await unwrap(BlyggerApi.updateItem({ client, path, body: { ...command.changes, ...condition } })); break;
@@ -622,11 +633,16 @@ export function createDraftAction(id?: string, observedRevision?: number) {
 
 export type Reading = Omit<z.infer<typeof sourceSchemas.reading>, 'view'>;
 /**
- * Reading lenses (0.25.0). "threads" and "fragments" narrow a timeline and its
- * counts by kind; "shelf" is the shelved entries in the owner's order (row 115);
- * "smart" is a placeholder for the AI-ranked feed.
+ * Reading lenses. The tabs (session 77, Venkat) are Feed, Mentions, Agentic
+ * feed, Saved, Background and Raw (READING_TABS); "all", "threads" and
+ * "fragments" are the Feed tab narrowed by kind. "shelf" is Saved, the shelved
+ * entries in the owner's order (row 115); "agentic" is the assistant-organised
+ * feed, a placeholder until its agent is built; "raw" is what came in,
+ * unaltered.
  */
-export const LENSES = ['all', 'mentions', 'smart', 'fragments', 'threads', 'shelf', 'background'] as const;
+export const LENSES = ['all', 'threads', 'fragments', 'mentions', 'agentic', 'shelf', 'background', 'raw'] as const;
+export const READING_TABS = ['all', 'mentions', 'agentic', 'shelf', 'background', 'raw'] as const;
+export const FEED_LENSES = ['all', 'threads', 'fragments'] as const;
 export type Lens = (typeof LENSES)[number];
 export const lensKind = (lens: Lens | undefined): 'thread' | 'fragment' | undefined =>
   lens === 'threads' ? 'thread' : lens === 'fragments' ? 'fragment' : undefined;
@@ -635,7 +651,7 @@ export const lensKind = (lens: Lens | undefined): 'thread' | 'fragment' | undefi
  * unfiltered view (so every existing key is unchanged), `sub~kind` otherwise.
  */
 export const readingKey = (sub: string, lens?: Lens) => {
-  if (lens === 'background' || lens === 'mentions' || lens === 'shelf') return `${sub}~${lens}`;
+  if (lens === 'background' || lens === 'mentions' || lens === 'shelf' || lens === 'raw') return `${sub}~${lens}`;
   const kind = lensKind(lens);
   return kind ? `${sub}~${kind}` : sub;
 };
@@ -652,7 +668,7 @@ function readingSubset(context: Pick<QueryFunctionContext, 'meta'>): { view: str
 // Rank belongs to a feed/lens position, not to the underlying item. A row can
 // occupy different ranks in "all" and a subscription without either overwriting it.
 export const reading = createCollection(queryCollectionOptions({
-  ...collectionPollingOptions, schema: sourceSchemas.reading, id: 'reading', syncMode: 'on-demand',
+  ...readingPollingOptions, schema: sourceSchemas.reading, id: 'reading', syncMode: 'on-demand',
   queryKey: ['reading', 'rows'], queryClient,
   getKey: row => JSON.stringify([row.view, row.key]),
   queryFn: context => cachedQuery(context, sourceSchemas.reading.array(), async (_context) => {
@@ -664,18 +680,18 @@ export const reading = createCollection(queryCollectionOptions({
   select: response => response.data,
 }));
 export function readingQuery(view: string) {
-  const [sub, filter] = view.split('~') as [string, 'thread' | 'fragment' | 'background' | 'mentions' | 'shelf' | undefined];
-  return { ...(sub.startsWith('hopper:') ? { hopper: sub.slice('hopper:'.length) } : { sub }), ...(filter === 'background' ? { background: 'true' as const } : filter === 'mentions' ? { mentions: 'true' as const } : filter === 'shelf' ? { shelf: 'true' as const } : filter ? { kind: filter } : {}) };
+  const [sub, filter] = view.split('~') as [string, 'thread' | 'fragment' | 'background' | 'mentions' | 'shelf' | 'raw' | undefined];
+  return { ...(sub.startsWith('hopper:') ? { hopper: sub.slice('hopper:'.length) } : { sub }), ...(filter === 'background' ? { background: 'true' as const } : filter === 'mentions' ? { mentions: 'true' as const } : filter === 'shelf' ? { shelf: 'true' as const } : filter === 'raw' ? { raw: 'true' as const } : filter ? { kind: filter } : {}) };
 }
 export const readingSummaries = createCollection(queryCollectionOptions({
-  ...collectionPollingOptions, schema: sourceSchemas.readingSummaries, id: 'reading-summary', syncMode: 'on-demand',
+  ...readingPollingOptions, schema: sourceSchemas.readingSummaries, id: 'reading-summary', syncMode: 'on-demand',
   queryKey: ['reading-summary', 'rows'], queryClient, getKey: row => row.view,
   queryFn: context => cachedQuery(context, sourceSchemas.readingSummaries.array(), async ({ signal }) => {
     const views = subsetIds(context, 'view');
     if (!views) throw new Error('Reading summary requires a view predicate');
     return Promise.all(views.map(async view => {
       const summary = await unwrap(BlyggerApi.getReadingSummary({ client, query: readingQuery(view), signal }));
-      const total = summary.selected === 'all' ? summary.counts.all : summary.selected === 'own' ? summary.counts.own : summary.counts.subscriptions[summary.selected] ?? 0;
+      const total = summary.selected === 'all' ? summary.counts.all : summary.selected === 'own' ? summary.counts.own : summary.selected === 'private' ? summary.counts.private : summary.counts.subscriptions[summary.selected] ?? 0;
       return { ...summary, view, total };
     }));
   }),
@@ -852,7 +868,7 @@ export async function changed(...keys: string[]) {
     switch (key) {
       case 'item':
       case 'items':
-        return ['items', 'item-history', 'item-versions', 'item-summary', 'stale-threads'];
+        return ['items', 'item-history', 'item-versions', 'private-versions', 'item-summary', 'stale-threads'];
       case 'hopper':
       case 'hopper-preview':
       case 'hoppers':

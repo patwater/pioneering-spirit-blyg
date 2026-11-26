@@ -114,18 +114,13 @@ A matching current representation returns 304 without a body. Resource and
 access checks precede validation, so a validator does not bypass private media
 access or make an absent resource available.
 
-Private resource GETs also return an `ETag` and accept `If-None-Match`.
+Private operation GETs also return an `ETag` and accept `If-None-Match`.
 Successful resource reads use `Cache-Control: private, no-cache`; errors,
 authentication endpoints, writes and batch envelopes retain `no-store`.
 Authentication, scope checks, quotas, feature checks and input validation run
 before conditional evaluation. A matching read returns a bodyless `304` with
-its current `ETag`. Clients revalidate resource GETs directly.
-
-`GET /changes` and the SDK's `getChanges` are deprecated. They retain their
-existing epoch/domain response, authorization and `no-store` policy in Studio
-0.65.0 and 0.66.0. They do not support conditional reads. They will be removed
-in Studio 0.67.0 with private contract 6.0.0. Migrate polling clients to the
-resource GETs they need.
+its current `ETag`. Contract 6.0.0 removes `GET /changes` without an alias.
+Clients revalidate resource GETs directly.
 
 Each `/read-batch` child accepts an optional `ifNoneMatch` field. Child results
 use the same validators as direct GETs: a match returns `{ status: 304,
@@ -183,7 +178,7 @@ Consult `openapi.json` for every field and response.
 | Resource | Read | Write |
 | --- | --- | --- |
 | Items | `GET /items`, `GET /items/{id}` | `POST /items`, `PATCH /items/{id}`, `DELETE /items/{id}` |
-| Versions | `GET /items/{id}/versions`, `GET /items/{id}/versions/{v}` | `PUT /items/{id}/versions/{version}/pin` |
+| Versions | `GET /items/{id}/versions`, `GET /items/{id}/versions/{v}`, `GET /items/{id}/private-versions` (private versions, p1, p2, …, newest first) | `PUT /items/{id}/versions/{version}/pin` |
 | Subscriptions | `GET /subscriptions`, `GET /subscriptions/{id}` | `POST /subscriptions`, `PATCH /subscriptions/{id}`, `DELETE /subscriptions/{id}` |
 | Hoppers | `GET /hoppers`, `GET /hoppers/{id}` | `POST /hoppers`, `PATCH /hoppers/{id}`, `DELETE /hoppers/{id}` |
 | Hopper membership | `GET /hoppers/{id}/memberships` | `PUT` or `DELETE /hoppers/{id}/items/{sub}/{remoteId}` |
@@ -200,6 +195,7 @@ Consult `openapi.json` for every field and response.
 Publication, withdrawal, restoration, and generation remain explicit operations:
 
 - `POST /items/{id}/publish` and `POST /items/{id}/withdraw` accept an optional publication note.
+- `POST /items/{id}/publish` with `visibility: "private"` publishes privately: a private version (`privateVersion` counts them), status `private`, and nothing on any public route. Only an item that has never gone public can; a public one gets 409. The item's `version` stays 0 until an ordinary publish raises it to public as v1, and private versions and their notes never reach the changelog. Publishing a working copy that names a private item by `[[id]]` or `![[id]]` is refused like any unresolved reference ("item is private"). With the setting `defaultVisibility: "private"`, a publish that names no visibility is a private publish for an item that has never been public; send `visibility: "public"` to take it public. `GET /reading?sub=own` lists private items with `own.private: true`, showing the latest private version.
 - Empty publications, including media-only versions, retain their authored kind and support pinning, restoration, and forking. Withdrawal endcaps reject pinning and restoration. Ambiguous historical empty versions keep their legacy interpretation after upgrade.
 - `POST /items/{id}/restore` copies a stored version's text and attachment membership into the working copy. It does not publish. Restoring the current version discards attachment additions and restores detached attachments; historical version memberships and retained bytes stay intact.
 - `POST /items/{id}/generate` generates one TK scope.
@@ -207,6 +203,52 @@ Publication, withdrawal, restoration, and generation remain explicit operations:
 - `POST /items/{id}/note-draft` drafts a changelog note from the change between the published version and the working copy. It never publishes. When the published version is unpinned, the note must not reproduce wording that only that version had; a draft that does returns 422. Send `noteGenerated: true` with `POST /items/{id}/publish` only when the note is that draft, unedited: it becomes `changelog[].generated` on the wire.
 - `POST /items/{id}/classify` asks the optional change classifier what kind of change the working copy would publish. See [Change classifier](#change-classifier).
 - `POST /items/{id}/refresh` republishes a thread to re-bake quotes whose source has a newer version. See below.
+
+## Syndication
+
+> Spec 0.4 §16.14 (decision #98) is a **ruled shape awaiting its gate**. This is
+> the publisher half of that gate.
+
+`syndication` lists copies of an item that the owner made on other networks,
+such as a Bluesky post or a Farcaster cast of it. Each entry is
+`{ url, version }`: an absolute `https:` URL at which the copy can be read, and
+the version of the item it was made from. Nothing else goes in an entry: no
+counts, no network name, no account.
+
+- `GET /items/{id}/syndication` (`owner:read`) returns `{ entries, revision }`
+  in the owner's order.
+- `PUT /items/{id}/syndication` (`owner:publish`) takes
+  `{ entries, expectedRevision }` and replaces the whole list. It returns the
+  stored `{ entries, revision }`. A repeated `url` keeps its first position.
+  At most 20 entries.
+
+Rules:
+
+- The list is **written in place** on the live item document
+  (`items/{id}.json`). It publishes no version, adds no changelog entry, adds
+  nothing to `feed.xml` and sends no mention. A pin works the same way.
+- Pinned files (`items/{id}/vN.json`) never carry it. A withdrawal endcap
+  omits it, and a withdrawn item refuses a `PUT` (409).
+- A draft has no version to copy, so a `PUT` on one is 409.
+- Each `version` must be one of the item's published versions (409 for a later
+  one). Each `url` must be an absolute `https:` URL (400 otherwise).
+- `expectedRevision` is the item's revision and is required. A `PUT` bumps it,
+  as a pin does. A stale revision is 409 `revision-conflict`.
+- The item's public page shows the copies as `u-syndication` links.
+- It moves the `items` change domain, never `feed`.
+
+Imported items keep the origin's `syndication` member as last fetched, filtered
+to well-formed `https:` entries (spec rule 5). They return it as `syndication`
+on `GET /reading` imported entries and on `GET /reading/imported`. It is the
+publisher's claim: the studio never hides or merges another post because of it,
+and never infers that the item's author is the account that posted the copy.
+The importer fetches an item document when its version moves, so a copy added
+after the held version shows up with the next one.
+
+```ts
+const { entries, revision } = await unwrap(BlyggerApi.getSyndication({ client, path: { id } }));
+await unwrap(BlyggerApi.putSyndication({ client, path: { id }, body: { entries: [...entries, { url, version: 3 }], expectedRevision: revision } }));
+```
 
 ## Shelf
 
@@ -271,6 +313,41 @@ import { OWN_SUBSCRIPTION } from "@blygger/sdk";
 const { entries, revision } = await unwrap(BlyggerApi.getShelf({ client }));
 await unwrap(BlyggerApi.putShelf({ client, body: { entries: [{ sub: OWN_SUBSCRIPTION, remoteId: id }, ...entries], expectedRevision: revision } }));
 ```
+
+## Dictionary
+
+The dictionary holds the words this blyg's spellchecking accepts, kept on the
+server so every client and device shares them. The Studio holds the words; it
+doesn't check spelling itself. A checker reads them: the `spellcheck` extension,
+or any client. The browser's own spellcheck can't. Studio-private: it never
+reaches an item document, a feed, the manifest, a public page or the static
+export.
+
+Words belong to **sources**. `owner` holds the words the author adds (Settings →
+writing → dictionary). Any other name holds a set that an extension or client
+installs, such as a technical domain's terms, so the set can be replaced or
+removed as a whole without touching the author's words.
+
+- `GET /dictionary` (`owner:read`) returns `{ sources: [{ source, words }],
+  revision }`: `owner` first, then the rest by name, each source's words sorted without
+  regard to case.
+- `PUT /dictionary/{source}` (`owner:manage`) takes `{ words, expectedRevision }`
+  and replaces that source's words. An empty list removes the source. It returns
+  the stored dictionary.
+
+Rules:
+
+- A source name is lowercase letters, digits and hyphens, at most 48, starting
+  and ending with a letter or digit.
+- A word is 1 to 64 characters with no whitespace and at least one letter, kept
+  as written, so names keep their capitals, in Unicode NFC. A `PUT` holding one
+  that isn't is refused with `400`, naming it in `details.word`. Repeats are
+  kept once.
+- The dictionary has one revision. `expectedRevision` is required; a stale one
+  is a `409 revision-conflict` with the current dictionary in
+  `details.current`. A client that adds one word reads, adds and puts, and on a
+  conflict does it again on what came back.
+- At most 20,000 words a source, 50 sources and 100,000 words in all (`413`).
 
 ## Change classifier
 
@@ -476,6 +553,7 @@ first page retries once before returning cursor-expired.
 | --- | --- |
 | Items | updated DESC, id DESC |
 | Item versions | version DESC within the item |
+| Private versions | version DESC within the item |
 | Subscriptions and hoppers | created ASC, id ASC |
 | Hopper memberships | addedAt DESC, subscriptionId ASC, remoteId ASC |
 | Signals and thumbs | at DESC, subscriptionId ASC, remoteId ASC |
