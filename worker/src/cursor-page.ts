@@ -15,7 +15,11 @@ export interface CursorSource<Row, Result = Row> {
   binds?: readonly Key[];
   /** Aggregate sources must be evaluated once before filtering their page. */
   materialize?: boolean;
+  /** Apply cursor ranges together when evaluating the source costs more than seeking each range. */
+  combineRanges?: boolean;
   order: readonly CursorOrder[];
+  /** Prepare derived source data only after validation, once per attempt. */
+  prepare?: () => Promise<void>;
   project?: (rows: Row[]) => Result[] | Promise<Result[]>;
 }
 export class CursorPageError extends Error {
@@ -91,6 +95,7 @@ export async function cursorPage<Row extends object, Result = Row>(
   const attempt = async (initial?: ChangeState) => {
     const before = generation(initial ?? await readChanges(db), source.domains);
     if (cursor && !same(cursor.generation, before)) throw expired();
+    await source.prepare?.();
     const ranges = cursor ? afterRanges(source.order, cursor.after) : null;
     const order = source.order.map(entry => `${column(entry.column)} ${entry.direction.toUpperCase()}`).join(', ');
     // Keep source bindings once, and let each disjoint range use its index.
@@ -100,7 +105,7 @@ export async function cursorPage<Row extends object, Result = Row>(
     const predicate = ranges ? ` WHERE ${ranges.length ? ranges.map(range => `(${range.sql})`).join(' OR ') : '0'}` : '';
     const sql = source.materialize
       ? `WITH cursor_source AS MATERIALIZED (${source.sql}) SELECT * FROM cursor_source${predicate} ORDER BY ${order} LIMIT ?`
-      : ranges && ranges.length <= 5
+      : ranges && ranges.length <= 5 && !source.combineRanges
       ? `WITH cursor_source AS NOT MATERIALIZED (${source.sql}) ${ranges.length
         ? ranges.map(range => `SELECT * FROM cursor_source WHERE ${range.sql}`).join(' UNION ALL ')
         : 'SELECT * FROM cursor_source WHERE 0'} ORDER BY ${order} LIMIT ?`

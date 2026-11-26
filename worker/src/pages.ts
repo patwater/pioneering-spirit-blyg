@@ -6,6 +6,7 @@
 // "Permalink" text link (dropping the ∞ glyph). Task 8 originally shipped
 // against the rev-1 mockup; this brings it forward together with threads.
 
+import { generatedHighlightRules } from "./generated-style.ts";
 import { listBlogrollSubscriptions, listPublicHoppers } from "./importer/store.ts";
 import { listPublicResponses } from "./mentions/store.ts";
 import { sanitizeHtml } from "./importer/sanitize.ts";
@@ -20,6 +21,7 @@ import type { ItemRow, MediaRow, Settings, SubscriptionRow, Transclusion, Versio
 import { loadFeedData, sourceKey, type FeedCardData, type FeedProvenance, type FeedItem } from "./public-feed.ts";
 import { WEBMENTION_PATH } from "./types.ts";
 import { meaningful, ownChangelog, ownSubject, storedSummary, type ChangelogEntry } from "./changelog-summary.ts";
+import { httpsUrl, listSyndication, type SyndicationEntry } from "./syndication.ts";
 import { escapeHtml, escapeHref, formatDateIn, unplacedMedia, visibleMedia } from "./util.ts";
 import { graphemePrefix } from "./text.ts";
 import { EMBED_CSS, EMBED_SCRIPT } from "./embeds.ts";
@@ -97,10 +99,6 @@ ${vars}
 }
 `;
 }
-
-/** Lucide's "bot" icon (ISC licence), used only as a mask, so its stroke colour is irrelevant. Declared before STYLE_CSS,
- * which calls generatedHighlightRules while the module loads. */
-const ROBOT = `url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22black%22 stroke-width=%221.8%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22%3E%3Cpath d=%22M12 8V4H8%22/%3E%3Crect width=%2216%22 height=%2212%22 x=%224%22 y=%228%22 rx=%222%22/%3E%3Cpath d=%22M2 14h2M20 14h2M15 13v2M9 13v2%22/%3E%3C/svg%3E")`;
 
 export const STYLE_CSS = `/* blyg — one hand-written stylesheet, no build step, no web fonts.
  *
@@ -254,6 +252,7 @@ article.fragment > :first-child, article.thread > :first-child { margin-top: 0; 
 .version-line .pins a:hover { border-bottom-color: currentColor; }
 .version-note { font-style: italic; margin: 0.4rem 0 0; max-width: 52ch; }
 /* The changelog in full or summarized (session 61, Settings → changelog on item pages). */
+.syndication { font: var(--apparatus); color: var(--ink-soft); margin: 0.6rem 0 0; }
 .changelog { font: var(--apparatus); color: var(--ink-soft); margin: 0.6rem 0 0; max-width: 60ch; }
 .changelog-h { margin: 0 0 0.25rem; }
 .changelog ol { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.2rem; }
@@ -496,43 +495,6 @@ article.fragment, article.thread, .thread-card { overflow-wrap: break-word; }
 ${EMBED_CSS}
 ${generatedHighlightRules(".gen-on")}`;
 
-/**
- * Generated spans ([TK], §5.7) drawn as a tinted, hairline-outlined box. The
- * markup is the protocol's own `blyg-tk-gen` and is never changed; whether a
- * page highlights it is presentation. `scope` selects the articles it applies
- * to: `.gen-on` (an item's own override) always, and every article not
- * opted out when the blyg's default is on.
- *
- * A generated block wears a small robot badge on its bottom edge, near the
- * left: Brady Dale's convention on bradydale.com, adopted so the mark reads
- * the same across blygs. An inline span, which can wrap, gets the robot
- * before its first word. GEN_INFO_SCRIPT makes the badge a button (hover or
- * tap for the disclosure) and marks the span .gen-ready; until then, or with
- * scripts off, the same robot is drawn by pseudo-elements. Either way the
- * icon is a mask filled with --ink-soft, so it follows the theme.
- */
-function generatedHighlightRules(scope: string): string {
-  const icon = `background: var(--ink-soft); -webkit-mask: ${ROBOT} center / contain no-repeat; mask: ${ROBOT} center / contain no-repeat;`;
-  const square = `box-sizing: border-box; width: 30px; height: 26px; border: 1px solid color-mix(in srgb, var(--ink-soft) 55%, var(--gen-rule)); border-radius: 6px; background: var(--paper);`;
-  return `${scope} .blyg-tk-gen { background: var(--gen-bg); box-shadow: inset 0 0 0 1px var(--gen-rule); border-radius: 4px; }
-${scope} div.blyg-tk-gen { position: relative; padding: 0.5rem 0.75rem 1.15rem; margin: 0.75rem 0 1.5rem; }
-${scope} div.blyg-tk-gen > :first-child:not(.gen-badge), ${scope} div.blyg-tk-gen > .gen-badge + * { margin-top: 0; }
-${scope} div.blyg-tk-gen > :last-child { margin-bottom: 0; }
-${scope} div.blyg-tk-gen:not(.gen-ready)::before { content: ""; position: absolute; left: 0.65rem; bottom: -13px; ${square} }
-${scope} div.blyg-tk-gen:not(.gen-ready)::after { content: ""; position: absolute; left: calc(0.65rem + 6px); bottom: -10px; width: 18px; height: 18px; ${icon} }
-/* An inline span that wraps keeps its box on every line it touches. */
-${scope} span.blyg-tk-gen { padding: 0.05rem 0.2rem; -webkit-box-decoration-break: clone; box-decoration-break: clone; }
-${scope} span.blyg-tk-gen:not(.gen-ready)::before { content: ""; display: inline-block; width: 0.9em; height: 0.9em; margin-right: 0.2em; vertical-align: -0.1em; ${icon} }
-${scope} .gen-badge { display: inline-block; position: relative; margin: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; cursor: pointer; }
-${scope} .gen-badge::after { content: ""; position: absolute; ${icon} }
-${scope} div.blyg-tk-gen > .gen-badge { position: absolute; left: 0.65rem; bottom: -13px; ${square} }
-${scope} div.blyg-tk-gen > .gen-badge::after { inset: 3px 5px; }
-${scope} span.blyg-tk-gen > .gen-badge { width: 0.9em; height: 0.9em; margin-right: 0.2em; vertical-align: -0.1em; }
-${scope} span.blyg-tk-gen > .gen-badge::after { inset: 0; }
-${scope} .gen-badge:focus-visible { outline: 2px solid var(--pencil); outline-offset: 2px; }
-`;
-}
-
 /** Appended to style.css: the blyg-wide default, which an item's gen-off overrides. */
 export function generatedHighlightCss(on: boolean): string {
   return on ? `\n/* generated spans highlighted by default */\n${generatedHighlightRules("article:not(.gen-off)")}` : "";
@@ -677,8 +639,10 @@ export const GEN_INFO_SCRIPT = `
       for (var j = 0; g.sources && j < g.sources.length; j++) {
         var s = g.sources[j];
         if (!s) continue;
-        // A remote source (0.4) names its origin and carries a frozen cite.
-        if (s.origin) {
+        // A web page (decision #117) or a remote source (0.4) carries a frozen cite.
+        if (s.url) {
+          if (!seenRemote[s.url]) { seenRemote[s.url] = true; remote.push(s); }
+        } else if (s.origin) {
           var key = s.origin + " " + s.id;
           if (!seenRemote[key]) { seenRemote[key] = true; remote.push(s); }
         } else sources[s.id] = true;
@@ -698,7 +662,7 @@ export const GEN_INFO_SCRIPT = `
     if (n) add(dl, "dd", n + (n === 1 ? " item" : " items") + " from this blyg");
     for (var r = 0; r < remote.length; r++) {
       var cite = remote[r].cited || {}, dd = add(dl, "dd");
-      var name = cite.source || remote[r].origin;
+      var name = cite.source || remote[r].origin || remote[r].url;
       var href = typeof cite.url === "string" && /^https?:/i.test(cite.url) ? cite.url : null;
       if (href) {
         var a = add(dd, "a", name);
@@ -1228,8 +1192,15 @@ ${permalinkLink(item.id, false, mount)}
  * the article's first-child rules still reach the first thing you see. A
  * withdrawn item is not an entry. No h-cite or responses markup, ever (tn-7).
  */
-export function asHEntry(article: string, settings: Settings, origin: string, url: string, published: string): string {
+export function asHEntry(article: string, settings: Settings, origin: string, url: string, published: string, syndication: readonly SyndicationEntry[] = []): string {
   if (!article.startsWith('<article class="') || /^<article class="[^"]*\bwithdrawn\b/.test(article)) return article;
+  // §16.14 syndication: the publisher's own copies elsewhere, as mf2
+  // u-syndication links. The live page only; the item document carries the
+  // same list, and a pinned page or an endcap never does.
+  const copies = syndication.filter(entry => httpsUrl(entry.url));
+  const also = copies.length
+    ? `<p class="syndication">also posted at ${copies.map(entry => `<a class="u-syndication" rel="syndication" href="${escapeHref(entry.url)}">${escapeHtml(new URL(entry.url).hostname)}</a>`).join(", ")}</p>\n`
+    : "";
   const author = settings.author_name
     ? `<a class="p-author h-card" href="${escapeHtml(settings.author_url || origin)}" hidden>${escapeHtml(settings.author_name)}</a>\n`
     : "";
@@ -1237,7 +1208,7 @@ export function asHEntry(article: string, settings: Settings, origin: string, ur
   return article
     .replace('<article class="', '<article class="h-entry ')
     .replace('<div class="item-content', '<div class="e-content item-content')
-    .replace(/<\/article>$/, () => `${meta}</article>`);
+    .replace(/<\/article>$/, () => `${also}${meta}</article>`);
 }
 
 /**
@@ -2088,7 +2059,7 @@ export async function permalinkPage(db: D1Database, settings: Settings, item: It
   const latest = await publishedVersion(db, item);
   const media = await listVersionMedia(db, item.id, item.version);
   const head = itemHead(latest?.content_html ?? "", settings);
-  const body = `${await blygPage(db, settings, mount, `${asHEntry(await fragmentBlock(db, item, mount, settings.timezone, false, undefined, await changelogSection(db, settings, item, false, mount)), settings, origin, url, item.created)}
+  const body = `${await blygPage(db, settings, mount, `${asHEntry(await fragmentBlock(db, item, mount, settings.timezone, false, undefined, await changelogSection(db, settings, item, false, mount)), settings, origin, url, item.created, await listSyndication(db, item.id))}
 ${await localMentionsSection(db, item, settings, mount, origin)}
 ${await responsesSection(db, item, settings, mount)}`)}
 <script>${VERSION_NAV_SCRIPT}</script>`;
@@ -2124,7 +2095,7 @@ export async function threadPage(db: D1Database, settings: Settings, item: ItemR
   const latest = await publishedVersion(db, item);
   const media = await listVersionMedia(db, item.id, item.version);
   const head = itemHead(latest?.content_html ?? "", settings, respondsToLabel(latest));
-  const body = `${await blygPage(db, settings, mount, `${asHEntry(await threadBlock(db, item, mount, settings.timezone, await changelogSection(db, settings, item, true, mount)), settings, origin, url, item.created)}
+  const body = `${await blygPage(db, settings, mount, `${asHEntry(await threadBlock(db, item, mount, settings.timezone, await changelogSection(db, settings, item, true, mount)), settings, origin, url, item.created, await listSyndication(db, item.id))}
 ${await localMentionsSection(db, item, settings, mount, origin)}
 ${await responsesSection(db, item, settings, mount)}`)}
 <script>${VERSION_NAV_SCRIPT}</script>`;

@@ -18,7 +18,9 @@
 //
 //   login                       start a studio session (BLYG_PASSWORD or prompt)
 //   push <file>                 create or update the studio draft (working copy)
-//   generate <file> [--all]     push, run every ungenerated [TK] scope, pull the result
+//   generate <file> [--all] [--proceed]
+//                               push, run every ungenerated [TK] scope, pull the result;
+//                               --proceed generates even if links in an instruction cannot be read
 //   publish <file> [--note ""]  push, then publish the next version
 //   pull <file>                 overwrite the file with the studio working copy
 //   find [query]                search published items to quote with ![[id]]
@@ -194,21 +196,33 @@ async function pull(file) {
   console.log(`Pulled working copy of ${meta.id} into ${path.relative(process.cwd(), file)}.`);
 }
 
-async function generate(file, all) {
+async function generate(file, all, proceed = false) {
   let { meta, revision } = await push(file, { quiet: true });
   let { body } = readDraft(file);
   const scopes = tkScopes(body);
   if (!scopes.length) return console.log("No [TK]...[/TK] scopes in this draft.");
   let ran = 0;
+  let stopped = false;
   for (const [i, scope] of scopes.entries()) {
     if (scope.generated && !all) continue;
     process.stdout.write(`Generating scope ${i + 1}/${scopes.length}: ${scope.instruction.slice(0, 60) || "(no instruction)"} ... `);
-    const result = await request("POST", `/api/items/${meta.id}/generate`, { scope: i, expectedRevision: revision });
+    const result = await request("POST", `/api/items/${meta.id}/generate`, { scope: i, expectedRevision: revision, ...(proceed ? { proceed: true } : {}) });
+    // Studio 0.70+ reads the links an instruction names before generating. When
+    // some cannot be read it generates nothing and answers with a checkpoint,
+    // so the author decides whether to go ahead without them.
+    if (result.checkpoint) {
+      const { read, total, failed = [] } = result.checkpoint;
+      console.log(`stopped: ${read} of ${total} links could be read`);
+      for (const f of failed) console.log(`  ${f.link}: ${f.reason}`);
+      console.log("Fix the links, or run generate again with --proceed to generate without them.");
+      stopped = true;
+      break;
+    }
     revision = result.revision;
     console.log(`done (${result.model})`);
     ran++;
   }
-  if (!ran) return console.log("Every scope already has output. Use --all to regenerate.");
+  if (!ran) return stopped ? undefined : console.log("Every scope already has output. Use --all to regenerate.");
   // The studio splices each output into its working copy; pulling keeps the
   // file byte-identical to what will publish.
   await pull(file);
@@ -376,7 +390,7 @@ switch (cmd) {
     await pull(need(f._[0], "pull"));
     break;
   case "generate":
-    await generate(need(f._[0], "generate"), !!f.all);
+    await generate(need(f._[0], "generate"), !!f.all, !!f.proceed);
     break;
   case "find":
     await find(f._.join(" "));

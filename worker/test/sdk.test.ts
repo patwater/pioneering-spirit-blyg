@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { BlyggerApi, unwrap, BlyggerApiError, createBlyggerClient } from "../sdk/dist/browser.js";
 import { itemDetail } from "../src/item-data.ts";
 import { readingData } from "../src/reading-data.ts";
+import { BACKGROUND_RULES } from "../src/background.ts";
 import { routes } from "../src/contract/routes.ts";
 import { login, BASE, apiJson } from "./helpers.ts";
 import { createSubscription, upsertL0Item } from "../src/importer/store.ts";
@@ -12,20 +13,15 @@ import { ReadingEntrySchema } from "../src/contract/routes.ts";
 const clientFor = (cookie = "") => createBlyggerClient({ baseUrl: BASE + '/blyg/api', headers: { cookie }, fetch: (input, init) => SELF.fetch(input instanceof Request ? input : new Request(input, init)) });
 
 describe("generated SDK against the real Worker", () => {
-  it("retains the deprecated changes endpoint in HTTP, OpenAPI and the generated SDK", async () => {
+  it("has removed the changes endpoint from HTTP, OpenAPI and the generated SDK (0.67.0, contract 6.0.0, decision #111)", async () => {
     const cookie = await login();
-    const response = await SELF.fetch(`${BASE}/blyg/api/changes`, { headers: { cookie, 'if-none-match': '*' } });
-    expect(response.status).toBe(200);
-    expect(response.headers.get('cache-control')).toBe('no-store');
-    expect(response.headers.get('etag')).toBeNull();
-    const changes = await response.json();
-    expect(await unwrap(BlyggerApi.getChanges({ client: clientFor(cookie) }))).toEqual(changes);
+    const response = await SELF.fetch(`${BASE}/blyg/api/changes`, { headers: { cookie } });
+    expect(response.status).toBe(404);
     const document = await SELF.fetch(`${BASE}/blyg/api/openapi.json`, { headers: { cookie } });
     expect(document.status).toBe(200);
-    const operation = (await document.json<{ paths: Record<string, { get: { deprecated?: boolean; responses: Record<string, unknown> } }> }>()).paths['/changes'].get;
-    expect(operation.deprecated).toBe(true);
-    expect(operation.responses).not.toHaveProperty('304');
-    expect(routes.getChanges.deprecated).toBe(true);
+    expect((await document.json<{ paths: Record<string, unknown> }>()).paths).not.toHaveProperty('/changes');
+    expect(routes).not.toHaveProperty('getChanges');
+    expect(BlyggerApi).not.toHaveProperty('getChanges');
   });
   it("creates, reads, edits, publishes, pins, restores and withdraws through named methods", async () => {
     const client = clientFor(await login());
@@ -181,7 +177,8 @@ describe("generated SDK against the real Worker", () => {
       const value = Reflect.get(target, key);
       return typeof value === "function" ? value.bind(target) : value;
     } });
-    const page = await readingData(counted, { limit: 25 }, "own");
+    // Published seconds apart, so `superseded` would send all but the newest to Background; this counts queries, not rules.
+    const page = await readingData(counted, { limit: 25 }, "own", undefined, false, undefined, undefined, BACKGROUND_RULES.filter((rule) => rule !== "superseded"));
     expect(page.items.map((row) => row.own?.id)).toEqual(ids.slice(1).reverse());
     expect(page.items[0].contentHtml).toContain("budget 25");
     // Leave room for the SSR page's settings, hoppers and signals reads.

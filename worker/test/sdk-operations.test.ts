@@ -23,12 +23,13 @@ it("exercises every declared operation through its named SDK method, including a
   const id = draft.id, member = { id: hopper.id, sub: sub.id, remoteId: "remote" }, signal = { sub: sub.id, remoteId: "remote" };
   const cases: Case[] = [
     ['getCapabilities', 200, async client => api.getCapabilities({ client })],
-    ['getChanges', 200, async client => api.getChanges({ client })],
     ['batchRead', 200, async client => api.batchRead({ client, body: { operation: 'getItem', requests: [{ path: { id } }] } })],
     ["createItem", 201, async client => api.createItem({ client, body: { mode: "response", source: { subscriptionId: sub.id, remoteId: "remote" } } })],
     ["updateItem", 200, async client => api.updateItem({ client, path: { id }, body: { ...({ contentMd: "matrix changed", responses: "hide" }), expectedRevision: await testItemRevision(id) } })],
     ["generateItem", 400, async client => api.generateItem({ client, path: { id }, body: { ...({ scope: 100 }), expectedRevision: await testItemRevision(id) } })],
     ["publishItem", 200, async client => api.publishItem({ client, path: { id } , body: { expectedRevision: await testItemRevision(id) } })],
+    ["getSyndication", 200, async client => api.getSyndication({ client, path: { id } })],
+    ["putSyndication", 200, async client => api.putSyndication({ client, path: { id }, body: { entries: [{ url: "https://bsky.app/profile/x/post/y", version: 1 }], expectedRevision: await testItemRevision(id) } })],
     ["pinItem", 200, async client => api.pinItem({ client, path: { id, version: 1 } , body: { expectedRevision: await testItemRevision(id) } })],
     ["restoreItem", 200, async client => api.restoreItem({ client, path: { id }, body: { ...({ version: 1 }), expectedRevision: await testItemRevision(id) } })],
     ["uploadMedia", 201, async client => api.uploadMedia({ client, body: { file: new File(["image"], "image.png", { type: "image/png" }), itemId: id, expectedRevision: await testItemRevision(id), alt: "matrix" } })],
@@ -39,6 +40,13 @@ it("exercises every declared operation through its named SDK method, including a
     ["pollAllSubscriptions", 200, async client => api.pollAllSubscriptions({ client })],
     ["createContact", 201, async client => api.createContact({ client, body: { handle: "matrix", name: "Matrix", url: "https://matrix.example/" } })],
     ["listContacts", 200, async client => api.listContacts({ client })],
+    ["listHelpers", 200, async client => api.listHelpers({ client })],
+    ["catchUp", 200, async client => api.catchUp({ client, body: { sub: "~own", remoteId: id } })],
+    ["listAgenticFeeds", 200, async client => api.listAgenticFeeds({ client })],
+    ["getAgentic", 200, async client => api.getAgentic({ client, path: { feed: "default" } })],
+    ["putAgentic", 200, async client => api.putAgentic({ client, path: { feed: "default" }, body: { edition: { agent: { name: "sdk" }, scores: [{ sub: "~own", remoteId: id, score: 1 }] }, expectedRevision: (await api.getAgentic({ client, path: { feed: "default" } })).data?.revision ?? 0 } })],
+    ["getDictionary", 200, async client => api.getDictionary({ client })],
+    ["putDictionarySource", 200, async client => api.putDictionarySource({ client, path: { source: "owner" }, body: { words: ["blyg"], expectedRevision: (await api.getDictionary({ client })).data?.revision ?? 0 } })],
     ["getShelf", 200, async client => api.getShelf({ client })],
     ["putShelf", 200, async client => api.putShelf({ client, body: { entries: [{ sub: "~own", remoteId: id }], expectedRevision: (await api.getShelf({ client })).data?.revision ?? 0 } })],
     ["updateContact", 200, async client => api.updateContact({ client, path: { id: contact.id }, body: { name: "Matrix two" } })],
@@ -58,6 +66,7 @@ it("exercises every declared operation through its named SDK method, including a
     ["updateMention", 200, async client => api.updateMention({ client, path: { id: "matrix-mention" }, body: { hidden: true } })],
     ["getItemSummary", 200, async client => api.getItemSummary({ client })],
     ["listItemVersions", 200, async client => api.listItemVersions({ client, path: { id } })],
+    ["listPrivateVersions", 200, async client => api.listPrivateVersions({ client, path: { id } })],
     ["listHopperMemberships", 200, async client => api.listHopperMemberships({ client, path: { id: hopper.id } })],
     ["getReadingSummary", 200, async client => api.getReadingSummary({ client })],
     ["getSignalSummary", 200, async client => api.getSignalSummary({ client })],
@@ -93,6 +102,8 @@ it("exercises every declared operation through its named SDK method, including a
     // Extension routes answer 404 while the extension is disabled, as it is here.
     ["extLineageGlyphGetLineage", 404, async client => api.extLineageGlyphGetLineage({ client, query: { id } })],
     ["extLineageGlyphListSummaries", 404, async client => api.extLineageGlyphListSummaries({ client, query: { keys: JSON.stringify([`own:${id}`]) } })],
+    ["extSpellcheckGetWords", 404, async client => api.extSpellcheckGetWords({ client })],
+    ["extSpellcheckProofread", 404, async client => api.extSpellcheckProofread({ client, query: { id } })],
     ["extWordCountListCounts", 404, async client => api.extWordCountListCounts({ client, query: { keys: JSON.stringify([`own:${id}`]) } })],
     ["listStaleThreads", 200, async client => api.listStaleThreads({ client })],
     ["getItemFreshness", 409, async client => api.getItemFreshness({ client, path: { id }, query: { probe: "false" } })],
@@ -101,6 +112,7 @@ it("exercises every declared operation through its named SDK method, including a
     ["draftNote", 409, async client => api.draftNote({ client, path: { id } , body: { expectedRevision: await testItemRevision(id) } })],
     // A first version with no note has nothing to summarize (409); no model is called.
     ["summarizeChangelog", 409, async client => api.summarizeChangelog({ client, body: { itemId: id } })],
+    ["summarizeCatchUp", 409, async client => api.summarizeCatchUp({ client, body: { sub: "~own", remoteId: id } })],
     // Off (409) until Settings names a decision model, as it does not here.
     ["classifyChange", 409, async client => api.classifyChange({ client, path: { id } , body: { expectedRevision: await testItemRevision(id) } })],
     ["getImportedHistory", 404, async client => api.getImportedHistory({ client, path: { sub: sub.id, id: "remote" } })],

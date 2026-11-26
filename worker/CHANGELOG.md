@@ -18,6 +18,396 @@ not have its own repo until session 26.
 
 ---
 
+## Unreleased
+
+## 0.72.2 — The Studio stays inside D1's free tier; unquoted links verify
+
+**Fix: an open Studio spent a free plan's D1 reads** (studio#180, fredcy). Since 0.65.0 the
+Studio has refreshed with conditional reads, not the old `/changes` preflight. Reading's page
+and its summary always run in full before the ETag check, because they can depend on the
+mention index, which moves no counter. Each run read about 16,000 rows on a small node, and the
+Studio polled every 15 seconds whenever its tab was visible. So a tab left open in front of an
+awake screen used up the free tier's 5M rows a day in about two hours, and the public pages
+returned 500 until midnight UTC. Two changes:
+- Polling runs only while someone is using the Studio: the tab visible, its window focused,
+  and some input in the last five minutes. Coming back (focus, a key, the pointer) reloads at
+  once.
+- Reading's page and summary poll every five minutes instead of every 15 seconds. New entries
+  arrive only on the import cron, and your own actions still refresh Reading at once.
+
+An idle Studio now costs nothing, and an hour of active reading costs about 190,000 rows
+instead of 3.8M. Making Reading's reads cheap in their own right (the revision shortcut for
+non-mention views, and the identity scan) is follow-up work on #180.
+**New design rule** (Venkat): the Studio stays inside D1's free tier for a median blyg.
+
+**Fix: an unquoted `href` failed Webmention verification** (studio#181, arubis).
+`alternateJsonHref` read `href` only when it was quoted, so pages from Hugo's minifier
+(`href=https://…`) failed §15.4 step 1, and the sender saw only the 202. One attribute reader
+(`src/html-attr.ts`) now serves verification, endpoint discovery and peek. It reads double-quoted,
+single-quoted and unquoted values, never matches `href` inside `data-href`, and decodes
+`&amp;`. Peek also stops taking an oEmbed alternate (`application/json+oembed`) for the
+item document.
+
+**Migrations:** none. Private contract unchanged (6.4.0), SDK unchanged.
+
+## 0.72.1 — Private items take their place in the reader
+
+**Fix** (Venkat, session 85). In the pace-layered reader, private items stayed on top and
+new items arrived below them. The order is ranked from each item's history, and the ranking
+read only public history, so a private item never had a position, and an entry without one
+sorts first. Private items are now ranked by their private versions, like any other own item,
+and a new private version moves its item as a public version does. Nothing changes on the
+public surface: the public feed's history does not read private versions.
+**Migrations:** `0061_reader_order_private.sql` (the ranking's rebuild triggers also watch
+private items and their versions; it marks the order for a rebuild, so it is right on the
+first reader load after the upgrade). Private contract unchanged (6.4.0), SDK unchanged.
+
+## 0.72.0 — Private items and Notebook mode; setup covers the newer settings; what's new after an upgrade
+
+**Private items** (blygger-spec decision #94, `docs/sealed-content-build-plan.md` §1). An item
+that has never gone public can be published privately: real versions, numbered p1, p2, …,
+that appear on no public route. Raising it is an ordinary publish, and its first public
+version is v1. A blyg can run in **Notebook mode**, private by default, beside the familiar
+**Publish mode**. Owner-only: nothing private reaches the wire, and this is Phase 0 of the
+sealed-content build (RFC-6). Private contract **6.4.0**, SDK **0.26.0**.
+
+- **Private items** (blygger-spec `docs/sealed-content-build-plan.md` §1, 0a and 0b;
+  decision #94). An item that has never gone public can be **published privately**:
+  `POST /items/{id}/publish` with `visibility: "private"` keeps a private version
+  (`privateVersion` in the response) and sets the status to `private`. No public route
+  serves or lists it: every public route now asks one question, *served publicly*
+  (status public or withdrawn), instead of refusing drafts. An ordinary publish raises it
+  to public as **v1**; private notes and private versions never reach the changelog. A
+  public item can't be made private (409); withdrawal stays its only exit. Publishing
+  anything that names a private item by `[[id]]` or `![[id]]` is refused ("item is
+  private"). Media that only private versions showed stays private. In the editor:
+  *publish privately* in the ⋯ menu, a private item's button reads *publish publicly*.
+  Private contract **6.4.0** (`status` gains `private`). New oracles
+  `private-items-public-surface`, `private-items-raise-to-public`,
+  `private-items-publish-block`; the media-visibility law now says media becomes public
+  when it is published publicly. Migration `0059_private_versions.sql`.
+- **A blyg can be a private notebook: Publish mode and Notebook mode.** Settings → *mode*:
+  **Publish mode** (public by default, unchanged) or **Notebook mode** (private by default).
+  In Notebook mode, a publish that names no `visibility` adds a
+  private version to any item that has never been public, so a tool or agent makes an item
+  public only by sending `visibility: "public"`; an item already public still publishes
+  publicly. The editor shows one **add version** button with a private/public choice, and
+  asks before making an item public. **Reading → my blyg** now lists private items too,
+  marked private, at their latest private version (rendered for the owner only; `[[id]]`
+  links that resolve are links, anything else stays as typed). Setting `defaultVisibility`;
+  reading entries' `own.private`. New oracles `private-items-default-visibility` and
+  `private-items-owner-reader`.
+- **Private history.** An item's history panel lists its private versions as **p1, p2, …**
+  with their notes, each viewable, apart from the public v1, v2, …; they stay listed after
+  the item goes public, as studio history. `GET /items/{id}/private-versions` (owner read,
+  newest first). Discarding an item that was never public removes its private versions with
+  it. A private publish that races an edit or a public publish is refused (409) and adds
+  nothing. Publishing a working copy that names a draft or withdrawn item is refused like
+  one naming a private item (unchanged behaviour, now an oracle). New oracles
+  `private-items-private-history` and `private-items-private-conflict`.
+- **Notebook mode gets its own place to read.** In Notebook mode a **private** tab sits just
+  above *compose*: the reader on the new `private` source, your private items only
+  (`GET /reading?sub=private`; the summary's `counts.private`). A private item's editor links to
+  its **reader view** where a public item links to its public page. Reader cards for private
+  items are marked *private* and offer no public link or stub, which they wrongly did in the
+  owner's reader before.
+- **Setup covers the newer settings, and ends with blygs to read.** The walk-through gains a
+  **Mode** step (Publish or Notebook mode) and a **Reading** step (reader order, when an
+  entry counts as read, the reader's changelog display, the Agentic feed's name); *Look*
+  gains the studio theme and the item pages' changelog display, *Writing and AI* the
+  text-helpers model and the change classifier, *Others* collection feeds. A text-helpers
+  model chosen in setup was not saved before; it is now. The links menu, front page and
+  Background rules stay in Settings. After *Review* saves, a last step, **Read**, opens
+  Discover. Discover now says **who writes each blyg** and which client publishes it, from
+  blygger.com's `blygs.json` (`author`, `generatorUrl`; listings without them show as
+  before).
+- **What's new after an upgrade.** The setup walk-through doubles as the post-upgrade cue.
+  Setting `setupSeenVersion` is the newest release whose setup you finished or dismissed;
+  after an upgrade, a banner lists the new release's highlights once, and *review the new
+  settings* walks only the steps with settings added since, each marked new
+  (`/setup?new=1`). Nodes already past setup start at 0.71.0, so this release's additions
+  are offered on upgrade. For release authors: `HIGHLIGHTS` and `SINCE` in
+  `src/ui/whats-new.ts`. Migration `0060_setup_seen_version.sql`.
+
+**Migrations:** `0059_private_versions.sql`, `0060_setup_seen_version.sql`.
+
+## 0.71.0 — Quotes read lines as the spec defines them; Reading rebuilds less; editor formatting fixes; picker sources
+
+**Text content is defined** (blygger-spec decision #118, spec 0.4 §2, twenty-third revision).
+A quote's text is now read with a line break at the start **and** end tag of every block
+element in §2's list (paragraphs, headings, list items and lists, definition lists,
+blockquotes, `pre`, `div`, table parts including cells, figures, sectioning elements,
+`details`, `summary`) and at every `br` and `hr`. In a tight nested list a parent item's
+text and its first nested item are now two lines, as they always were in a loose one, so
+a partial quote of both keeps the nesting in its bake. `selectionText`, `selectionLines`
+and `plainTextFromHtml` share the one list. Live partial quotes were re-measured under the
+rule before it shipped.
+
+**Reading does less work** (Kyle Mathews, studio#172). Presentation-only changes no longer
+rebuild reader positions; an expired or malformed continuation is refused before the order
+is prepared; imported hopper changes are scoped to the members they touch; a delayed
+rebuild cannot overwrite newer positions; an own pin expires the Reading cursors it
+affects. See `docs/reader-derived-work-main-integration.md`. Fixes studio#169.
+
+**Editor formatting fixes** (Kyle Mathews, studio#168): code blocks around text that holds
+backticks, the hard-break button in and near code blocks and after paired backslashes,
+Tab under long or oddly spaced list markers and over selections with children, Bold and
+Italic over asterisk-only or whitespace-only lines, Formula on an existing display
+formula, links ending in `?` after `#`, empty edits, selections ending inside an emoji,
+read-only text. Status messages replace each other instead of stacking, and a failed save
+always says so. Browser formatting oracles (18 files, 41 properties) check sequences of
+writing actions.
+
+**Picker sources** (studio#173). A new extension slot, `pickerSource`: an extension adds a
+tab to the `[[` / `![[` picker and supplies only results; the Studio lists them, moves
+through them with the picker's keyboard and inserts the one picked. See
+`docs/extensions.md`.
+
+**Fixes** (djinna, studio#167). The test suite no longer picks up AI keys from an
+operator's `.dev.vars` (`vitest.config.ts` blanks all four), which made a self-updating
+node's pre-deploy test run fail; and a failed changelog summary can no longer overwrite
+one that became ready meanwhile.
+
+**Migrations:** `0058_reader_work.sql`.
+
+## 0.70.0 — [TK] reads the links you give it; Reading loads fast again; seen means read
+
+**[TK] reads the links its author placed** (blygger-spec decision #117, spec 0.4 §16.16).
+Before a scope is generated, every link in its instruction or anywhere in the draft is
+read: web pages are fetched under the importer's outbound rules (up to 8, about 30,000
+characters each), and `[[id]]` links, or URLs naming an item the node holds, come from the
+local copy (up to 8). What was read goes to the model, web pages framed as untrusted
+fetched text, and is disclosed: items as references, web pages as `{url, cited}` entries in
+`generated[].sources`, which send no mention. If any link can't be read, generation stops
+at a **checkpoint**: `POST /items/{id}/generate` answers `{ checkpoint: { read, total,
+failed } }` and saves nothing, and the editor asks "n of m links could not be read,
+generate anyway?" with the failures under Details; `proceed: true` generates without them.
+The TK panel lists what each generation read and which entries will tell another blyg.
+Code: `src/tk-hydrate.ts`, `runGenerateScope` in `src/tk-generate.ts`.
+
+**Reading loads fast again.** Measured on a live node, a Reading load could sit blank for
+4–8 s. (1) The pace-layered order (0.68.0) was rebuilt whenever the items, reading or
+subscriptions counters moved, which every poll, autosave and read mark does; it now
+rebuilds only when an input to the order changes (migration 0056). (2) The reading route
+no longer waits for every list before drawing. (3) Imported items whose subscription no
+longer exists (left by an old unsubscribe) sorted first under pace-layered and were then
+dropped, so the first pages came back empty; the feed, summary and Raw queries now skip
+them. Check for such rows with `SELECT count(*) FROM imported_items ii WHERE NOT EXISTS
+(SELECT 1 FROM subscriptions s WHERE s.id = ii.subscription_id)`; they are safe to delete.
+
+**Seen means read.** A new setting, **Count an entry as read** (Settings → reader order):
+*when I see it* (the default: about a second fully on screen, short entries included,
+marks sent in batches), *when I open it* (the old behaviour), or *only when I mark it*.
+Every card's **date opens the entry's full view**. Read marks now move their own change
+domain, `marks` (migration 0057), so marking while you scan no longer expires the
+feed's page cursors. "retry reads" also reloads the page's lists.
+
+**Migrations:** **0056** (`reading_order_state.inputs` and triggers that move it only on
+the order's inputs), **0057** (`change_state.marks`; the read-state triggers move it
+instead of `reading`). Apply them before deploying. Private contract **6.3.0**, SDK
+**0.25.0**.
+
+## 0.69.0 — Helpers and Catch up; the Agentic feed's foundations; spellcheck, a dictionary and claims; full-text search; quoted lists keep their bullets
+
+**The Agentic feed's foundations** (blygger-spec `docs/agentic-feed-plan.md` §9, row 52):
+`GET /agentic`, `GET`/`PUT /agentic/{feed}` (`expectedRevision`, the closed field set),
+the digest tab, and each edition composed into a private draft thread. Scopes are
+`owner:read`/`owner:manage` until the narrow ones are reviewed.
+
+**Helpers** (blygger-spec `docs/helpers-plan.md`, row 143): `GET /helpers`, the catalogue.
+**`catch-up`** (`POST /helpers/catch-up`, mechanical; after Burrow 0.23.0's Catch up):
+an entry's ⋯ → *catch up* opens a sheet laying the conversation it carries out oldest
+first, each card that post's own words. **`catch-up-summary`**
+(`POST /helpers/catch-up-summary`, text): *summarize* in that sheet, a few sentences by the
+new **text helpers** model (Settings → AI; blank uses the change-notes model), written once
+per set of versions and kept, with its sources in the §5.9 reference shape. Custom sheets
+may now use router links (the sheet host has the router's context).
+
+**Background: other blygs' changes judged by the classifier** (blygger-spec
+`docs/background-plan.md` §7.2, phase 4b's first half). Opt-in, under Settings → Background
+→ *judge other blygs' changes too*, and only with a change classifier chosen in Settings →
+AI. A new version the measured rules leave open is judged on the quarter-hour poll, ten at a
+time, under the daily AI budget; *typo* or *minor* sends it to Background as a minor change,
+*major* leaves it. Only the two texts are sent. Over the budget the
+measured rules decide. The `minor` rule now covers your own and other blygs' minor changes. With
+an optional **instruction** written beneath the toggle, the classifier also reads each version's
+changelog note, and an entry whose note calls a large change minor stays in view with a chip
+("note says minor · 35% changed"). With no instruction, notes are never sent. A second
+toggle beneath the instruction turns that keep-in-view default off, so the classifier's label
+alone decides.
+
+**[TK] generation can write links** (Venkat, session 78). The model is now told how: a
+web page as a markdown link, an item of the blyg as `[[id | text]]` with an id from your
+instruction, its sources or the draft. A link to an item you supplied that resolves stays a
+link, published and disclosed like any other; a link to an id the model invented is reduced
+to its words, as before. A quote mid-sentence (`![[…]]`) is still taken out: quotes go on a
+line of their own.
+
+**A quote of list items keeps its bullets** (decision #114, spec §16.15, ROADMAP row 136).
+A partial quote used to publish quoted list items as bare paragraphs, on every page that
+showed it. Now a quoted line that is a list item in the quoted post publishes as one, in a
+list like the original's: an ordered run starts at the source's number, and nesting is
+kept where both lines are quoted. The structure comes from the quoted post, never from the
+markers you type, so a list quoted as plain lines is still a list. The text is unchanged,
+so the quote's check at publish is too. The importer keeps an `ol`'s `start`, and a fork
+flattens quoted lists as markdown lists with their numbers.
+
+**The reader draws generated text as the public pages do** (session 78): the tinted box and
+the robot on every `[TK]` span the reader shows, your own items and other blygs' alike,
+quoted ones included, under the same setting (*Highlight generated portions by default*).
+Both surfaces now share one set of rules (`src/generated-style.ts`). Code inside a quote keeps
+its background in the reader, and a code block's own code is no longer an inline chip.
+
+**The studio may wear its own theme**: Settings → Appearance → *Studio theme*, "Same as public"
+by default, or any preset or your custom palette. Public pages always wear the public theme.
+
+**An entry's source name opens that source's feed**, in every reader view (cards, the full
+view, the Agentic feed): the same single-source view the Sources tab opens, in the same
+lens. Reached that way, its back link reads *← main feed*; reached from Sources, *← sources*.
+
+**Waking a phone or iPad no longer flashes a read error.** On wake every view refetches at
+once, often before the network is back (Safari: "Load failed"), and a page walk that spanned
+the sleep finds its cursor expired. Such a failure now retries on its own, backing off, and
+shows its banner (and enters the error log) only if it lasts more than six seconds. Some
+views never polled again and kept the banner until *retry reads*; they now recover by
+themselves. Other read failures show at once, as before.
+
+**Full-text search** (Kyle Mathews, #146): the picker, Reading and Compose search through a
+SQLite FTS5 index instead of scanning rows. A query needs one word of three or more
+letters; shorter words narrow it. Drafts and published copies are indexed apart, so an
+unpublished edit shows only in searches that include drafts.
+
+**Spellcheck, a dictionary and editor marks** (#155, #156, #159). A **dictionary** in the
+core (`GET /dictionary`, `PUT /dictionary/{source}`): the words this blyg's spellchecking
+accepts, the author's own and sets an extension installs, shared by every device and
+client (Settings → writing → dictionary). **Editor marks**: an editor bar may underline
+stretches of the text (`context.mark`), drawn in a layer over the text box. The shipped
+**spellcheck** extension, off by default: a dictionary check that underlines as you type,
+replacing the browser's own spellcheck while it is on screen (`spellcheck` joins the
+replaceable controls), and an AI proofread that offers corrections only (spec §5.7 rule
+10): accepted fixes go in as your own words, and the sheet offers a line for the change
+note.
+
+**Claims** (#165, miguelito4), a shipped extension, off by default: `claim` and `resolution`
+blocks written through an editor bar, a badge on posts with a claim, pin and resolve from
+the post, and a Claims page with your score. Browser-only.
+
+**A false "update" badge is gone.** Since 0.67.0 every Studio with update checks on showed
+"update" and a dot on More, because the release check took the highest version-shaped
+number anywhere in the release feed, and 0.67.0's notes mention the API contract's 6.0.0.
+The check now reads versions only where the feed names a release (its tag links, entry ids
+and titles). A node that stored the false version clears it at its next daily check.
+
+**Migrations:** **0050** (`search_index`, #146; backfills the index from existing rows),
+**0052** (`agentic_feeds`), **0053** (`helper_results`), **0054** (`imported_change_queue`),
+**0055** (`dictionary`). Apply them before deploying. Private contract **6.2.0**, SDK
+**0.24.0**. Fixed on the way: the lineage test no longer depends on the `superseded` rule's
+timing.
+
+**Upgrade notes:** on nodes with a few thousand items, D1 may report **7429**
+(overloaded) on a migration after 0050's search backfill. Wait at least a minute
+and rerun the same migration apply command; successful migrations stay recorded
+and only pending ones run. Deploy after all migrations finish. Once FTS exists,
+plain `wrangler d1 export --remote` fails: the export needs Wrangler 4.166.0 or
+newer and `--compatibility sqlite3_cli_only`, and the dump cannot be imported
+back into D1. See [migration retries, backups and SQL exports](docs/search.md#applying-migration-0050)
+for commands, the Studio backup archive and D1 Time Travel.
+
+---
+
+## 0.68.0 — Reading reorganised: Feed (pace-layered), Mentions, Agentic feed, Saved, Background, Raw; Background's measured rules
+
+**Reading has six tabs** (Venkat, session 77): **Feed**, **Mentions**, **Agentic feed**,
+**Saved**, **Background**, **Raw**. The Feed makes structural decisions only: its order,
+and what it folds or moves to Background. It carries its own controls: All, Threads or
+Fragments, and **Pace-layered** (now the default everywhere) or **Chronological**,
+remembered in the `readerOrder` setting. The **Agentic feed** (formerly Smart Feed) is
+where an assistant will make editorial judgments about what you see and how; its prompt
+is now the *agentic feed prompt* in Settings, and the tab is still a placeholder.
+**Saved** is the Shelf renamed, and an entry's action reads **+ save**. **Raw** is what
+came in from the blygs you read, newest first, with nothing moved to Background and
+nothing folded. Old `lens=smart` links open the Agentic feed. The reading API takes
+`raw=true` and an `order` per request.
+
+**Background, phase 2** (blygger-spec `docs/background-plan.md` §2, §7.1; ROADMAP row 112).
+Three more rules send an entry to Background, each with its chip and its toggle in
+Settings → Background, all on by default:
+
+- **Quotes refreshed:** a new version with the same text whose quotes now show newer
+  versions of what they quote. A refresh that brought in a quote whose text was
+  rewritten is its own case, **including rewritten quotes**, on by default; turn it off
+  to keep those in the main lenses.
+- **Small edits:** a new version that changes at most 40 characters and 2 % of the
+  text (`isNearSame`, the measure the home page's order already used).
+- **Followed within 15 minutes:** an item its blyg followed with a newer item within 15
+  minutes. A later version of it brings it back. Applies to your own items in your
+  reader too; public pages are unchanged. The window is a constant for now.
+
+**The Feed is pace-layered** (ROADMAP row 69): the home page's order run over everything
+you read, chosen in the Feed tab or Settings → reader order. New items arrive on top and sink as others come, more slowly the more their blyg
+has pinned them; a new version climbs one place, none when it was maintenance. Only a
+blyg's own pins count (decision #73). The importer now keeps each item's changelog and
+which of its versions arrived as maintenance; an item imported earlier counts as its
+first and latest versions until its next version arrives. The order is stored and
+rebuilt when the reading collection changes, so pages keep the ordinary cursor; the
+replay ranks the newest 500 entries and the rest follow newest first. Hoppers and the
+Shelf keep their own order.
+
+Private contract **6.1.0** (`readerOrder`, new Background rules), SDK 0.23.0.
+
+**Migrations:** **0051** (`imported_items.changelog_json`, `maintenance_json`, the
+`imported_items` change trigger recreated with them, `reading_order`,
+`reading_order_state`). 0050 is reserved for #146.
+
+## 0.67.1 — Copies elsewhere show in the reader
+
+0.67.0's reader kept an imported item's copies elsewhere but showed them only in the
+full view, and only when that view was reached from the feed. A short entry has no
+"more", so for most fragments the line never appeared; and the full view opened by
+its address (a reload, a shared link) dropped the entries. Found by the syndication
+gate run between venkateshrao and protocol-institute (decision #98). Now every reading
+card shows "the author says it is also at …" under its source line, and the full view
+carries it however it was opened. Contract and SDK unchanged.
+
+**Migrations:** none.
+
+## 0.67.0 — Copies elsewhere (`syndication`); `/changes` removed; three publisher changes for the reader suite
+
+**Copies elsewhere** (#148/#160, Aneesh Sathe; spec 0.4 §16.14, decision #98). When
+you post an item somewhere else too (Bluesky, a newsletter, any https page), list the
+copy from the editor's ⋯ menu, **copies elsewhere…**. The live item document carries
+`syndication: [{ url, version }]`, written in place: no new version, no changelog
+entry, no feed entry, no mention. Pinned files and a withdrawal's endcap never carry
+it. The public page shows the copies as `u-syndication` links. On the reading side,
+imported items keep the entries their author published (well-formed https only), and
+the reader says "the author says it is also at …". Nothing hides or merges another
+party's post on the strength of an entry. Owner API: `GET` and `PUT
+/items/{id}/syndication` (`owner:read`, `owner:publish`), with the item's revision.
+This build ships ahead of the spec's promotion of §16.14, as hopper feeds did; the
+promotion follows a live run between two nodes.
+
+**`GET /changes` and the SDK's `getChanges` are removed** (#162, decision #111), as
+0.65.0 announced. Poll the resources you need with conditional GETs (`If-None-Match`,
+bodyless `304`); the SDK's `conditionalReads` option does this for you. The Studio
+stopped calling `/changes` in 0.65.0.
+
+**What the reader conformance suite asks of a publisher** (#161, decision #102):
+- A directive line in a fragment is a publish error, in its body or in generated
+  output, instead of publishing as literal text. Make it a thread, or link with
+  `[[id]]`.
+- A link to another blyg's item whose document names no `page` points at its item
+  document, never a guessed `f/…/` address.
+- A quote baked from an own-line directive in generated output sits outside the
+  `blyg-tk-gen` wrapper, which closes before it and reopens after; the scope keeps its
+  one `generated[]` entry.
+
+The reader suite (blygger-spec `conformance/reader`) passes 103 of 103.
+
+**Private contract 6.0.0, SDK 0.22.0** (breaking: `getChanges` is gone; syndication's
+two operations are new). **Migrations:** `0049_syndication.sql` (`item_syndication`,
+`imported_items.syndication_json`, and the `change_imported_items_update` trigger
+recreated). Apply it before deploying.
+
 ## 0.66.0 — Editor bars and replaceable controls; mentions in natural grammar; two editor fixes
 
 **Editor bars** (#154). A new extension slot, `editorBar`: a bar of controls in a row

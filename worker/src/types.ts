@@ -1,4 +1,5 @@
 import type { BackgroundRule } from "./background.ts";
+import type { ReaderOrder } from "./feeds/reader-order.ts";
 import type { CustomTheme } from "./themes.ts";
 export interface Env {
   DB: D1Database;
@@ -57,7 +58,8 @@ export interface ItemRow {
   /** Private concurrency identity, independent of the public version. */
   revision: number;
   kind: "fragment" | "thread" | "withdrawn";
-  status: "draft" | "public" | "withdrawn";
+  /** `private`: published for the owner alone, never on the wire (docs: sealed-content-build-plan §1). */
+  status: "draft" | "public" | "private" | "withdrawn";
   created: string;
   updated: string;
   version: number;
@@ -211,11 +213,21 @@ export interface StubCite {
  * every document published before remote sources stays valid. A remote source
  * carries its frozen human half, composed when the scope was generated.
  */
-export interface GenerationSource {
+export type GenerationSource = ItemGenerationSource | PageGenerationSource;
+export interface ItemGenerationSource {
   id: string;
   version: number;
   origin?: string;
   cited?: StubCite;
+}
+/**
+ * A web page the generator read (decision #117, spec 0.4 §16.16): §10.6's
+ * plain-web shape, never a §5.9 reference. It has no version, so `cited`
+ * carries when it was read, and it notifies nobody.
+ */
+export interface PageGenerationSource {
+  url: string;
+  cited: StubCite;
 }
 
 /** Per-scope TK generation provenance (tk-core-plan.md §3.1/§4). */
@@ -223,6 +235,16 @@ export interface ScopeProvenance {
   sources: GenerationSource[];
   model?: string;
   at?: string;
+}
+
+/** A private version (migration 0059): studio history, never on a public route. */
+export interface PrivateVersionRow {
+  item_id: string;
+  version: number;
+  content_md: string;
+  content_html: string;
+  published_at: string;
+  note: string | null;
 }
 
 export interface VersionRow {
@@ -330,6 +352,8 @@ export interface ImportedItemRow {
   forked_from_json: string | null;
   /** JSON `generated` array as published (migration 0027); null when none or imported before it. */
   generated_json: string | null;
+  /** §16.14 `syndication` as fetched (migration 0049); null when none. */
+  syndication_json?: string | null;
 }
 
 export interface HopperRow {
@@ -463,6 +487,8 @@ export interface Settings {
   ai_model_changelog: string;
   /** Feed scoring: stored now, used once the smart feed's agent exists. */
   ai_model_feed: string;
+  /** Text helpers (catch-up-summary, src/helpers/); empty uses ai_model_changelog. */
+  ai_model_helpers: string;
   /**
    * The change classifier (session 49): a decision model id (Clef, Jev), or
    * empty, which is off and the default. See src/change-class.ts.
@@ -486,6 +512,11 @@ export interface Settings {
   changelog_summary_prompt: string;
   /** Which Background rules count in the reader (src/background.ts); all on by default. */
   bg_rules: Record<BackgroundRule, boolean>;
+  /** The reader's order (src/feeds/reader-order.ts): pace-layered, the default, or newest first. */
+  reader_order: ReaderOrder;
+  reader_mark_read: "seen" | "opened" | "never";
+  /** The owner's name for the Agentic feed tab, also the heading of each edition's thread. */
+  agentic_title: string;
   /**
    * Whether this blyg receives Webmentions (0.3 §15, which is **OPTIONAL at
    * every level**). When false the endpoint 404s, the manifest omits its
@@ -537,6 +568,8 @@ export interface Settings {
   auto_change_notes: boolean;
   /** Where you type to search in the [[ / ![[ picker (0.29): auto = the editor with a mouse, the panel on touch. */
   picker_typing: "auto" | "editor" | "panel";
+  /** What a publish that names no visibility does to an item that was never public. */
+  default_visibility: "public" | "private";
   /** The home page order, an id from `src/feeds` (session 46). Absent = pace-layered; migration 0029 keeps published nodes newest-first. */
   feed_order: string;
   /** A published thread shown at the mount root instead of the latest items (session 47); empty = the latest items. */
@@ -563,6 +596,14 @@ export interface Settings {
    * (decision #86) is a ruled shape awaiting its two-node gate.
    */
   hopper_feeds: boolean;
+  /** Background 4b: judge other blygs' new versions with the change classifier (off by default). */
+  bg_model_imported: boolean;
+  /** Background 4b: the owner's routing instruction; non-empty sends the note too (#96 (a)). Empty by default. */
+  bg_instruction: string;
+  /** Under a routing instruction, keep in view an entry whose note understates the change (on by default; Fable's amendment, session 78). */
+  bg_flag_disagreement: boolean;
+  /** The Studio's own theme (session 78): empty, the default, wears `theme`; else a theme name or "custom". Public pages always use `theme`. */
+  studio_theme: string;
   /** The setup wizard's state: `pending` (fresh install), `notice` (existing node, told once), `done`. */
   setup: "pending" | "notice" | "done";
   /** Where to ask. Configurable so a fork checks its own releases, not ours. */
@@ -576,6 +617,7 @@ export interface Settings {
   update_notice_ack: boolean;
   /** The newest blygger.com listing the owner has seen in Discover (ISO), or "" for never. */
   discover_seen_at: string;
+  setup_seen_version: string;
   /** Studio extensions enabled on this node (docs/extensions.md). Every extension starts disabled. */
   extensions: string[];
 }

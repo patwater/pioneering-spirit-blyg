@@ -5,12 +5,14 @@ import { attachedQuote } from "./directives.ts";
 import { codeRanges, inRanges, lineOffsets } from "./code-ranges.ts";
 import { sanitizeHtml } from "./importer/sanitize.ts";
 import { blygItemUrl } from "./importer/util.ts";
-import { renderMarkdown, selectionTouchesMath, selectionText } from "./markdown.ts";
+import { itemUrl, parseSurface, type Surface } from "./surface.ts";
+import { renderMarkdown, selectionLines, selectionTouchesMath, selectionText } from "./markdown.ts";
 import type { ImportedItemRow, ItemRow, TextQuoteSelector, Transclusion, VersionRow } from "./types.ts";
 import { absolutizeHtml, escapeHtml } from "./util.ts";
 import { DIRECTIVE_LINE, label, LINK_INLINE, RESERVED_LINE } from "./grammar.ts";
 import { linkLabel } from "./link-label.ts";
 import { renderGeneratedBlock } from "./tk.ts";
+import { servedPublicly } from "./served-publicly.ts";
 
 /**
  * `[[id]]` — a plain internal link (§10.1, decision #32). The same bracket
@@ -77,6 +79,67 @@ export function locateSelection(targetHtml: string, selection: string): TextQuot
 }
 
 /**
+ * A partial bake's body (§10.2, decision #114, ruled shape §16.15): each line
+ * of `exact` as plain escaped text, in an `<li>` of a list like the target's
+ * when the target has that line in a list item, else in a `<p>`. The list
+ * structure comes from the target snapshot only. Lines map onto the target's
+ * lines at the first match, as `locateSelection` takes its context there.
+ *
+ * Nesting is kept where the lines it joins are both quoted; an outer item
+ * none of whose own text is quoted is not invented, so its list starts at
+ * the deeper level. An `ol` that does not begin at its first item carries
+ * `start`. Two lines of one item (a loose list's paragraphs) are `<p>`s in it.
+ * The invariant, tested: `selectionText(body) === exact`.
+ */
+export function partialBakeBody(targetHtml: string, exact: string): string {
+  const paragraphs = () => exact.split("\n").map((line) => `<p>${escapeHtml(line)}</p>`).join("\n");
+  const lines = selectionLines(targetHtml);
+  const hay = lines.map((l) => l.text).join("\n");
+  const at = hay.indexOf(exact);
+  if (at < 0) return paragraphs();
+  let first = 0;
+  for (let offset = 0; first < lines.length && offset + lines[first]!.text.length < at; first++) offset += lines[first]!.text.length + 1;
+  const quoted = exact.split("\n");
+
+  type Item = { ordinal: number; content: Node[] };
+  type List = { list: number; tag: "ul" | "ol"; start: number; items: Item[] };
+  type Node = string | List;
+  const root: Node[] = [];
+  quoted.forEach((text, i) => {
+    const levels = lines[first + i]?.lists ?? [];
+    let container = root;
+    levels.forEach((level, depth) => {
+      const last = container.at(-1);
+      let list = typeof last === "object" && last.list === level.list ? last : undefined;
+      const item = list?.items.at(-1);
+      if (item && item.ordinal === level.ordinal) {
+        container = item.content;
+        return;
+      }
+      // An outer item with no quoted text of its own is not invented.
+      if (depth < levels.length - 1) return;
+      if (!list) {
+        list = { list: level.list, tag: level.tag, start: level.ordinal, items: [] };
+        container.push(list);
+      }
+      const added: Item = { ordinal: level.ordinal, content: [] };
+      list.items.push(added);
+      container = added.content;
+    });
+    container.push(text);
+  });
+  const render = (nodes: Node[], inItem: boolean): string =>
+    nodes
+      .map((node) => {
+        if (typeof node === "string") return inItem && nodes.length === 1 ? escapeHtml(node) : `<p>${escapeHtml(node)}</p>`;
+        const start = node.tag === "ol" && node.start !== 1 ? ` start="${node.start}"` : "";
+        return `<${node.tag}${start}>\n${node.items.map((item) => `<li>${render(item.content, true)}</li>`).join("\n")}\n</${node.tag}>`;
+      })
+      .join("\n");
+  return render(root, false);
+}
+
+/**
  * U+E003 — the next Private Use Area sentinel after tk.ts's E000–E002, and used
  * the same way: substitute before rendering, splice after. A link's anchor text
  * is arbitrary prose, so emitting markdown (`[label](url)`) instead would mean
@@ -109,6 +172,8 @@ export interface ResolveResult {
   html: string;
   transclusions: Transclusion[];
   errors: TransclusionRefError[];
+  /** The html in order, each part marked as a baked quote or not (for a generated block's wrapper). */
+  parts: { html: string; quote: boolean }[];
 }
 
 /** Thrown by publish() when one or more `![[id]]` directives don't resolve. */
@@ -186,7 +251,7 @@ export async function resolveTarget(
 ): Promise<{ ok: true; target: ResolvedTarget } | { ok: false; reason: string }> {
   const item = await db.prepare("SELECT * FROM items WHERE id = ?").bind(id).first<ItemRow>();
   if (item) {
-    if (item.status === "draft") return { ok: false, reason: "item is a draft, not published" };
+    if (!servedPublicly(item)) return { ok: false, reason: item.status === "draft" ? "item is a draft, not published" : "item is private" };
     if (item.kind === "withdrawn") return { ok: false, reason: "item is withdrawn" };
     const version = await db
       .prepare("SELECT * FROM versions WHERE item_id = ? AND version = ?")
@@ -257,6 +322,7 @@ async function walk(
   const errors: TransclusionRefError[] = [];
   const transclusions: Transclusion[] = [];
   const htmlParts: string[] = [];
+  const quoteParts = new Set<number>();
   let prose: string[] = [];
 
   const flushProse = () => {
@@ -288,16 +354,20 @@ async function walk(
     // lines are not here to walk (#105): an own-line `![[id]]` in it would stay
     // literal text while publish warned it had been quoted (#60). Walk the
     // block's own markdown, at its place in the body so transclusions[] keeps
-    // document order, and bake its quotes inside its `div.blyg-tk-gen` — the
-    // author's output put them there. The token line stays prose, so the body
-    // renders byte for byte as before and the wrapper splice still finds it.
+    // document order. A baked quote is someone else's words, not generated, so
+    // it sits outside `div.blyg-tk-gen`: the wrapper closes before it and reopens
+    // after, and the scope keeps its one generated[] entry (§5.7, #102). The
+    // token line stays prose, so the wrapper splice still finds it.
     const blockMd = blocks?.blockSources.get(line.trim());
     if (blocks && blockMd !== undefined) {
       const inner = await walk(db, blockMd, onError, selfId);
       if (inner.transclusions.length || inner.errors.length) {
         transclusions.push(...inner.transclusions);
         errors.push(...inner.errors);
-        blocks.blockReplacements.set(line.trim(), `<div class="blyg-tk-gen">${inner.html}</div>`);
+        blocks.blockReplacements.set(
+          line.trim(),
+          inner.parts.map((part) => (part.quote ? part.html : `<div class="blyg-tk-gen">${part.html}</div>`)).join("\n"),
+        );
       }
       prose.push(line);
       continue;
@@ -376,21 +446,23 @@ async function walk(
       // HTML range faithfully — reopening the tags a cut crosses — is a second
       // project with its own failure modes. The class pair is what discloses
       // that this is a part rather than the whole.
-      const body = selector.exact
-        .split("\n")
-        .map((para) => `<p>${escapeHtml(para)}</p>`)
-        .join("\n");
+      // #114 (spec §16.15): lines that are list items in the target bake as
+      // list items, the structure read from the target, never the quoter.
+      const body = partialBakeBody(target.contentHtml, selector.exact);
+      quoteParts.add(htmlParts.length);
       htmlParts.push(
         `<blockquote class="blyg-transclusion blyg-partial" data-blyg-id="${target.id}" data-blyg-version="${target.version}"${originAttr}${labelAttr}>\n${body}\n</blockquote>`,
       );
     } else {
+      quoteParts.add(htmlParts.length);
       htmlParts.push(
         `<blockquote class="blyg-transclusion" data-blyg-id="${target.id}" data-blyg-version="${target.version}"${originAttr}${labelAttr}>\n${target.contentHtml}\n</blockquote>`,
       );
     }
   }
   flushProse();
-  return { html: htmlParts.join("\n"), transclusions, errors };
+  const parts = htmlParts.map((html, i) => ({ html, quote: quoteParts.has(i) }));
+  return { html: htmlParts.join("\n"), transclusions, errors, parts };
 }
 
 /**
@@ -504,6 +576,17 @@ export async function resolveInternalLinks(
   // has it (§10.1, #54).
   let scanned = contentMd;
   let code = codeRanges(scanned);
+  // Each remote origin's item template, read once per text (§16.6e, #51).
+  const surfaces = new Map<string, Promise<Surface | null>>();
+  const surfaceOf = (origin: string) => {
+    let hit = surfaces.get(origin);
+    if (!hit) {
+      hit = db.prepare("SELECT surface FROM subscriptions WHERE kind = 'blyg' AND origin = ? LIMIT 1").bind(origin)
+        .first<{ surface: string | null }>().then((row) => parseSurface(row?.surface));
+      surfaces.set(origin, hit);
+    }
+    return hit;
+  };
   for (const m of contentMd.matchAll(LINK_INLINE)) {
     const at = m.index ?? 0;
     if (inRanges(code, at)) continue; // inert inside code (§10.1, #54)
@@ -529,9 +612,13 @@ export async function resolveInternalLinks(
       continue;
     }
     const { target } = resolved;
-    const href = target.origin
-      ? blygItemUrl(target.origin, target.kind, target.id, target.page)
-      : blygItemUrl(ourOrigin, target.kind, target.id, null);
+    // Another blyg's item: its own declared `page`, else its item document, never
+    // the `f/`·`t/` convention, which is presentation (§4, §5.8; #85, #102).
+    const href = !target.origin
+      ? blygItemUrl(ourOrigin, target.kind, target.id, null)
+      : target.page
+        ? blygItemUrl(target.origin, target.kind, target.id, target.page)
+        : itemUrl(target.origin, await surfaceOf(target.origin), target.id);
     const token = `${LINK_SENTINEL}${linkTokenSeq++}${LINK_SENTINEL}`;
     // The author's label is the anchor text when there is one (§10.1, #70).
     const text = label(m[2]) ?? anchorText(target);

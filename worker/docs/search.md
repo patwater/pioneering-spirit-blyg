@@ -16,8 +16,7 @@ an extra *this blyg only* filter on the compose page.
 
 The picker already has the search. `GET {mount}/api/search` (`searchOperation`
 in `src/read-api.ts`) matches every word (up to 8) anywhere in an item's
-`content_md` or id, case-folded with `instr`, never `LIKE` (D1 caps patterns at
-50 bytes). Its scope is deliberately what `resolveTarget` accepts at publish:
+`content_md` or id, ignoring ASCII case. Its scope follows what `resolveTarget` accepts at publish:
 own **published** items of both kinds, plus imported blyg items that are current
 or keep a pinned version (no L0 rows). It already takes `source=all|mine|imported`,
 `sub` (one subscription), `sort=newest|oldest` and a cursor, and it returns
@@ -63,8 +62,8 @@ cannot drift apart. That is the reason the route has one name today.
 - The status filter row applies to your own items only, so it is disabled
   while searching *everything*.
 
-**Shared behaviour.** Requests are debounced (250 ms) and sent only for two or
-more characters, or for any query once Enter is pressed. Each hit row shows the
+**Shared behaviour.** Search waits for a pause in typing and at least one term
+with three characters. An empty picker query still browses recent items. Each hit row shows the
 excerpt and `source · kind · age · vN`, with the matched words marked in the
 excerpt client-side. The `source` and `sort` choices are remembered per surface
 in localStorage, as the picker's already are.
@@ -86,11 +85,66 @@ in localStorage, as the picker's already are.
 
 ## Cost
 
-Each search reads every candidate row: `instr` cannot use an index. #113 is the
-reminder that free-plan D1 counts rows read. Debouncing and the two-character
-minimum keep this to one query per pause in typing. If it ever matters, FTS5 is
-the upgrade the route's comment already names, and it would serve all three
-surfaces at once. Not for now.
+Migration `0050_search_index.sql` builds the FTS5 trigram index from existing
+items. SQLite triggers keep it current as drafts, publications, and imports
+change. Search starts from the index, applies any subscription filter there,
+and reads the matching source rows by key. A query
+with a term of at least three Unicode characters can also contain shorter
+terms, which filter the indexed hits. A query made up entirely of shorter
+terms returns no hits. A blank query still lists items in date order.
+
+### Applying migration 0050
+
+On nodes with a few thousand items, the FTS backfill has been followed by D1
+error **7429** (`D1 DB is overloaded ... too many resources consumed within a
+10 second window`) while applying the next migrations. If that happens, wait
+at least a minute, then rerun the same apply command with the same config and
+environment, for example:
+
+```sh
+npx wrangler d1 migrations apply DB --remote
+```
+
+Wrangler records successful migrations and applies only those still pending.
+Keep the old Worker running until all migrations finish. If the error persists,
+or Wrangler reports a different error, inspect that failure before deploying.
+
+### Backups and SQL exports
+
+The Studio backup omits `search_documents`, `search_fts`, and its shadow tables.
+Restore the source tables into a database with migrations applied: the triggers
+rebuild search whether items or their versions are loaded first. If a restore
+disables triggers, rebuild explicitly afterwards:
+
+```sql
+DELETE FROM search_documents;
+INSERT INTO search_documents(scope, item_id, subscription_id, content_md)
+SELECT * FROM search_source;
+INSERT INTO search_fts(search_fts) VALUES('rebuild');
+```
+
+Once migration 0050 creates `search_fts`, plain `wrangler d1 export --remote`
+fails because the database contains a virtual table. For a dump you can open
+with the SQLite CLI, use **Wrangler 4.166.0 or newer** (4.156.0 does not have
+the compatibility flag):
+
+```sh
+npx wrangler@4.166.0 d1 export DB --remote --output backup.sql --compatibility sqlite3_cli_only
+```
+
+Add the same `--config` and `--env` options you use for your deployment.
+**This dump is for the SQLite CLI only. It cannot be imported into D1 with
+`wrangler d1 execute --file` or another D1 import.** The explicit Wrangler
+version lets this command work even when the source install uses 4.156.0.
+
+For a full database restore on D1, use [Time Travel](https://developers.cloudflare.com/d1/reference/time-travel/).
+To save the Studio's source data and R2 media in its backup archive, use
+`npm run backup -- --base https://YOUR-BLYG/` (with your mount, config and
+environment as applicable), or More → download backup. The archive holds source
+tables as JSON lines and media files; restoring an archive into a fresh node is
+not built yet. If you load the source tables yourself, the index rebuild
+procedure is above.
+See Cloudflare's [D1 export support for virtual tables](https://developers.cloudflare.com/changelog/post/2026-11-12-d1-export-virtual-tables/).
 
 ## Tests
 

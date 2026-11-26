@@ -1,4 +1,4 @@
-import { retainedMediaSql, avatarMediaSql } from './media-retention.ts';
+import { publicRetainedMediaSql, avatarMediaSql } from './media-retention.ts';
 import { authoredVersionKind } from './version-state.ts';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { conditionalHtmlResponse, htmlCacheResponse, publicHtmlKey, publicHtmlRequest, publicHtmlRevision } from './html-cache.ts';
@@ -30,6 +30,7 @@ import { repairImportedUrls, runScheduledPoll } from "./importer/schedule.ts";
 import { getHopperBySlug, listBlogrollSubscriptions } from "./importer/store.ts";
 import { resolveFrontPage } from "./front-page.ts";
 import { authoredKind, getItem, getMedia, getSettings, getVersion, listPublic } from "./model.ts";
+import { servedPublicly, servedPubliclySql } from "./served-publicly.ts";
 import { archivePage, feedPage, generatedHighlightCss, permalinkPage, pinnedVersionPage, STYLE_CSS, themeCss, threadPage } from "./pages.ts";
 import { buildArchiveIndex, buildItemJson, buildManifest, buildPinnedVersionJson, siteOrigin } from "./protocol.ts";
 import { cachedFeed, refreshConfiguredFeed } from './feed-cache.ts';
@@ -38,6 +39,7 @@ import { mentionFetchFor } from "./mentions/http.ts";
 import { receiveMention, verifyMention } from "./mentions/receive.ts";
 
 import { drainOutbound } from "./mentions/send.ts";
+import { drainImportedChanges } from "./background-model.ts";
 import { pruneFailedInbound } from "./mentions/store.ts";
 import type { Env, Settings } from "./types.ts";
 import { FEED_PAGE_SIZE, WEBMENTION_PATH } from "./types.ts";
@@ -242,8 +244,8 @@ export function makeApp(mount: string) {
     const file = c.req.param("file");
     if (!file.endsWith(".json")) return c.notFound();
     const item = await getItem(c.env.DB, file.slice(0, -5));
-    // 404 for drafts/unknown; withdrawn endcaps are 200 forever (§3.3).
-    if (!item || item.status === "draft") return c.notFound();
+    // 404 unless served publicly (drafts, private items, unknown); withdrawn endcaps are 200 forever (§3.3).
+    if (!item || !servedPublicly(item)) return c.notFound();
     const settings = await getSettings(c.env.DB);
     cors(c);
     return c.json(await buildItemJson(c.env.DB, settings, item, siteOrigin(settings, c.req.url, mount)));
@@ -255,7 +257,7 @@ export function makeApp(mount: string) {
     const m = /^v(\d+)\.json$/.exec(c.req.param("vfile"));
     if (!m) return c.notFound();
     const item = await getItem(c.env.DB, c.req.param("id") ?? "");
-    if (!item || item.status === "draft") return c.notFound();
+    if (!item || !servedPublicly(item)) return c.notFound();
     const row = await getVersion(c.env.DB, item.id, Number(m[1]));
     if (!row || row.pinned !== 1) return c.notFound();
     const settings = await getSettings(c.env.DB);
@@ -317,7 +319,7 @@ export function makeApp(mount: string) {
 
   pub.get("/f/:id", async (c) => {
     const item = await getItem(c.env.DB, c.req.param("id"));
-    if (!item || item.status === "draft") return c.notFound();
+    if (!item || !servedPublicly(item)) return c.notFound();
     if ((await authoredKind(c.env.DB, item)) !== "fragment") return c.notFound();
     const settings = await getSettings(c.env.DB);
     webmentionLink(c, settings);
@@ -335,7 +337,7 @@ export function makeApp(mount: string) {
     const m = /^v(\d+)$/.exec(c.req.param("vseg") ?? "");
     if (!m) return c.notFound();
     const item = await getItem(c.env.DB, c.req.param("id") ?? "");
-    if (!item || item.status === "draft") return c.notFound();
+    if (!item || !servedPublicly(item)) return c.notFound();
     const row = await getVersion(c.env.DB, item.id, Number(m[1]));
     if (!row || row.pinned !== 1) return c.notFound();
     const isThread = authoredVersionKind(row) === "thread";
@@ -349,7 +351,7 @@ export function makeApp(mount: string) {
   // §2.9 thread permalink page.
   pub.get("/t/:id", async (c) => {
     const item = await getItem(c.env.DB, c.req.param("id"));
-    if (!item || item.status === "draft") return c.notFound();
+    if (!item || !servedPublicly(item)) return c.notFound();
     if ((await authoredKind(c.env.DB, item)) !== "thread") return c.notFound();
     const settings = await getSettings(c.env.DB);
     webmentionLink(c, settings);
@@ -379,8 +381,8 @@ export function makeApp(mount: string) {
     if (id && (!digest || digest !== media.sha256)) return c.notFound();
     // An avatar or a not-yet-published attachment can become private/deletable.
     // Only historical references justify an immutable public cache lifetime.
-    const usage = await c.env.DB.prepare(`SELECT (${retainedMediaSql}) AS retained,
-      (${avatarMediaSql}) OR EXISTS (SELECT 1 FROM items WHERE id = media.item_id AND version > 0 AND COALESCE(media.inline,0) <> 1) AS exposed
+    const usage = await c.env.DB.prepare(`SELECT (${publicRetainedMediaSql}) AS retained,
+      (${avatarMediaSql}) OR EXISTS (SELECT 1 FROM items WHERE id = media.item_id AND version > 0 AND ${servedPubliclySql()} AND COALESCE(media.inline,0) <> 1) AS exposed
       FROM media WHERE id = ?`).bind(media.id).first<{ retained: number; exposed: number }>();
     const publicUse = Boolean(usage?.retained || usage?.exposed);
     if (!publicUse) {
@@ -480,6 +482,12 @@ export default {
     const at = new Date(controller.scheduledTime);
     if (at.getUTCHours() === 0 && at.getUTCMinutes() < 15) daily();
     ctx.waitUntil(runScheduledPoll(env.DB, platformFetchFor(env)));
+    // Background 4b: imported changes queued by earlier polls, judged a few at a
+    // time under the AI budget. Not on the minute tick, which promises an
+    // unchanged tick only two small D1 reads (test/polling-cache.oracle.test.ts).
+    ctx.waitUntil(drainImportedChanges(env).catch(() => {
+      console.warn('Imported change classification failed');
+    }));
     ctx.waitUntil(backfillImportedMentions(env.DB).catch(() => {
       console.warn('Imported mentions backfill failed');
     }));

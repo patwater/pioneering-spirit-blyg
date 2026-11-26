@@ -1,7 +1,9 @@
 import { retainedMediaSql } from './media-retention.ts';
+import { httpsUrl, listSyndication, refuseSyndication, replaceSyndication, type SyndicationEntry } from './syndication.ts';
 import { assertCurrentRevision, assertItemRevision, ItemRevisionConflict } from './item-revision.ts';
 import { consumeHandles, contactResource, createContact, deleteContact, getContact, handleTaken, HANDLE, listContacts, resolveContact, updateContact } from './contacts.ts';
 import { readShelf, replaceShelf, type ShelfEntry } from './shelf.ts';
+import { normalizeWords, readDictionary, replaceSource, SOURCE_PATTERN, SOURCES_MAX, TOTAL_WORDS_MAX, wordProblem } from './dictionary.ts';
 import { success, created, failure, modelFailure, type OperationContext, type OperationInput } from './operation-types.ts';
 import { versionState } from './version-state.ts';
 import { isFont } from "./fonts.ts";
@@ -10,7 +12,7 @@ import { settingsInput } from './contract/settings.ts';
 import { deploymentUrls } from './deployment-urls.ts';
 import { mediaUrl } from './contract/resources.ts';
 import { settingsResource } from "./settings-resource.ts";
-import { CUSTOM_THEME_ID, pairError, themeNameError, validateCustomTheme, type CustomTheme } from "./themes.ts";
+import { CUSTOM_THEME_ID, pairError, themeNameError, THEMES, validateCustomTheme, type CustomTheme } from "./themes.ts";
 import { itemResource } from "./contract/resources.ts";
 import { itemUrl, storedSurface } from "./surface.ts";
 import { z } from "@hono/zod-openapi";
@@ -18,6 +20,8 @@ import { createResponseDraft } from "./item-create.ts";
 import { ItemCreateSchema, ItemEditSchema } from "./contract/routes.ts";
 import { compiledExtensionNames } from "../build/extensions.names.ts";
 import { BACKGROUND_RULES, settleOwnBackground } from "./background.ts";
+import { READER_ORDERS } from "./feeds/reader-order.ts";
+import { listFeeds, readEdition, replaceEdition, type AgenticEditionInput } from "./agentic.ts";
 // Owner API (cookie auth, JSON) — v0.1-plan §3.3.
 
 import { canBeFrontPage, MAX_LINKS, postsPathError } from "./front-page.ts";
@@ -26,6 +30,7 @@ import {
   createDraft,
   createFork,
   discardDraft,
+  publishPrivately,
   FragmentTooLongError,
   getItem,
   getMedia,
@@ -65,6 +70,9 @@ import type { ChangeCategory } from "./change-category.ts";
 import { isDecisionModel } from "./ai/models.ts";
 import { platformFetchFor } from "./importer/http.ts";
 import { importedSubject, ownChangelog, ownSubject, summarizeChangelog, type ChangelogEntry } from "./changelog-summary.ts";
+import { catchUp } from "./helpers/catch-up.ts";
+import { summarizeCatchUp, summarySubject } from "./helpers/catch-up-summary.ts";
+import { INSTRUCTION_MAX_CHARS } from "./background-model.ts";
 import { blygSubscription } from "./read-api.ts";
 import { fetchImportedHistory } from "./imported-history.ts";
 import { reconcileIndex } from "./importer/poll.ts";
@@ -327,13 +335,24 @@ const publishItemOperation = async (context: OperationContext, input: OperationI
   // TK-stripped (published) length, not the raw working copy — see FragmentTooLongError.
   const item = await observedItem(context, input);
   if (!item) return failure('not-found', { error: "not found" });
-  const body = (input.body as { note?: string; noteGenerated?: boolean; changeCategory?: ChangeCategory | null; tangle?: boolean });
+  const body = (input.body as { note?: string; noteGenerated?: boolean; changeCategory?: ChangeCategory | null; tangle?: boolean; visibility?: "public" | "private" });
   // note_generated is the studio's own assertion that the note is the drafted
   // text, unedited (#40) — self-asserted, like every provenance member.
   // change_category is studio-private (migration 0030): settled after the
   // version exists, and never part of what publish() writes to the wire.
   const requested = "changeCategory" in body ? body.changeCategory ?? null : undefined;
   const note = body.note?.trim() || null;
+  // A private version reaches no wire (decision #94), so none of a public
+  // publish's checks, mentions or tangled parts apply to it. A publish that
+  // names no visibility follows the blyg's default while the item was never
+  // public; a public item has no other way to go (Venkat, 2026-11-22).
+  const settings = await getSettings(context.env.DB);
+  const visibility = body.visibility ?? (item.version === 0 ? settings.default_visibility : "public");
+  if (visibility === "private") {
+    if (item.version > 0) return failure('conflict', { error: "a published item can't be made private; withdraw it instead" });
+    const privateVersion = await publishPrivately(context.env.DB, item, note, siteOrigin(settings, context.url, normalizeMount(context.env.MOUNT)));
+    return success({ ok: true, version: 0, privateVersion, revision: item.revision + 1 });
+  }
   const settle = (version: number) => settleChangeClass(context.env.DB, item.id, version, requested);
   const { spans, issues } = parseTangles(item.content_md);
   if (spans.length || issues.length) {
@@ -513,6 +532,19 @@ const summarizeChangelogOperation = async (context: OperationContext, input: Ope
   return success({ summary: result.summary, model: result.model, version: result.version, cached: result.cached });
 };
 
+// The catch-up-summary helper (helpers-plan.md §7): catch-up's cards, then a
+// summary of them, cached by their versions (src/helpers/catch-up-summary.ts).
+const summarizeCatchUpOperation = async (context: OperationContext, input: OperationInput) => {
+  const body = input.body as { sub: string; remoteId: string };
+  const settings = await getSettings(context.env.DB);
+  const laid = await catchUp(context.env.DB, body, siteOrigin(settings, context.url, normalizeMount(context.env.MOUNT)));
+  if (!laid) return failure('not-found', { error: "not a published or current entry this reader holds" });
+  const result = await summarizeCatchUp(context.env, summarySubject(body.sub, body.remoteId), laid.cards);
+  if (!result.ok) return modelFailure({ error: result.error }, result.status);
+  const { ok: _ok, ...summary } = result;
+  return success(summary);
+};
+
 // --- Snapshot freshness (decision #33's direct check; #38: detect always,
 // refresh only on a decision, never silently) ---
 
@@ -576,10 +608,12 @@ const refreshItemOperation = async (context: OperationContext, input: OperationI
 const generateItemOperation = async (context: OperationContext, input: OperationInput) => {
   const item = await observedItem(context, input);
   if (!item) return failure('not-found', { error: "not found" });
-  const body = (input.body as { scope: number });
+  const body = (input.body as { scope: number; proceed?: boolean });
 
   const origin = siteOrigin(await getSettings(context.env.DB), context.url, normalizeMount(context.env.MOUNT));
-  const result = await runGenerateScope(context.env, item, body.scope, undefined, origin);
+  const result = await runGenerateScope(context.env, item, body.scope, undefined, origin, { proceed: body.proceed === true });
+  // Links that could not be read are the author's call, not an error (decision #117): nothing was generated or saved.
+  if (!result.ok && result.checkpoint) return success({ checkpoint: result.checkpoint });
   if (!result.ok) return modelFailure(result.body, result.status as 400 | 404 | 502);
   return success({ text: result.text, model: result.model, contentMd: result.content_md, revision: result.revision });
 };
@@ -603,6 +637,27 @@ const withdrawItemOperation = async (context: OperationContext, input: Operation
   // one caller allowed to override the test (migration 0011).
   await sendMentionsFor(context, item.id, item.version, { force: true });
   return success({ ok: true, version, revision: item.revision + 1 });
+};
+
+// §16.14 syndication (decision #98): see src/syndication.ts for the rules.
+const getSyndicationOperation = async (context: OperationContext, input: OperationInput) => {
+  const item = await getItem(context.env.DB, input.path.id);
+  if (!item) return failure('not-found', { error: "not found" });
+  return success({ entries: await listSyndication(context.env.DB, item.id), revision: item.revision });
+};
+const putSyndicationOperation = async (context: OperationContext, input: OperationInput) => {
+  const item = await observedItem(context, input);
+  if (!item) return failure('not-found', { error: "not found" });
+  const body = input.body as { entries: SyndicationEntry[]; expectedRevision: number };
+  const refusal = refuseSyndication(item, body.entries);
+  if (refusal) {
+    // A malformed URL is the caller's input; a draft or withdrawn item, or a
+    // version not yet published, is the item's state.
+    return body.entries.some(entry => !httpsUrl(entry.url))
+      ? failure('invalid-input', { error: refusal.refused })
+      : failure('conflict', { error: refusal.refused });
+  }
+  return success(await replaceSyndication(context.env.DB, item, body.entries, body.expectedRevision));
 };
 
 const pinItemOperation = async (context: OperationContext, input: OperationInput) => {
@@ -731,6 +786,7 @@ const deleteMediaOperation = async (context: OperationContext, input: OperationI
 const SETTINGS_KEYS = [
   "site_title",
   "theme",
+  "studio_theme",
   "font",
   "custom_theme_name",
   "author_name",
@@ -743,19 +799,26 @@ const SETTINGS_KEYS = [
   "ai_model_tk",
   "ai_model_changelog",
   "ai_model_feed",
+  "ai_model_helpers",
   "ai_model_classify",
+  "bg_instruction",
   "feed_prompt",
   "ai_style_prompt",
   "changelog_display",
   "reader_changelog_display",
+  "reader_order",
+  "reader_mark_read",
+  "agentic_title",
   "changelog_summary_prompt",
   "picker_typing",
+  "default_visibility",
   "feed_order",
   "front_page",
   "posts_path",
   "links_position",
   "setup",
   "discover_seen_at",
+  "setup_seen_version",
 ] as const;
 
 const updateSettingsOperation = async (context: OperationContext, input: OperationInput) => {
@@ -770,19 +833,24 @@ const updateSettingsOperation = async (context: OperationContext, input: Operati
   for (const key of SETTINGS_KEYS) {
     if (typeof body[key] === "string") patch[key] = body[key] as string;
   }
-  for (const key of ["accept_mentions", "update_check", "show_responses_default", "highlight_generated_default", "auto_change_notes", "change_category_in_note", "update_notice_ack", "links_collections", "links_opml", "links_blygger_org", "links_blygger_com", "hopper_feeds"] as const) {
+  for (const key of ["accept_mentions", "update_check", "show_responses_default", "highlight_generated_default", "auto_change_notes", "change_category_in_note", "update_notice_ack", "links_collections", "links_opml", "links_blygger_org", "links_blygger_com", "hopper_feeds", "bg_model_imported", "bg_flag_disagreement"] as const) {
     if (typeof body[key] === "boolean") patch[key] = body[key] ? "on" : "off";
   }
   // Decision models answer questions and write no text (src/ai/models.ts): the
   // classifier takes only a decision model, and no text function takes one.
   if (patch.ai_model_classify?.trim() && !isDecisionModel(patch.ai_model_classify.trim())) return failure('invalid-input', { error: `aiModelClassify must be a decision model (Clef, Jev), not "${patch.ai_model_classify}"` });
-  for (const [field, key] of [["aiModelTk", "ai_model_tk"], ["aiModelChangelog", "ai_model_changelog"], ["aiModelFeed", "ai_model_feed"]] as const) {
+  for (const [field, key] of [["aiModelTk", "ai_model_tk"], ["aiModelChangelog", "ai_model_changelog"], ["aiModelFeed", "ai_model_feed"], ["aiModelHelpers", "ai_model_helpers"]] as const) {
     if (patch[key]?.trim() && isDecisionModel(patch[key].trim())) return failure('invalid-input', { error: `${field} cannot be a decision model ("${patch[key]}"): decision models write no text` });
   }
   if (typeof patch.picker_typing === "string" && !["auto", "editor", "panel"].includes(patch.picker_typing)) return failure('invalid-input', { error: "pickerTyping must be auto, editor or panel" });
+  if (typeof patch.default_visibility === "string" && !["public", "private"].includes(patch.default_visibility)) return failure('invalid-input', { error: "defaultVisibility must be public or private" });
   for (const [field, key] of [["changelogDisplay", "changelog_display"], ["readerChangelogDisplay", "reader_changelog_display"]] as const) {
     if (typeof patch[key] === "string" && !(CHANGELOG_DISPLAYS as readonly string[]).includes(patch[key])) return failure('invalid-input', { error: `${field} must be latest, history or summary` });
   }
+  if (typeof patch.agentic_title === "string" && patch.agentic_title.trim().length > 40) return failure('invalid-input', { error: "agenticTitle is at most 40 characters" });
+  if (typeof patch.bg_instruction === "string" && patch.bg_instruction.trim().length > INSTRUCTION_MAX_CHARS) return failure('invalid-input', { error: `bgInstruction is at most ${INSTRUCTION_MAX_CHARS} characters` });
+  if (typeof patch.reader_order === "string" && !(READER_ORDERS as readonly string[]).includes(patch.reader_order)) return failure('invalid-input', { error: `readerOrder must be ${READER_ORDERS.join(" or ")}` });
+  if (typeof patch.reader_mark_read === "string" && !["seen", "opened", "never"].includes(patch.reader_mark_read)) return failure('invalid-input', { error: "readerMarkRead must be seen, opened or never" });
   if (typeof patch.timezone === "string" && !isValidTimeZone(patch.timezone)) return failure('invalid-input', { error: `unknown timezone: ${patch.timezone}` });
   if (patch.author_url && !(URL.canParse(patch.author_url) && ["http:", "https:"].includes(new URL(patch.author_url).protocol))) return failure('invalid-input', { error: "authorUrl must be an absolute http(s) URL" });
   if (patch.site_url && !(URL.canParse(patch.site_url) && ["http:", "https:"].includes(new URL(patch.site_url).protocol))) return failure('invalid-input', { error: "siteUrl must be an absolute http(s) URL" });
@@ -799,6 +867,7 @@ const updateSettingsOperation = async (context: OperationContext, input: Operati
     patch.extensions = JSON.stringify([...new Set(names as string[])].sort());
   }
   if (patch.discover_seen_at && Number.isNaN(Date.parse(patch.discover_seen_at))) return failure('invalid-input', { error: "discoverSeenAt must be an ISO date, or empty" });
+  if (patch.setup_seen_version && !/^\d{1,4}\.\d{1,4}\.\d{1,4}$/.test(patch.setup_seen_version)) return failure('invalid-input', { error: "setupSeenVersion must be a version like 0.72.0, or empty" });
   if (body.bg_rules !== undefined) {
     // Merged into what is stored, so turning one rule off leaves the others.
     const rules = body.bg_rules as Record<string, unknown>;
@@ -872,8 +941,16 @@ const updateSettingsOperation = async (context: OperationContext, input: Operati
     const light = palettes.custom_theme !== undefined ? palettes.custom_theme : current.custom_theme;
     const dark = palettes.custom_theme_dark !== undefined ? palettes.custom_theme_dark : current.custom_theme_dark;
     if (theme === CUSTOM_THEME_ID && !light) return failure('invalid-input', { error: "theme is custom but no customTheme is set" });
+    if (current.studio_theme === CUSTOM_THEME_ID && patch.studio_theme === undefined && !light) return failure('invalid-input', { error: "studioTheme is custom: keep a customTheme, or change studioTheme first" });
     const incoherent = pairError(light, dark);
     if (incoherent) return failure('invalid-input', { error: incoherent });
+  }
+  if (patch.studio_theme !== undefined && patch.studio_theme !== "") {
+    const name = patch.studio_theme;
+    const known = name === "auto" || name === CUSTOM_THEME_ID || Object.prototype.hasOwnProperty.call(THEMES, name);
+    if (!known) return failure('invalid-input', { error: `studioTheme must be empty, auto, custom or one of ${Object.keys(THEMES).join(", ")}` });
+    const light = palettes.custom_theme !== undefined ? palettes.custom_theme : (await getSettings(context.env.DB)).custom_theme;
+    if (name === CUSTOM_THEME_ID && !light) return failure('invalid-input', { error: "studioTheme is custom but no customTheme is set" });
   }
   await putSettings(context.env.DB, patch);
   return success(settingsResource(await getSettings(context.env.DB)));
@@ -931,7 +1008,50 @@ const putShelfOperation = async (context: OperationContext, input: OperationInpu
   return failure('conflict', { error: 'shelf revision conflict; reload and try again', code: 'revision-conflict', current: await readShelf(context.env.DB) });
 };
 
+// The Agentic feeds and their editions: see src/agentic.ts for the rules the operations share.
+const listAgenticFeedsOperation = async (context: OperationContext) => success({ feeds: await listFeeds(context.env.DB) });
+const getAgenticOperation = async (context: OperationContext, input: OperationInput) => {
+  const edition = await readEdition(context.env.DB, input.path.feed);
+  return edition ? success(edition) : failure('not-found', { error: "no such agentic feed" });
+};
+const putAgenticOperation = async (context: OperationContext, input: OperationInput) => {
+  const feed = input.path.feed;
+  const body = input.body as { edition: AgenticEditionInput; expectedRevision: number };
+  if (await replaceEdition(context.env.DB, feed, body.edition, body.expectedRevision, new Date().toISOString())) return success((await readEdition(context.env.DB, feed))!);
+  const current = await readEdition(context.env.DB, feed);
+  if (!current) return failure('not-found', { error: "no such agentic feed" });
+  // The current edition rides in the error so an assistant can rebase and retry.
+  return failure('conflict', { error: 'agentic edition revision conflict; reload and try again', code: 'revision-conflict', current });
+};
+
+// The dictionary: see src/dictionary.ts for the rules both operations share.
+const getDictionaryOperation = async (context: OperationContext) => success(await readDictionary(context.env.DB));
+const putDictionarySourceOperation = async (context: OperationContext, input: OperationInput) => {
+  const source = String(input.path.source);
+  if (!SOURCE_PATTERN.test(source)) return failure('invalid-input', { error: 'a source is lowercase letters, digits and hyphens, at most 48, starting and ending with a letter or digit' });
+  const body = input.body as { words: string[]; expectedRevision: number };
+  const words = normalizeWords(body.words);
+  for (const word of words) {
+    const problem = wordProblem(word);
+    if (problem) return failure('invalid-input', { error: `the word ${JSON.stringify(word.slice(0, 80))} ${problem}`, word });
+  }
+  const current = await readDictionary(context.env.DB);
+  const others = current.sources.filter((s) => s.source !== source);
+  if (words.length && others.length + 1 > SOURCES_MAX) return failure('too-large', { error: `the dictionary holds at most ${SOURCES_MAX} sources` });
+  if (others.reduce((n, s) => n + s.words.length, 0) + words.length > TOTAL_WORDS_MAX) return failure('too-large', { error: `the dictionary holds at most ${TOTAL_WORDS_MAX} words in all` });
+  const stored = await replaceSource(context.env.DB, source, words, body.expectedRevision);
+  if (stored) return success(stored);
+  // The current dictionary rides in the error so a client can merge and retry.
+  return failure('conflict', { error: 'dictionary revision conflict; reload and try again', code: 'revision-conflict', current: await readDictionary(context.env.DB) });
+};
+
+
 export const itemOperations = {
+  listAgenticFeeds: listAgenticFeedsOperation,
+  getAgentic: getAgenticOperation,
+  putAgentic: putAgenticOperation,
+  getDictionary: getDictionaryOperation,
+  putDictionarySource: putDictionarySourceOperation,
   getShelf: getShelfOperation,
   putShelf: putShelfOperation,
   listContacts: listContactsOperation,
@@ -945,12 +1065,15 @@ export const itemOperations = {
   classifyChange: classifyChangeOperation,
   draftNote: draftNoteOperation,
   summarizeChangelog: summarizeChangelogOperation,
+  summarizeCatchUp: summarizeCatchUpOperation,
   listStaleThreads: listStaleThreadsOperation,
   getItemFreshness: getItemFreshnessOperation,
   refreshItem: refreshItemOperation,
   generateItem: generateItemOperation,
   withdrawItem: withdrawItemOperation,
   pinItem: pinItemOperation,
+  getSyndication: getSyndicationOperation,
+  putSyndication: putSyndicationOperation,
   restoreItem: restoreItemOperation,
   deleteItem: deleteItemOperation,
   uploadMedia: uploadMediaOperation,

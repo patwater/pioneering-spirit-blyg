@@ -21,6 +21,8 @@ export interface OwnEntryInput {
   withdrawn: boolean;
   updated: string;
   contentHtml: string;
+  /** A privately published item: the owner's reader shows its latest private version. */
+  private?: true;
 }
 
 export interface ImportedEntryInput {
@@ -46,6 +48,8 @@ export interface ImportedEntryInput {
   version: number;
   /** The highest version the owner has marked read (migration 0026); null when unread or cleared. */
   readVersion: number | null;
+  /** §16.14 copies the publisher says they made elsewhere, https: only (migration 0049); absent when none. */
+  syndication?: { url: string; version: number }[];
 }
 
 export interface ReadingFeedEntry {

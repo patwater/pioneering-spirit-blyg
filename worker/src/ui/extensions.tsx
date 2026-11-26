@@ -17,9 +17,11 @@
  * enabled list.
  */
 import type { ErrorInfo, ReactNode } from 'react';
-import { Component, useState } from 'react';
+import { Component, useRef, useState } from 'react';
 import type { EditorRegion } from './editor-regions.ts';
-import type { BarPlace, BarRow, DraftCounterContext, ReplaceableControl, EditorBarContext, EditorRegionsContext, EntryAction, EntryContext, MenuZone, StudioContext, StudioExtension } from './extension-api.ts';
+import { rebaseMarks } from './editor-marks.tsx';
+import { ID } from '../grammar.ts';
+import type { BarPlace, BarRow, DraftCounterContext, EditorMark, ReplaceableControl, EditorBarContext, EditorRegionsContext, EntryAction, EntryContext, MenuZone, PickerForm, PickerResult, PickerSourceContext, StudioContext, StudioExtension } from './extension-api.ts';
 import { errorLog } from './error-log.ts';
 import { Sheet, type MenuRow } from './sheets.tsx';
 
@@ -249,7 +251,7 @@ export function barPlacement(extensions: readonly StudioExtension[], hidden: rea
 }
 
 /** The replaceable controls the editor bars know of. */
-const REPLACEABLE: readonly ReplaceableControl[] = ['regionToggle'];
+const REPLACEABLE: readonly ReplaceableControl[] = ['regionToggle', 'spellcheck'];
 
 /**
  * Whether a bar stands in for a Studio control now: its owner is in a row and has not
@@ -285,13 +287,14 @@ function useHiddenBars() {
 }
 
 /** A screen's side of a bar's context: everything but what the Studio works out per bar. */
-export type BarHostContext = Omit<HostContext<EditorBarContext>, 'bar' | 'openSheet'>;
+export type BarHostContext = Omit<HostContext<EditorBarContext>, 'bar' | 'openSheet' | 'mark'>;
 
 /**
  * The editor bars of one screen: the two rows and the bars menu. `above` and `below` are
  * rendered where the screen puts them; the bars menu button ends the row above.
  * `replaced(control)` says a bar stands in for that Studio control now, so the screen
- * leaves its own out.
+ * leaves its own out. `marks` are the editor marks to draw now, from bars on screen,
+ * moved to the current text; `activate(offset)` hands a click inside one to its bar.
  * Off is invisible: with no bar enabled, both rows are null.
  */
 export function useEditorBars(extensions: readonly StudioExtension[], host: BarHostContext) {
@@ -302,14 +305,23 @@ export function useEditorBars(extensions: readonly StudioExtension[], host: BarH
   // Bars that threw: their boundary renders nothing, so a control they owned is the Studio's again.
   const [failed, setFailed] = useState<readonly string[]>([]);
   const fail = (name: string) => setFailed((now) => (now.includes(name) ? now : [...now, name]));
+  // Each bar's marks, with the text they were made against; its activation handler by name.
+  const [marked, setMarked] = useState<Readonly<Record<string, { basis: string; marks: EditorMark[] }>>>({});
+  const activators = useRef(new Map<string, (mark: EditorMark) => void>());
   const placement = barPlacement(extensions, hidden);
-  if (!placement.bars.length) return { above: null, below: null, replaced: () => false };
+  if (!placement.bars.length) return { above: null, below: null, replaced: () => false, marks: [] as EditorMark[], activate: () => {} };
   const owns = (extension: StudioExtension) => REPLACEABLE.filter((control) => placement.ownerOf(control) === extension);
   const close = () => setSheet(null);
   const contextFor = (extension: StudioExtension, place: BarPlace): EditorBarContext =>
     extensionContext<EditorBarContext>(extension, 'editorBar', {
       ...host,
       openSheet: (render) => setSheet({ name: extension.name, render }),
+      mark: (marks, onActivate) => {
+        if (onActivate) activators.current.set(extension.name, onActivate);
+        else activators.current.delete(extension.name);
+        const next = marks.map(({ start, end, kind, title }) => ({ start, end, kind, ...(title ? { title } : {}) }));
+        setMarked((now) => (now[extension.name]?.basis === host.shown && JSON.stringify(now[extension.name].marks) === JSON.stringify(next) ? now : { ...now, [extension.name]: { basis: host.shown, marks: next } }));
+      },
       bar: { asked: askedRow(extension), place, blocks: place === 'menu' ? MAX_BAR_BLOCKS : barBlocks(extension), owns: owns(extension) },
     } as HostContext<EditorBarContext>);
   const bar = (extension: StudioExtension, place: BarPlace) => {
@@ -367,5 +379,59 @@ export function useEditorBars(extensions: readonly StudioExtension[], host: BarH
     </div>
   ) : null;
   const replaced = (control: ReplaceableControl) => barReplaces(placement, control, failed);
-  return { above, below, replaced };
+  // Marks only from bars in a row on screen that haven't failed: hidden, in the menu or crashed, a bar marks nothing.
+  const showing = [...placement.above, ...placement.below].filter((extension) => !failed.includes(extension.name));
+  const owned = showing.flatMap((extension) => (marked[extension.name] ? rebaseMarks(marked[extension.name].marks, marked[extension.name].basis, host.shown).map((mark) => ({ mark, name: extension.name })) : []));
+  const activate = (offset: number) => {
+    const hit = owned.find(({ mark }) => mark.start <= offset && offset <= mark.end);
+    const handler = hit && activators.current.get(hit.name);
+    if (!hit || !handler) return;
+    try {
+      handler(hit.mark);
+    } catch (error) {
+      report(hit.name, 'editorBar', error);
+    }
+  };
+  return { above, below, replaced, marks: owned.map(({ mark }) => mark), activate };
+}
+
+/** The enabled extensions offering a picker tab for this form, in compiled order. */
+export function pickerSources(extensions: readonly StudioExtension[], form: PickerForm) {
+  return extensions.filter((extension) => extension.pickerSource && (extension.pickerSource.forms ?? ['link']).includes(form));
+}
+
+/** At most this many results a tab; a source should narrow by the query rather than list everything. */
+export const MAX_PICKER_RESULTS = 50;
+const ITEM_ID = new RegExp(`^${ID}$`);
+
+/**
+ * A source's results as the picker can use them: item ids only (the picker names items), each
+ * once, with a one-line excerpt and label, at most MAX_PICKER_RESULTS. Anything else is dropped.
+ */
+export function pickerResults(results: unknown): PickerResult[] {
+  if (!Array.isArray(results)) return [];
+  const seen = new Set<string>();
+  const line = (value: unknown) => (typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '');
+  const out: PickerResult[] = [];
+  for (const result of results) {
+    const id = (result as PickerResult | null)?.id;
+    if (typeof id !== 'string' || !ITEM_ID.test(id) || seen.has(id)) continue;
+    seen.add(id);
+    const label = line((result as PickerResult).label);
+    const meta = line((result as PickerResult).meta);
+    out.push({ id, excerpt: line((result as PickerResult).excerpt) || label || id, ...(label ? { label } : {}), ...(meta ? { meta } : {}) });
+    if (out.length === MAX_PICKER_RESULTS) break;
+  }
+  return out;
+}
+
+/** Runs one source's search with its own context; a failure goes in the log under its name and is rethrown for the picker to show. */
+export async function searchPickerSource(extension: StudioExtension, host: HostContext<PickerSourceContext>): Promise<PickerResult[]> {
+  try {
+    return pickerResults(await extension.pickerSource!.search(extensionContext<PickerSourceContext>(extension, 'pickerSource', host)));
+  } catch (error) {
+    if (host.signal.aborted) return [];
+    report(extension.name, 'pickerSource', error);
+    throw asError(error);
+  }
 }

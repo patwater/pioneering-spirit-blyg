@@ -12,6 +12,7 @@ import type { ReactNode, RefObject } from 'react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useLiveQuery, useLiveInfiniteQuery, and, eq } from '@tanstack/react-db';
 import { Link, useNavigate, useBlocker } from '@tanstack/react-router';
+import { OWN } from './reader-links.tsx';
 import { formatDateIn } from '../dates.ts';
 import { renderMarkdown } from '../markdown.ts';
 import { linkInline } from '../grammar.ts';
@@ -20,11 +21,11 @@ import { parseComments, withoutComments } from '../comments.ts';
 import { extractDirectives } from '../directives.ts';
 import { previewFromHtml } from '../preview.ts';
 import { CHANGE_CATEGORIES, composeNote, noteIsGenerated, recategorize, type ChangeCategory } from '../change-category.ts';
-import type { ListItemsResponses, Version } from '../../sdk/dist/browser.js';
+import type { GenerationSource, ListItemsResponses, Version } from '../../sdk/dist/browser.js';
 import { BlyggerApi, BlyggerApiError, unwrap } from '../../sdk/dist/browser.js';
 import type { DraftCounterContext, EditorBarContext } from './extension-api.ts';
 import type { Detail } from './data.ts';
-import { client, items, itemVersions, itemSummary, itemDetail, createDraftAction, settings as settingsCollection, listViews, preloadView } from './data.ts';
+import { client, items, itemVersions, itemPrivateVersions, itemSummary, itemDetail, createDraftAction, settings as settingsCollection, listViews, preloadView } from './data.ts';
 import {
   ActionBar,
   Button,
@@ -41,9 +42,11 @@ import { Sheet, confirm, menu, prompt, toast } from './sheets.tsx';
 import { Tooltip } from './primitives.tsx';
 import { compiledExtensions } from '../../build/extensions.ui.ts';
 import { DraftCounterSlot, editorRegions, enabledExtensions, useEditorBars, type HostContext } from './extensions.tsx';
-import { join, rebase, split, toFull, toShown, touches } from './editor-regions.ts';
+import { join, rebase, split, toFull, toShown, touches, touchesRange } from './editor-regions.ts';
+import { MarksLayer } from './editor-marks.tsx';
 import type { EditorRegion } from './editor-regions.ts';
 import { HandlePicker } from './contacts.tsx';
+import { editSyndication } from './syndication.tsx';
 import { ownEntry, ownIds, Shelf, shelfLabel, toggleShelf, useShelf } from './shelf.tsx';
 import { applyEdit, breakEdit, codeBlockEdit, formulaEdit, indentEdit, onFormatKey } from './format-shortcuts.ts';
 import { BracketPicker } from './picker.tsx';
@@ -99,7 +102,9 @@ function useAction() {
         }
       } catch (error) {
         backgroundError.current = true;
-        setError(error);
+        // A queued transaction may reject without a reason. Failure needs a
+        // visible value, and a thrown function must not become a state updater.
+        setError(() => error || new Error('The editor action failed. Please try again.', { cause: error }));
       }
     },
     run: async (fn: () => Promise<unknown>) => {
@@ -118,7 +123,7 @@ function useAction() {
         )
           setWarning(result.warning);
       } catch (error) {
-        setError(error);
+        setError(() => error || new Error('The editor action failed. Please try again.', { cause: error }));
       } finally {
         pending.current--;
         setBusy(pending.current > 0);
@@ -610,6 +615,14 @@ function PublishedBanner({
 }) {
   const sharing = useSharing();
   if (!published) return null;
+  // Version 0 is a private version: nothing went public, so nothing to link or share.
+  if (published.version === 0) return (
+    <div className="published" role="status" id="published-banner">
+      <span className="mark" aria-hidden="true">✓</span>
+      <span className="txt">added a private version; nothing was published</span>
+      <Button className="x" aria-label="dismiss" onClick={dismiss}>×</Button>
+    </div>
+  );
   return (
     <div className="published" role="status" id="published-banner">
       <span className="mark" aria-hidden="true">
@@ -791,7 +804,7 @@ type Classified = {
   probability: number | null;
   reason?: string;
 };
-type PublishCommand = { type: 'publish'; note: string; generated: boolean; category?: ChangeCategory | null };
+type PublishCommand = { type: 'publish'; note: string; generated: boolean; category?: ChangeCategory | null; visibility?: 'public' | 'private' };
 
 /**
  * Publish, and when the thread's `![[+ …]]` spans would make new items, say
@@ -1017,6 +1030,7 @@ type Filter = keyof typeof FILTERS;
 
 export function Compose({ q }: { q?: string } = {}) {
   useChrome({ framed: false });
+  const settings = useSettings();
   const navigate = useNavigate();
   // Search (docs/search.md): this blyg only by default, drafts included.
   const [scope, setScope] = useState<'mine' | 'all'>(() => stored('blyg.compose.searchScope', ['mine', 'all'] as const, 'mine'));
@@ -1146,7 +1160,13 @@ export function Compose({ q }: { q?: string } = {}) {
             value={text}
             {...textareaProps(upload, tools)}
             onChange={(e) => change(upload.command(e.target.value))}
+            spellCheck={bars.replaced('spellcheck') ? false : undefined}
+            onClick={(e) => {
+              const el = e.currentTarget;
+              if (el.selectionStart === el.selectionEnd) bars.activate(el.selectionStart);
+            }}
           />
+          <MarksLayer input={input} text={text} marks={bars.marks} />
           <BracketPicker
             input={input}
             text={text}
@@ -1205,7 +1225,7 @@ export function Compose({ q }: { q?: string } = {}) {
               disabled={action.busy}
               onClick={() => void action.run(publish)}
             >
-              publish
+              {settings?.defaultVisibility === 'private' ? 'add version' : 'publish'}
             </DesignButton>
           </div>
         </div>
@@ -1288,6 +1308,7 @@ export function Compose({ q }: { q?: string } = {}) {
 }
 function rowDot(item: Row) {
   if (item.status === 'withdrawn') return 'withdrawn';
+  if (item.status === 'private') return 'private';
   if (item.version === 0) return 'draft';
   return item.dirty ? 'dirty' : 'public';
 }
@@ -1505,7 +1526,7 @@ function ItemRow({
                   disabled={action.busy}
                   onClick={() => mutate(publishRow)}
                 >
-                  publish
+                  {settings?.defaultVisibility === 'private' && item.version === 0 ? 'add version' : 'publish'}
                 </Button>
               </div>
               <Help className="hint" />
@@ -1581,7 +1602,7 @@ function ItemRow({
                 disabled={action.busy}
                 onClick={() => mutate(publishRow)}
               >
-                {item.status === 'withdrawn' ? 'republish' : 'publish'}
+                {item.status === 'withdrawn' ? 'republish' : item.status === 'private' ? 'publish publicly' : 'publish'}
               </Button>
             ) : null}
             {item.version === 0 ? (
@@ -1741,6 +1762,13 @@ function useBars({ input, text, shown, change, item, regions, run }: {
       replace(start, end, insert);
     },
     replace,
+    select: (start, end) => {
+      const el = input.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(start, end);
+      revealCaret(el);
+    },
     regions,
   });
 }
@@ -1815,6 +1843,9 @@ function useHeldOut(
   const [showing, setShowing] = useState(false);
   const [failed, setFailed] = useState(false);
   const [, refuse] = useState(0);
+  type NativeInsertion = { before: string; next: string; input: InputEvent; hit: EditorRegion | undefined };
+  const pendingInsertion = useRef<NativeInsertion | undefined>(undefined);
+  const nativeInsertions = useRef(new WeakMap<Event, NativeInsertion>());
   const found = (full: string): EditorRegion[] =>
     editorRegions(enabledExtensions(compiledExtensions, settings?.extensions), {
       text: full,
@@ -1827,12 +1858,14 @@ function useHeldOut(
   const parts = split(text, regions);
   const hiding = regions.length > 0 && !showing;
   /** `caret` is the text box's caret after a typed edit; tools that set the text leave it out. */
-  const change = (next: string, caret?: number) => {
+  const change = (next: string, caret?: number, nativeEvent?: Event) => {
     const full = current();
+    const offered = nativeEvent ? nativeInsertions.current.get(nativeEvent) : undefined;
+    if (nativeEvent) nativeInsertions.current.delete(nativeEvent);
     const now = regionsOf(full);
     if (!now.length) return edit(next);
     if (!hiding) {
-      const hit = touches(now, full, next, caret);
+      const hit = offered?.before === full && offered.next === next ? offered.hit : touches(now, full, next, caret);
       if (!hit) return edit(next);
       toast(`The ${hit.label} is read-only here.`);
       // The text box is controlled; a render puts back what it showed.
@@ -1847,6 +1880,41 @@ function useHeldOut(
     }
     edit(joined);
   };
+  // Matching bytes can hide a protected selection, or make an allowed edge
+  // insertion look interior. Keep the offered insertion until its actual input
+  // event, then bind that exact event to its source judgment. Deletions and tools
+  // still use the post-change guard; browser history remains native.
+  useEffect(() => {
+    const el = input.current;
+    if (!el || hiding) return;
+    const protectSelection = (event: InputEvent) => {
+      pendingInsertion.current = undefined;
+      if (event.defaultPrevented || !event.inputType.startsWith('insert')) return;
+      const before = current(), start = el.selectionStart, end = el.selectionEnd;
+      const hit = touchesRange(regionsOf(before), before.length, start, end);
+      if (hit && event.cancelable) {
+        event.preventDefault();
+        toast(`The ${hit.label} is read-only here.`);
+        return;
+      }
+      const inserted = event.inputType === 'insertLineBreak' || event.inputType === 'insertParagraph' ? '\n' : event.data;
+      if (inserted !== null) pendingInsertion.current = { before, next: before.slice(0, start) + inserted + before.slice(end), input: event, hit };
+    };
+    const receiveInsertion = (event: Event) => {
+      const { inputType, data } = event as InputEvent;
+      const offered = pendingInsertion.current;
+      pendingInsertion.current = undefined;
+      if (offered && !offered.input.defaultPrevented && inputType === offered.input.inputType && data === offered.input.data
+        && current() === offered.before && el.value === offered.next) nativeInsertions.current.set(event, offered);
+    };
+    el.addEventListener('beforeinput', protectSelection);
+    el.addEventListener('input', receiveInsertion, true);
+    return () => {
+      pendingInsertion.current = undefined;
+      el.removeEventListener('beforeinput', protectSelection);
+      el.removeEventListener('input', receiveInsertion, true);
+    };
+  }, [input, hiding, regionsOf, current]);
   const toggle = () => {
     const el = input.current;
     const caret = el ? (hiding ? toFull(el.selectionStart, parts.held) : toShown(el.selectionStart, text, regions)) : 0;
@@ -2090,7 +2158,8 @@ function Editor({ item, onDiscarding }: { item: Detail; onDiscarding?: (active: 
   const confirmNote = useNoteConfirm(write);
   const [preview, setPreview] =
     useState<Awaited<ReturnType<typeof getPreview>>>();
-  const [version, setVersion] = useState<Version>();
+  // The version in the viewer: a public one (v3) or a private one (p2).
+  const [version, setVersion] = useState<{ label: string; contentHtml: string }>();
   const [saved, setSaved] = useState(false);
   const [replacing, setReplacingState] = useState(false);
   const replacementPending = useRef(false);
@@ -2238,7 +2307,37 @@ function Editor({ item, onDiscarding }: { item: Detail; onDiscarding?: (active: 
   };
   const generate = async (scope: number) => {
     const revision = draft.current!.revision;
-    const result = await write({ type: 'generate', scope });
+    let result = await write({ type: 'generate', scope });
+    // Links in the draft that could not be read (decision #117): the author
+    // decides whether to generate without them. Nothing was saved yet.
+    if ('checkpoint' in result) {
+      const { read, total, failed } = result.checkpoint;
+      const go = await confirm({
+        title: `${failed.length} of ${total} ${total === 1 ? 'link' : 'links'} in the draft could not be read. Generate anyway?`,
+        body: (
+          <>
+            <p className="hint">
+              {read ? `The ${read} that could be read will be drawn on and listed as sources. ` : ''}
+              The model sees only the address of the others, so it should not describe them.
+            </p>
+            <details className="tk-checkpoint-details">
+              <summary>Details</summary>
+              <ul>
+                {failed.map((f) => (
+                  <li key={f.link}>
+                    <code>{f.link}</code>: {f.reason}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          </>
+        ),
+        ok: 'generate anyway',
+      });
+      if (!go) return;
+      result = await write({ type: 'generate', scope, proceed: true });
+      if ('checkpoint' in result) return;
+    }
     // `text` is the scope's output alone; the draft is the whole document with
     // it spliced in, which the server has already saved. Replacing the draft
     // with `text` threw away everything around the scope (0.10.0–0.27.1).
@@ -2254,11 +2353,11 @@ function Editor({ item, onDiscarding }: { item: Detail; onDiscarding?: (active: 
       return;
     await write({ type: 'pin', version });
   };
-  const publish = () =>
+  const publish = (visibility?: 'public') =>
     operation(async () => {
       const choice = await confirmNote.request(item, note, drafted, historyNote);
       if (!choice) return;
-      const done = await publishTangle(write, { type: 'publish', note: choice.note, generated: choice.generated, category: choice.category }, () => item.id);
+      const done = await publishTangle(write, { type: 'publish', note: choice.note, generated: choice.generated, category: choice.category, ...(visibility ? { visibility } : {}) }, () => item.id);
       if (!done) return;
       if (done.source !== undefined) {
         draft.current!.accept(done.source);
@@ -2270,6 +2369,22 @@ function Editor({ item, onDiscarding }: { item: Detail; onDiscarding?: (active: 
       setPublished({ id: item.id, kind: item.kind, md: draft.current!.text, version: done.result.version });
       return done.result;
     });
+  // A private version (decision #94): nothing public changes, so no note dialog.
+  const keepPrivately = () =>
+    operation(async () => {
+      const result = await write({ type: 'publish', note: '', generated: false, visibility: 'private' });
+      toast('Added a private version. Nothing was published.', { tone: 'ok' });
+      return result;
+    });
+  // A private-default blyg (Venkat, 2026-11-22): one button, the radio says
+  // which kind of version. Going public asks first, since it can't be undone.
+  const notebook = settings?.defaultVisibility === 'private' && item.version === 0;
+  const [visibility, setVisibility] = useState<'public' | 'private'>('private');
+  const addVersion = async () => {
+    if (visibility === 'private') return keepPrivately();
+    const ok = await confirm({ title: 'Make this item public? Anyone can read it once published, and it can never be private again.', ok: 'make public' });
+    if (ok) publish('public');
+  };
   const focus = useFocusView(input, held.box, pane, setPane);
   const bars = useBars({
     input,
@@ -2344,7 +2459,14 @@ function Editor({ item, onDiscarding }: { item: Detail; onDiscarding?: (active: 
   const more = () =>
     void menu({
       rows: [
-        item.status === 'draft' && {
+        item.version === 0 && settings?.defaultVisibility !== 'private' && {
+          icon: '◌',
+          label: 'publish privately',
+          description: 'keep a version only you can see; publishing makes it public as v1',
+          disabled: action.busy,
+          onSelect: () => void keepPrivately(),
+        },
+        item.version === 0 && {
           icon: '⇄',
           label: `make this a ${isThread ? 'fragment' : 'thread'}`,
           onSelect: () => operation(switchKind),
@@ -2396,6 +2518,13 @@ function Editor({ item, onDiscarding }: { item: Detail; onDiscarding?: (active: 
           description: isPublic ? undefined : 'it shows on a public hopper once published',
           disabled: action.busy,
           onSelect: () => void action.run(addToHopper),
+        },
+        isPublic && {
+          icon: '⇉',
+          label: 'copies elsewhere…',
+          description: 'list where you posted this on other networks; it makes no new version',
+          disabled: action.busy,
+          onSelect: () => void editSyndication(item.id, item.version, (entries) => write({ type: 'syndication', entries })),
         },
         isPublic && {
           icon: '📌',
@@ -2561,7 +2690,7 @@ function Editor({ item, onDiscarding }: { item: Detail; onDiscarding?: (active: 
           disabled={replacing}
           className="ed-tools"
         >
-          {item.status === 'draft' ? (
+          {item.version === 0 ? (
             <Tooltip label={`make this a ${isThread ? 'fragment' : 'thread'}`}>
               <Button
                 className="act icon-only tool"
@@ -2637,12 +2766,18 @@ function Editor({ item, onDiscarding }: { item: Detail; onDiscarding?: (active: 
               ref={input}
               value={held.box}
               {...textareaProps(upload, tools)}
+              spellCheck={bars.replaced('spellcheck') && !focus.active ? false : undefined}
+              onClick={(e) => {
+                const el = e.currentTarget;
+                if (!focus.active && el.selectionStart === el.selectionEnd) bars.activate(el.selectionStart);
+              }}
               onChange={(event) => {
                 const typed = event.target.value;
                 const next = upload.command(typed);
-                held.change(next, next === typed ? event.target.selectionEnd : undefined);
+                held.change(next, next === typed ? event.target.selectionEnd : undefined, event.nativeEvent);
               }}
             />
+            <MarksLayer input={input} text={held.box} marks={focus.active ? [] : bars.marks} />
             {!replacing ? (
               <BracketPicker
                 input={input}
@@ -2664,6 +2799,11 @@ function Editor({ item, onDiscarding }: { item: Detail; onDiscarding?: (active: 
               <a href={publicPath(shareable)} target="_blank" rel="noreferrer">
                 public permalink ↗
               </a>
+            ) : item.status === 'private' ? (
+              // A private item has no public page; the owner's reader shows its latest private version.
+              <Link to="/reading/$sub/$id" params={{ sub: OWN, id: item.id }} data-action="reader-view">
+                reader view
+              </Link>
             ) : null}
           </div>
           <SyntaxHelp>
@@ -2767,6 +2907,7 @@ function Editor({ item, onDiscarding }: { item: Detail; onDiscarding?: (active: 
                           )}
                         </ul>
                       ) : null}
+                      {scope.hasOutput ? <ReadForScope sources={item.provenance[scope.index]?.sources} instructionIds={scope.sources?.map((s) => s.id) ?? []} /> : null}
                     </>
                   )}
                 </li>
@@ -2915,10 +3056,13 @@ function Editor({ item, onDiscarding }: { item: Detail; onDiscarding?: (active: 
           setOpen={setHistoryOpen}
           summary="history"
           hint={
-            item.version ? `${item.version} version${item.version === 1 ? '' : 's'}` : ''
+            item.version ? `${item.version} version${item.version === 1 ? '' : 's'}` : item.status === 'private' ? 'private' : ''
           }
         >
-          {!item.version ? <p className="hint">Not yet published.</p> : historyOpen ? <VersionHistory item={item} select={setVersion} pinBusy={action.busy} restoreBusy={action.busy || upload.action.busy} pin={version => action.run(() => pin(version))} restore={version => action.run(() => restore(version))} /> : null}
+          {!item.version && item.status !== 'private' ? <p className="hint">Not yet published.</p> : historyOpen ? <>
+            {item.version ? <VersionHistory item={item} select={v => setVersion({ label: `v${v.version}`, contentHtml: v.contentHtml })} pinBusy={action.busy} restoreBusy={action.busy || upload.action.busy} pin={version => action.run(() => pin(version))} restore={version => action.run(() => restore(version))} /> : null}
+            <PrivateHistory item={item} select={v => setVersion({ label: `p${v.version}`, contentHtml: v.contentHtml })} />
+          </> : null}
         </Card>
       </div>
       {confirmNote.element}
@@ -2927,7 +3071,7 @@ function Editor({ item, onDiscarding }: { item: Detail; onDiscarding?: (active: 
       <Modal
         open={!!version}
         close={() => setVersion(undefined)}
-        title={`version ${version?.version}`}
+        title={`version ${version?.label}`}
       >
         <Html id="h-viewer-body" html={version?.contentHtml ?? ''} />
       </Modal>
@@ -2953,15 +3097,31 @@ function Editor({ item, onDiscarding }: { item: Detail; onDiscarding?: (active: 
         >
           save draft
         </DesignButton>
-        <DesignButton
-          size="small"
-          id="publish-btn"
-          variant="primary"
-          disabled={action.busy}
-          onClick={publish}
-        >
-          {item.status === 'withdrawn' ? 'republish' : 'publish'}
-        </DesignButton>
+        {notebook ? (
+          <>
+            <span className="visibility-choice" role="radiogroup" aria-label="kind of version">
+              {(['private', 'public'] as const).map((value) => (
+                <label className="check" key={value}>
+                  <input type="radio" name="visibility" value={value} checked={visibility === value} onChange={() => setVisibility(value)} />
+                  <span>{value}</span>
+                </label>
+              ))}
+            </span>
+            <DesignButton size="small" id="publish-btn" variant="primary" disabled={action.busy} onClick={() => void addVersion()}>
+              add version
+            </DesignButton>
+          </>
+        ) : (
+          <DesignButton
+            size="small"
+            id="publish-btn"
+            variant="primary"
+            disabled={action.busy}
+            onClick={() => publish()}
+          >
+            {item.status === 'withdrawn' ? 'republish' : item.status === 'private' ? 'publish publicly' : 'publish'}
+          </DesignButton>
+        )}
       </ActionBar>
     </div>
   );
@@ -3365,6 +3525,30 @@ const getPreview = (
     }),
   );
 
+// Private versions (decision #94), numbered p1, p2, … apart from the public
+// counter. They stay listed after the item goes public: studio history.
+function PrivateHistory({ item, select }: { item: Detail; select: (version: { version: number; contentHtml: string }) => void }) {
+  const history = useLiveInfiniteQuery(q => q.from({ version: itemPrivateVersions })
+    .where(({ version }) => eq(version.itemId, item.id)).orderBy(({ version }) => version.version, { direction: 'desc', stringSort: 'lexical' }), { pageSize: 25 });
+  if (history.status === 'error') return <Failure error={new Error('Could not load private history.')} />;
+  if (!history.data.length) return history.isLoading ? <p className="hint">Loading private history…</p> : null;
+  return <section data-private-history>
+    <p className="hint">private versions: studio history, never published</p>
+    <ul className="h-list">
+      {history.data.map((v) => (
+        <li className="h-row" key={v.version}>
+          <strong className="vnum">p{v.version}</strong>{' '}
+          <span className="h-note">{v.note}</span>{' '}
+          <span className="h-actions">
+            <Button data-action="view-private-version" className="btn btn-ghost btn-mini" onClick={() => select(v)}>view</Button>
+          </span>
+        </li>
+      ))}
+    </ul>
+    {history.hasNextPage ? <Button disabled={history.isFetchingNextPage} onClick={() => void history.fetchNextPage()}>load older private versions</Button> : null}
+  </section>;
+}
+
 function VersionHistory({ item, select, pin, restore, pinBusy, restoreBusy }: {
   item: Detail; select: (version: Version) => void; pin: (version: number) => Promise<unknown>;
   restore: (version: number) => Promise<unknown>; pinBusy: boolean; restoreBusy: boolean;
@@ -3446,4 +3630,32 @@ function VersionHistory({ item, select, pin, restore, pinBusy, restoreBusy }: {
             </ul>
     {history.hasNextPage ? <Button disabled={history.isFetchingNextPage} onClick={() => void history.fetchNextPage()}>load older versions</Button> : null}
   </>;
+}
+
+/**
+ * What the last generation of a scope read beyond its instruction's own
+ * sources (decision #117): the web pages and linked items it drew on, as the
+ * published version will disclose them. Shown so the author reviews the
+ * disclosure, and which of it will tell another blyg, before publishing.
+ */
+function ReadForScope({ sources, instructionIds }: { sources: GenerationSource[] | undefined; instructionIds: string[] }) {
+  const read = (sources ?? []).filter((s) => !('id' in s) || !instructionIds.includes(s.id));
+  if (!read.length) return null;
+  return (
+    <ul className="tk-sources tk-read">
+      {read.map((s) =>
+        'url' in s ? (
+          <li key={s.url}>
+            read <a href={s.url} target="_blank" rel="noopener noreferrer">{s.cited.source}</a>
+            {s.cited.excerpt ? <> · <q>{s.cited.excerpt}</q></> : null}
+          </li>
+        ) : (
+          <li key={s.id}>
+            read the linked item <code>[[{s.id}]]</code>
+            {s.origin ? <span className="hint"> · from {s.cited?.source ?? new URL(s.origin).host}; its author is told when you publish</span> : null}
+          </li>
+        ),
+      )}
+    </ul>
+  );
 }

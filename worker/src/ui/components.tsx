@@ -5,11 +5,12 @@ import {
   useContext,
   useEffect,
   useLayoutEffect,
+  useRef,
   useState,
   useSyncExternalStore,
 } from 'react';
 import { Button } from '@base-ui/react/button';
-import { Link, useLocation } from '@tanstack/react-router';
+import { Link, useLocation, useRouter } from '@tanstack/react-router';
 import { eq, useLiveQuery, type Collection } from '@tanstack/react-db';
 import { CancelledError, type QueryClient } from '@tanstack/query-core';
 import {
@@ -23,6 +24,7 @@ import { readState } from '../versions.ts';
 import { displayUrl } from '../importer/util.ts';
 import { Sheet } from './sheets.tsx';
 import { errorLog, type ErrorSource } from './error-log.ts';
+import { useGeneratedHighlight } from './generated-highlight.ts';
 import { SetupBanner } from './setup.tsx';
 import { compiledExtensions } from '../../build/extensions.ui.ts';
 import type { StudioExtension } from './extension-api.ts';
@@ -62,6 +64,34 @@ export function SourceLink({ url }: { url?: string | null }) {
       {displayUrl(url)}
     </a>
   ) : null;
+}
+/**
+ * §16.14: copies the publisher says they made on other networks. Shown as the
+ * publisher's claim and nothing more: never folded with another post, never
+ * read as naming the author's account. https: only (the server filters too).
+ */
+export function CopiesElsewhere({ entries }: { entries?: readonly { url: string; version: number }[] | null }) {
+  const copies = (entries ?? []).filter((entry) => {
+    try {
+      return new URL(entry.url).protocol === 'https:';
+    } catch {
+      return false;
+    }
+  });
+  if (!copies.length) return null;
+  return (
+    <p className="entry-src entry-syndication">
+      the author says it is also at{' '}
+      {copies.map((entry, index) => (
+        <span key={entry.url}>
+          {index ? ', ' : ''}
+          <a href={entry.url} target="_blank" rel="noreferrer" title={`copy of v${entry.version}`}>
+            {new URL(entry.url).hostname}
+          </a>
+        </span>
+      ))}
+    </p>
+  );
 }
 export function Html({ html, id }: { html: string; id?: string }) {
   return <div id={id} dangerouslySetInnerHTML={{ __html: html }} />;
@@ -212,20 +242,80 @@ export async function retryReadProblems(sources: readonly ReadSource[], client: 
 const subscribeReadProblems = (notify: () => void) => subscribeReadHealth(readSources, notify);
 const readProblemSnapshot = () => currentReadProblem(readSources);
 
+/**
+ * A transient read failure retries on its own, and is shown (and so logged)
+ * only if it outlasts READ_BANNER_MS. Waking a phone or iPad refetches every
+ * collection at once, often before the network is back; Safari says "Load
+ * failed", and a cursor walked across the sleep has expired. Those heal in a
+ * second or two and are not the owner's business. A real outage still shows,
+ * with "retry reads"; retries back off while it lasts. Any other failure (a
+ * server error, a refused page) shows at once, as before: retrying it would
+ * restart the window and quietly drop the page that was asked for.
+ */
+export const READ_RETRY_MS = 2_000;
+export const READ_BANNER_MS = 6_000;
+const READ_RETRY_MAX_MS = 60_000;
+/** A network failure, or a cursor that expired while it was walked: both heal on a fresh read. */
+export function transientReadProblem(problem: Error): boolean {
+  const error = problem.cause instanceof Error ? problem.cause : problem;
+  if (error instanceof TypeError) return true;
+  const body = 'body' in error && typeof error.body === 'object' && error.body ? error.body as Record<string, unknown> : undefined;
+  return body?.code === 'cursor-expired';
+}
+function useSettledReadProblem(problem: Error | undefined): Error | undefined {
+  const [shown, setShown] = useState<Error>();
+  const attempts = useRef(0);
+  // When this run of failures began: a retry that fails again is a new error
+  // object, and must not restart the banner's delay.
+  const since = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (!problem) {
+      attempts.current = 0;
+      since.current = undefined;
+      setShown(undefined);
+      return;
+    }
+    if (!transientReadProblem(problem)) {
+      setShown(problem);
+      return;
+    }
+    since.current ??= Date.now();
+    const delay = Math.min(READ_RETRY_MS * 2 ** attempts.current, READ_RETRY_MAX_MS);
+    const retry = setTimeout(() => {
+      attempts.current++;
+      void retryReadProblems(readSources);
+    }, delay);
+    const show = setTimeout(() => setShown(problem), Math.max(0, since.current + READ_BANNER_MS - Date.now()));
+    return () => {
+      clearTimeout(retry);
+      clearTimeout(show);
+    };
+  }, [problem]);
+  return problem ? shown : undefined;
+}
+
 export function Layout({ children }: { children: ReactNode }) {
   const settings = useSettings();
+  useGeneratedHighlight(settings?.highlightGeneratedDefault);
   const update = useUpdateState();
   const path = relativePath(useLocation({ select: (l) => l.pathname }));
-  const active = tabFor(path);
+  // In Notebook mode, private (just above compose) is the reader on the private source.
+  const privateSource = useLocation({ select: (l) => (l.search as { sub?: string }).sub === 'private' });
+  const privateActive = path.replace(/\/+$/, '') === '/reading' && privateSource;
+  const notebook = settings?.defaultVisibility === 'private';
+  const active = privateActive ? null : tabFor(path);
   const [chrome, setChrome] = useState<ChromeOptions>({});
   const showTabs = chrome.tabs ?? true;
   const framed = chrome.framed ?? true;
   const wide = chrome.wide ?? (path === '/reading' || path.startsWith('/edit/'));
+  const router = useRouter();
   const readProblem = useSyncExternalStore(subscribeReadProblems, readProblemSnapshot);
-  const error = readProblem?.cause ?? readProblem;
+  const shownProblem = useSettledReadProblem(readProblem);
+  const error = shownProblem?.cause ?? shownProblem;
   // The studio wears the reading theme. Until settings load, the theme
   // applied at startup (the last one seen on this device) stays.
-  const theme = settings?.theme;
+  // The Studio may wear its own palette (studioTheme, session 78); empty wears the public one.
+  const theme = settings ? settings.studioTheme || settings.theme : undefined;
   // The palettes as strings, so the effect re-runs on a changed colour but not
   // on every new settings object with the same values.
   const customKey = settings?.customTheme
@@ -325,7 +415,9 @@ export function Layout({ children }: { children: ReactNode }) {
             <Button
               className="btn btn-ghost btn-mini"
               onClick={() => {
-                void retryReadProblems(readSources);
+                // Pages draw before their lists load (session 79), so a list
+                // that failed there is reloaded by its route's loader too.
+                void retryReadProblems(readSources).then(() => router.invalidate());
               }}
             >
               retry reads
@@ -341,6 +433,21 @@ export function Layout({ children }: { children: ReactNode }) {
           {tabs.flatMap((tab) => [
             // The Studio's spot for visible extension pages: just above compose.
             ...(tab.label === 'compose' ? menu.visible.map(extensionTab) : []),
+            ...(tab.label === 'compose' && notebook
+              ? [
+                  <Link
+                    key="private"
+                    to="/reading"
+                    search={{ sub: 'private' }}
+                    className={privateActive ? 'tab is-active' : 'tab'}
+                    aria-current={privateActive ? 'page' : undefined}
+                    data-tab="private"
+                  >
+                    <span className="ti" aria-hidden="true">◇</span>
+                    <span className="tl">private</span>
+                  </Link>,
+                ]
+              : []),
             <Link
               key={tab.label}
               to={tab.to}

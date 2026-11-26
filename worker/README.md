@@ -12,7 +12,7 @@ transcludes and responds across them.
 > implementations. Blygger uses static files and RSS. You can write your own
 > client if this client's choices do not suit you. Several people already do.
 
-**Want to change something?** Start with [where does my change belong?](docs/where-does-it-go.md):
+**Want to change something?** Start with [where does my change belong? (TN-8)](https://blygger.org/notes/tn-8/):
 a spec question, a pull request here, a tool, an extension, a mod or a local patch,
 with a test for each and a first hour on a local node. See also [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -395,7 +395,7 @@ The archive does not include `npm run upgrade`. Use these steps for each release
 For the0.49.8 revision cutover, finish pending writes, including generation,
 before invoking the updater. Avoid edits until deployment finishes.
 
-Commit local changes first, including your deployment config, then run. Keep each local patch as its own `local:` commit, not a stash (see [where does my change belong?](docs/where-does-it-go.md#local-patches)):
+Commit local changes first, including your deployment config, then run. Keep each local patch as its own `local:` commit, not a stash (see [where does my change belong?](https://blygger.org/notes/tn-8/#local-patches)):
 
 ```sh
 npm run upgrade
@@ -426,6 +426,9 @@ and then publishes the downloads at that tag. Merges to `main` do not release.
 Before tagging, bump `package.json`, the root versions in `package-lock.json`,
 and `CLIENT.version` in `src/client.ts`. Add a matching changelog entry with a
 **Migrations:** line. Bump `sdk/package.json` when its public API changes.
+If the release brings something an owner should hear about, add its lines to
+`HIGHLIGHTS` in `src/ui/whats-new.ts`, and tag any setting it adds to the setup
+walk-through in `SINCE`: upgraded studios show them once, as a banner.
 Release CI rejects a tag that does not match `package.json`, or a version that
 is not newer than existing release tags.
 
