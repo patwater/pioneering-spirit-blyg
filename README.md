@@ -152,6 +152,24 @@ Blygger Desktop, Aneesh Sathe's native reading-and-writing app, is ported to Win
 cd burrow-blyg-windows- && BLYG_WORKER_DIR=../pioneering-spirit-blyg bash scripts/e2e-local.sh
 ```
 
+## Burrow in the browser
+
+Burrow's web app is served at https://blyg.pioneeringspirit.xyz/burrow/, beside `/studio` and `/api`. Open it in a browser where you are signed in to the studio and it shows your own posts and reading list, marked **Live**; signed out, it offers **Sign in at Studio**. On a phone, open the same address and use Share → Add to Home Screen (iOS) or Install app (Android). It needs no token, because it uses your studio session.
+
+**What you are trusting.** The studio's session cookie covers the whole host, so code at `/burrow/` can do anything you can do in the studio. The files are a release of [aneeshsathe/blygger-desktop](https://github.com/aneeshsathe/blygger-desktop), checked against its signed `SHA256SUMS` before they are committed. Every request the app makes goes through one function (`static/burrow/net.js`, `call`) that refuses anything but a same-origin `/api/` path, and it loads nothing from other hosts.
+
+**How it is served.** The release's `burrow/` folder is committed as `static/burrow/`, and `static/_headers` makes `/burrow/sw.js` revalidate so updates reach installed copies. `npm run build-archive` copies `static/` into `archive-site/`, which `wrangler.jsonc` serves as static assets, so no Worker code is involved.
+
+**Updating.** Follow steps 1 and 2 of Burrow's [self-hosting guide](https://aneeshsathe.github.io/blygger-desktop/web-self-host.html) to download the new `Burrow-web-<version>.zip` and verify its signature and checksum, then replace the folder whole and deploy:
+
+```bash
+rm -rf static/burrow && unzip -q Burrow-web-<version>.zip -d static
+```
+
+A Burrow web build refuses a studio whose private API contract is newer than it knows, so update it alongside the studio when a release moves the contract to a new major version.
+
+**Removing.** Delete `static/burrow/` and the `/burrow/sw.js` lines in `static/_headers`, then deploy.
+
 ## Keeping Blygger Studio current
 
 ```bash
