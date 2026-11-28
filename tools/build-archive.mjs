@@ -9,20 +9,26 @@
 //
 // A post whose front matter carries `redirect_to:` (for example, the thread
 // that superseded it) becomes a redirect page instead of a copy.
+//
+// Files committed under static/ are copied in after the archive is built,
+// because this script rebuilds archive-site/ from scratch. That is how the
+// Burrow web app at /burrow/ (static/burrow/) and the static/_headers rules
+// reach the deployed assets.
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const SRC = path.join(ROOT, "corpus", "paragraph");
 const OUT = path.join(ROOT, "archive-site");
+const STATIC = path.join(ROOT, "static");
 const require = createRequire(path.join(ROOT, "worker", "package.json"));
 const md = require("markdown-it")({ html: true, linkify: true, typographer: true });
 
 // Paths the blyg itself owns at the root mount. An old slug that collides with
 // one of these is skipped rather than allowed to shadow the protocol surface.
-const RESERVED = new Set(["", "f", "t", "h", "items", "media", "studio", "api", "archive", "webmention", "style.css", "feed.xml", "blyg.json", "blogroll.opml", "paragraph"]);
+const RESERVED = new Set(["", "f", "t", "h", "items", "media", "studio", "api", "archive", "webmention", "style.css", "feed.xml", "blyg.json", "blogroll.opml", "paragraph", "burrow"]);
 
 function readPost(file) {
   const raw = readFileSync(file, "utf8").replace(/\r\n/g, "\n");
@@ -116,3 +122,11 @@ writeFileSync(
   }),
 );
 console.log(`Built ${listed.length} archive pages into ${path.relative(ROOT, OUT)}/`);
+
+if (existsSync(STATIC)) {
+  // Never let a static file overwrite an archive page, or the other way round.
+  const clash = readdirSync(STATIC).filter((name) => existsSync(path.join(OUT, name)));
+  if (clash.length) throw new Error(`static/ and the archive both write ${clash.join(", ")}`);
+  cpSync(STATIC, OUT, { recursive: true });
+  console.log(`Copied static/ (${readdirSync(STATIC).join(", ")}) into ${path.relative(ROOT, OUT)}/`);
+}

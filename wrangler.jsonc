@@ -83,6 +83,12 @@
   // archive-site/ and served at their original URLs. A request that matches
   // a file is answered from assets; everything else falls through to the
   // blyg. The build never writes at "/" or at any blyg route.
+  //
+  // The build also copies static/ in: the Burrow web app at /burrow/
+  // (static/burrow/, a verified Burrow release; see the README) and
+  // static/_headers, which keeps /burrow/sw.js revalidating so updates reach
+  // installed copies. not_found_handling must stay "none", or the blyg's own
+  // pages stop reaching the Worker.
   "assets": {
     "directory": "archive-site",
     "html_handling": "auto-trailing-slash",
